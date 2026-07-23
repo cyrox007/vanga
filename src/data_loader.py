@@ -6,9 +6,7 @@ from src.utils import memory
 logger = setup_logger(__name__)
 
 def load_data(config) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    logger.info(
-        f"Loading IMDb data RAM={memory()}"
-    )
+    logger.info(f"Loading IMDb data RAM={memory()}")
 
     basics = pd.read_csv(
         config["basics_url"],
@@ -20,15 +18,11 @@ def load_data(config) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             "startYear",
             "runtimeMinutes"
         ],
-        dtype={
-            "primaryTitle":"string"
-        },
+        dtype={"primaryTitle":"string"},
         low_memory=False
     )
 
-    logger.info(
-        f"Basics loaded {len(basics)} rows RAM={memory()}"
-    )
+    logger.info(f"Basics loaded {len(basics)} rows RAM={memory()}")
 
     ratings = pd.read_csv(
         config["ratings_url"],
