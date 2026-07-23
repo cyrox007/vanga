@@ -11,20 +11,6 @@ df = preprocess_data(df_basics, df_ratings, df_crew)
 
 df, tfidf = process_text_features(df)
 
-# 4. Подготовка финального датасета
-def prepare_final_dataset(df):
-    features = [
-        'startYear',
-        'runtimeMinutes',
-        'director_avg_rating',
-        'is_remake'
-    ] + [col for col in df.columns if col.startswith('tfidf_')]
-
-    X = df[features]
-    y = df['averageRating']
-
-    return X, y
-
 X, y = prepare_final_dataset(df)
 
 # 5. Обучение модели
