@@ -2,14 +2,18 @@ import yaml
 import joblib
 import pandas as pd
 from src.data_loader import load_data
+from src.logger import setup_logger
 from src.preprocess import preprocess_data
 from src.features import build_text_features, prepare_feature_matrix
 from src.model_train import train_and_save_model
 from src.evaluate import evaluate_model, get_sample_comparison
 
+logger = setup_logger(__name__)
+
 def main():
     # Читаем конфиг
     with open('config/config.yaml', 'r') as f:
+        logger.info('Читаем конфиг')
         config = yaml.safe_load(f)
 
     # 1. Загрузка

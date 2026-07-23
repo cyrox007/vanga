@@ -1,45 +1,110 @@
 import pandas as pd
-import numpy as np
 from sklearn.impute import SimpleImputer
 
-def preprocess_data(df_basics, df_ratings, df_crew, sample_frac=None, random_state=None):
-    # Объединение
-    df = pd.merge(df_basics, df_ratings, on='tconst', how='inner')
-    df = pd.merge(df, df_crew[['tconst', 'directors']], on='tconst', how='left')
+from src.logger import setup_logger
+from src.utils import memory
 
-    # Обработка пропусков
-    df['primaryTitle'] = df['primaryTitle'].fillna('')
-    df['directors'] = df['directors'].fillna('Unknown')
-    df['is_remake'] = df['primaryTitle'].apply(
-        lambda x: 1 if isinstance(x, str) and 'remake' in x.lower() else 0
+
+logger = setup_logger(__name__)
+
+
+
+def preprocess(
+        basics,
+        ratings,
+        crew,
+        sample_frac,
+        random_state
+):
+    logger.info(
+        "Merge datasets"
     )
 
-    # Числовые колонки
-    df['runtimeMinutes'] = pd.to_numeric(df['runtimeMinutes'], errors='coerce')
-    df['startYear'] = pd.to_numeric(df['startYear'], errors='coerce')
-
-    # Заполнение медианой
-    num_imputer = SimpleImputer(strategy='median')
-    df[['runtimeMinutes', 'startYear']] = num_imputer.fit_transform(
-        df[['runtimeMinutes', 'startYear']]
+    df = basics.merge(
+        ratings,
+        on="tconst",
+        how="inner"
     )
 
-    # Средний рейтинг режиссёра
-    director_avg = df_crew.merge(
-        df[['tconst', 'averageRating']],
-        on='tconst',
-        how='left'
-    )
-    director_avg = director_avg.groupby('directors')['averageRating'].mean().reset_index()
     df = df.merge(
-        director_avg.rename(columns={'averageRating': 'director_avg_rating'}),
-        on='directors',
-        how='left'
+        crew,
+        on="tconst",
+        how="left"
     )
-    df['director_avg_rating'] = df['director_avg_rating'].fillna(df['averageRating'].mean())
 
-    # Сэмплирование (если нужно)
-    if sample_frac and sample_frac < 1.0:
-        df = df.sample(frac=sample_frac, random_state=random_state)
+    logger.info(
+        f"Merged rows={len(df)} RAM={memory()}"
+    )
 
-    return df, num_imputer   # возвращаем импьютер для сохранения
+    df["primaryTitle"] = (
+        df["primaryTitle"]
+        .fillna("")
+    )
+
+    df["directors"] = (
+        df["directors"]
+        .fillna("Unknown")
+    )
+
+    df["runtimeMinutes"] = pd.to_numeric(
+        df["runtimeMinutes"],
+        errors="coerce"
+    )
+
+    df["startYear"] = pd.to_numeric(
+        df["startYear"],
+        errors="coerce"
+    )
+
+    imputer = SimpleImputer(
+        strategy="median"
+    )
+
+    df[
+        [
+            "runtimeMinutes",
+            "startYear"
+        ]
+    ] = imputer.fit_transform(
+        df[
+            [
+            "runtimeMinutes",
+            "startYear"
+            ]
+        ]
+    )
+
+    df["is_remake"] = (
+        df["primaryTitle"]
+        .str.lower()
+        .str.contains("remake")
+        .astype(int)
+    )
+
+    director_rating = (
+        df.groupby("directors")["averageRating"].mean()
+    )
+
+    df["director_avg_rating"] = (
+        df["directors"].map(director_rating)
+    )
+
+    df["director_avg_rating"] = (
+        df["director_avg_rating"]
+        .fillna(
+            df["averageRating"].mean()
+        )
+    )
+
+    if sample_frac < 1:
+
+        df = df.sample(
+            frac=sample_frac,
+            random_state=random_state
+        )
+
+    logger.info(
+        f"Preprocess finished rows={len(df)}"
+    )
+
+    return df
