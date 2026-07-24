@@ -1,6 +1,11 @@
 asttokens==3.0.2
+hashing
+certifi==2026.7.22
+charset-normalizer==3.4.9
 decorator==5.3.1
+duckdb==1.5.5
 executing==2.2.1
+idna==3.18
 ipython==9.15.0
 ipython_pygments_lexers==1.1.1
 jedi==0.20.0
@@ -18,10 +23,12 @@ pure_eval==0.2.3
 Pygments==2.20.0
 python-dateutil==2.9.0.post0
 PyYAML==6.0.3
+requests==2.34.2
 scikit-learn==1.9.0
 scipy==1.18.0
 six==1.17.0
 stack-data==0.6.3
 threadpoolctl==3.6.0
 traitlets==5.15.1
+urllib3==2.7.0
 wcwidth==0.8.2

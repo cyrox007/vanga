@@ -1,4 +1,6 @@
 venv/
-data
+data/*
 __pycache__/
 .logs/*
+models/*
+*.duckdb

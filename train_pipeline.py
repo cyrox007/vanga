@@ -1,87 +1,45 @@
 import yaml
-import pandas as pd
-
+import datetime
+import json
+import os
+from src.db_utils import create_or_refresh_cache, get_db_connection
+from src.train_incremental import train_model_incremental
 from src.logger import setup_logger
-from src.data_loader import load_data
-from src.preprocess import preprocess
-from src.features import build_features
-from src.model_train import train
-
 
 logger = setup_logger("PIPELINE")
 
-
-
 def main():
-
-
-    logger.info(
-        "===== TRAIN START ====="
-    )
-
-
-    with open(
-        "config/config.yaml",
-        encoding="utf8"
-    ) as f:
-
+    logger.info("===== TRAIN PIPELINE START =====")
+    
+    with open("config/config.yaml", "r", encoding="utf8") as f:
         config = yaml.safe_load(f)
+    
+    # 1. Создаём/обновляем кеш
+    logger.info("Обновление кеша IMDb...")
+    count = create_or_refresh_cache(config)
+    logger.info(f"Кеш обновлён. Фильмов: {count}")
+    
+    # 2. Подключаемся к БД
+    conn = get_db_connection(config['data']['cache_db'])
+    
+    # 3. Обучаем модель
+    logger.info("Начало обучения...")
+    model, imputer, vectorizer, director_avg = train_model_incremental(conn, config)
+    
+    # 4. Метаданные
+    metadata = {
+        "trained_at": datetime.datetime.now().isoformat(),
+        "total_rows": count,
+        "model_path": os.path.join(config['paths']['model_dir'], config['paths']['model_filename']),
+        "vectorizer_path": os.path.join(config['paths']['model_dir'], config['paths']['vectorizer_filename']),
+        "imputer_path": os.path.join(config['paths']['model_dir'], config['paths']['imputer_filename']),
+        "director_avg_path": os.path.join(config['paths']['model_dir'], config['paths']['director_avg_filename'])
+    }
+    with open(os.path.join(config['paths']['model_dir'], config['paths']['metadata_filename']), "w") as f:
+        json.dump(metadata, f, indent=2)
+    
+    conn.close()
+    logger.info("===== TRAIN PIPELINE FINISHED =====")
 
-
-
-    basics,ratings,crew = load_data(
-        config["data"]
-    )
-
-
-
-    df = preprocess(
-
-        basics,
-        ratings,
-        crew,
-
-        config["data"]["sample_frac"],
-
-        config["data"]["random_state"]
-
-    )
-
-
-
-    numeric,text,vectorizer = build_features(
-
-        df,
-
-        config["features"]["text_column"],
-
-        config["features"]["tfidf_max_features"]
-
-    )
-
-
-
-    X = numeric
-
-    y = df["averageRating"]
-
-
-
-    model,X_test,y_test = train(
-
-        X,
-        y,
-        config
-
-    )
-
-
-    logger.info(
-        "===== TRAIN FINISHED ====="
-    )
-
-
-
-if __name__=="__main__":
-
+if __name__ == "__main__":
     main()
