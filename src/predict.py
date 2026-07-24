@@ -11,7 +11,7 @@ def load_artifacts(model_dir):
     return model, imputer, vectorizer, director_avg
 
 def predict_single(title, year, runtime, director, is_remake,
-                   model, imputer, vectorizer, director_avg, global_avg=6.0):
+                   model, imputer, scaler, vectorizer, director_avg, global_avg=6.0):
     try:
         year = float(year)
     except:
@@ -27,6 +27,7 @@ def predict_single(title, year, runtime, director, is_remake,
     
     X_num = np.array([[year, runtime]]).astype(np.float64)
     X_num_imp = imputer.transform(X_num)
+    X_num_scaled = scaler.transform(X_num_imp)
     
     text = title if title else ""
     X_text = vectorizer.transform([text]).toarray()
@@ -36,11 +37,11 @@ def predict_single(title, year, runtime, director, is_remake,
     if np.isnan(dir_avg):
         dir_avg = global_avg
     
-    X = np.hstack([X_num_imp, X_text, np.array([[remake_val]]), np.array([[dir_avg]])])
+    X = np.hstack([X_num_scaled, X_text, np.array([[remake_val]]), np.array([[dir_avg]])])
     pred = model.predict(X)[0]
     return round(pred, 2)
 
-def predict_movies(movies_list, model, imputer, vectorizer, director_avg, global_avg=6.0):
+def predict_movies(movies_list, model, imputer, scaler, vectorizer, director_avg, global_avg=6.0):
     results = []
     for movie in movies_list:
         pred = predict_single(
@@ -51,6 +52,7 @@ def predict_movies(movies_list, model, imputer, vectorizer, director_avg, global
             is_remake=movie.get('is_remake', False),
             model=model,
             imputer=imputer,
+            scaler=scaler,
             vectorizer=vectorizer,
             director_avg=director_avg,
             global_avg=global_avg

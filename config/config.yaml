@@ -13,9 +13,9 @@ features:
 model:
   sgd_params:
     max_iter: 1000
-    tol: 1e-3
-    learning_rate: "optimal"
-    alpha: 0.0001
+    tol: 0.001
+    learning_rate: "optimal"   # или "adaptive"
+    alpha: 0.001              # вместо 0.0001
     penalty: "l2"
     random_state: 42
 
