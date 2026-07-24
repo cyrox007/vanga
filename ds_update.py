@@ -5,7 +5,9 @@ import threading
 
 data = [
     "title.basics",
-    "title.ratings"
+    "title.ratings",
+    "title.principals",
+    'name.basics'
 ]
 
 def main(item: str):   
