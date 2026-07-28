@@ -1,6 +1,44 @@
-venv/
-data/*
+```
+# Compiled and build artifacts
+*.pyc
 __pycache__/
-.logs/*
-models/*
-*.duckdb
+*.o
+*.obj
+dist/
+build/
+*.out
+
+# Dependencies
+.venv/
+venv/
+node_modules/
+.julia/
+.zig-cache/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Coverage
+.coverage
+coverage/
+htmlcov/
+
+# Python cache
+.mypy_cache/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+```
