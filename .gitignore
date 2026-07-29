@@ -1,10 +1,1 @@
-venv/
-# Compiled Python files
-*.pyc
-__pycache__/
-
-# Logs
-*.log
-.logs/*
-data/*
-*.duckdb
+(src/data_filtr.py, src/train_model.py, traning.py)

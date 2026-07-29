@@ -1,4 +1,4 @@
-from src.train_model import save_trained_model, train_model, interpret_model
+from src.train_model import save_trained_model, train_catboost_model, interpret_model
 from src.data_filtr import get_all_genres
 from src.logger import setup_logger
 
@@ -6,11 +6,11 @@ logger = setup_logger(__name__)
 
 def main():
     """
-    Основная функция обучения модели.
-    Оптимизирована для работы на ограниченных ресурсах (1 ГБ ОЗУ).
+    Основная функция обучения модели CatBoost.
+    Оптимизирована для работы с категориальными признаками (жанры, режиссеры, актеры).
     """
     logger.info("=" * 60)
-    logger.info("ЗАПУСК ОБУЧЕНИЯ МОДЕЛИ")
+    logger.info("ЗАПУСК ОБУЧЕНИЯ CATBOOST")
     logger.info("=" * 60)
 
     # Получаем список жанров
@@ -18,36 +18,35 @@ def main():
     genres = get_all_genres()
     logger.info(f"Найдено {len(genres)} жанров: {genres}")
 
-    # Параметры для экономии памяти
-    batch_size = 5000  # уменьшенный размер батча
-    max_batches = 10   # ограничиваем количество батчей для теста
+    # Параметры обучения
+    batch_size = 10000  # размер батча для CatBoost
+    max_batches = None  # обучаем на всех данных (или укажи лимит для теста)
 
     logger.info(f"Параметры обучения: batch_size={batch_size}, max_batches={max_batches}")
     logger.info("=" * 60)
 
-    # Обучаем модель
+    # Обучаем модель CatBoost
     logger.info("Начало обучения...")
-    model, scaler, director_avg, actor_avg, tconst_to_people, nconst_mapping = train_model(
+    model, metadata = train_catboost_model(
         genres,
         batch_size=batch_size,
         max_batches=max_batches
     )
-
-    # Создаём список имён признаков
-    feature_names = genres + ['startYear', 'runtimeMinutes', 'numVotes', 'director_avg_rating'] + \
-                    [f'actor_{i+1}_avg_rating' for i in range(5)]
-    logger.info(f"Создан список признаков ({len(feature_names)}): {feature_names[:10]}...")
+    
+    if model is None:
+        logger.error("Обучение не удалось")
+        return
 
     # Интерпретируем модель
     logger.info("Интерпретация модели...")
-    interpret_model(model, scaler, feature_names)
+    interpret_model(model, metadata)
 
-    # Сохраняем модель и все метаданные
+    # Сохраняем модель и метаданные
     logger.info("Сохранение модели...")
-    save_trained_model(model, scaler, genres)
+    save_trained_model(model, metadata)
 
     logger.info("=" * 60)
-    logger.info("ОБУЧЕНИЕ ЗАВЕРШЕНО УСПЕШНО")
+    logger.info("ОБУЧЕНИЕ CATBOOST ЗАВЕРШЕНО УСПЕШНО")
     logger.info("=" * 60)
 
 if __name__ == "__main__":
