@@ -1,5 +1,7 @@
+import gc
 import pickle
 from pathlib import Path
+from typing import Generator, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -46,7 +48,15 @@ def get_director_actor_stats():
     Вычисляет средние рейтинги для режиссёров и актёров на основе их прошлых работ.
     Возвращает словари: director_avg, actor_avg
     """
+    logger.info("Вычисление статистики по режиссёрам и актёрам")
+
+    # Настраиваем DuckDB для работы с ограниченной памятью
     conn = duckdb.connect(f"{config.ABSPATH}/imdb.duckdb")
+
+    conn.execute("SET memory_limit = '512MB'")
+    temp_dir = Path(f"{config.ABSPATH}/temp")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    conn.execute(f"SET temp_directory = '{temp_dir}'")
 
     # Получаем данные о режиссёрах и актёрах с рейтингами
     query = """
@@ -79,16 +89,17 @@ def get_director_actor_stats():
     ORDER BY startYear
     """
 
+
+    logger.info("Выполнение запроса для статистики персон")
     df = conn.execute(query).df()
     conn.close()
+    logger.info(f"Получено {len(df)} записей о персонах")
 
     director_avg = {}
     actor_avg = {}
 
-    # Для каждого человека считаем средний рейтинг ВСЕХ его работ (можно сделать скользящее среднее)
-    # В реальном продакшене нужно делать leave-one-out, но для начала упростим
-
     # Директора
+    logger.info("Обработка режиссёров...")
     directors = df[df['category'] == 'director']
     if len(directors) > 0:
         director_stats = directors.groupby('nconst').agg({
@@ -102,6 +113,7 @@ def get_director_actor_stats():
         logger.info(f"Найдено режиссёров: {len(director_avg)}")
 
     # Актёры
+    logger.info("Обработка актёров...")
     actors = df[df['category'].isin(['actor', 'actress'])]
     if len(actors) > 0:
         actor_stats = actors.groupby('nconst').agg({
@@ -114,6 +126,10 @@ def get_director_actor_stats():
         actor_avg = dict(zip(actor_stats['nconst'], actor_stats['avg_rating']))
         logger.info(f"Найдено актёров: {len(actor_avg)}")
 
+    del df, directors, actors, director_stats, actor_stats
+    gc.collect()
+
+    logger.info(f"Статистика готова: {len(director_avg)} режиссёров, {len(actor_avg)} актёров")
     return director_avg, actor_avg
 
 
@@ -173,7 +189,13 @@ def get_tconst_to_nconst():
     return result
 
 
-def get_batches(genres: list, batch_size=10000, use_director_stats=True, use_actor_stats=True):
+def get_batches(
+    genres: list,
+    batch_size: int = 10000,
+    use_director_stats: bool = True,
+    use_actor_stats: bool = True,
+    max_batches: Optional[int] = None
+) -> Generator[Tuple[pd.DataFrame, pd.Series, List[str], List[str]], None, None]:
     """
     Генератор батчей для обучения модели.
     Возвращает X (признаки) и y (рейтинг).
@@ -186,11 +208,20 @@ def get_batches(genres: list, batch_size=10000, use_director_stats=True, use_act
     - director_avg_rating (средний рейтинг режиссёра)
     - actor_1_avg_rating, actor_2_avg_rating, ... (до 5 актёров)
     """
+    logger.info("Инициализация генератора батчей")
+
+    # Настраиваем DuckDB для работы с ограниченной памятью
     conn = duckdb.connect(f"{config.ABSPATH}/imdb.duckdb")
 
-    # Предзагружаем статистику по режиссёрам и актёрам
+    conn.execute("SET memory_limit = '512MB'")
+    temp_dir = Path(f"{config.ABSPATH}/temp")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    conn.execute(f"SET temp_directory = '{temp_dir}'")
+
+    logger.info("Загрузка статистики по режиссёрам и актёрам")
     director_avg, actor_avg = get_director_actor_stats()
     tconst_to_people = get_tconst_to_nconst()
+    logger.info(f"Загружено {len(director_avg)} режиссёров и {len(actor_avg)} актёров")
 
     query = """
         SELECT 
@@ -208,88 +239,132 @@ def get_batches(genres: list, batch_size=10000, use_director_stats=True, use_act
           AND b.runtimeMinutes IS NOT NULL
           AND b.genres IS NOT NULL
           AND r.averageRating IS NOT NULL
+        ORDER BY b.startYear
     """
+
+    logger.info("Выполнение запроса к базе данных")
     cursor = conn.execute(query)
     total = 0
-    while True:
-        rows = cursor.fetchmany(batch_size)
-        if not rows:
-            break
-        df_batch = pd.DataFrame(rows, columns=[
-            'tconst', 'primaryTitle', 'startYear', 'runtimeMinutes', 'genres', 'averageRating', 'numVotes'
-        ])
+    batches_count = 0
 
-        # Приведение к числам
-        df_batch['startYear'] = pd.to_numeric(df_batch['startYear'], errors='coerce')
-        df_batch['runtimeMinutes'] = pd.to_numeric(df_batch['runtimeMinutes'], errors='coerce')
-        df_batch['averageRating'] = pd.to_numeric(df_batch['averageRating'], errors='coerce')
-        df_batch['numVotes'] = pd.to_numeric(df_batch['numVotes'], errors='coerce')
+    try:
+        while True:
+            # Проверка лимита батчей
+            if max_batches is not None and batches_count >= max_batches:
+                logger.info(f"Достигнут лимит батчей: {max_batches}")
+                break
 
-        # Удаление NaN в ключевых колонках
-        df_batch = df_batch.dropna(subset=['startYear', 'runtimeMinutes', 'averageRating', 'numVotes'])
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                logger.info("Данные в базе исчерпаны")
+                break
 
-        # Фильтрация выбросов
-        df_batch = df_batch[
-            (df_batch['startYear'] >= 1900) & (df_batch['startYear'] <= 2030) &
-            (df_batch['runtimeMinutes'] >= 10) & (df_batch['runtimeMinutes'] <= 300)
-        ]
+            logger.debug(f"Получено {len(rows)} строк из БД")
 
-        q1 = df_batch['runtimeMinutes'].quantile(0.05)
-        q3 = df_batch['runtimeMinutes'].quantile(0.95)
-        df_batch = df_batch[(df_batch['runtimeMinutes'] >= q1) & (df_batch['runtimeMinutes'] <= q3)]
-        if len(df_batch) == 0:
-            continue
+            df_batch = pd.DataFrame(rows, columns=[
+                'tconst', 'primaryTitle', 'startYear', 'runtimeMinutes', 'genres', 'averageRating', 'numVotes'
+            ])
 
-        # Бинарные жанры
-        genre_df = pd.DataFrame(0, index=df_batch.index, columns=genres)
-        for idx, genres_str in enumerate(df_batch['genres']):
-            if genres_str:
-                for g in genres_str.split(','):
-                    if g in genres:
-                        genre_df.loc[idx, g] = 1
+            # Приведение к числам
+            logger.debug("Преобразование типов данных")
+            df_batch['startYear'] = pd.to_numeric(df_batch['startYear'], errors='coerce')
+            df_batch['runtimeMinutes'] = pd.to_numeric(df_batch['runtimeMinutes'], errors='coerce')
+            df_batch['averageRating'] = pd.to_numeric(df_batch['averageRating'], errors='coerce')
+            df_batch['numVotes'] = pd.to_numeric(df_batch['numVotes'], errors='coerce')
 
-        # Числовые признаки с ручным масштабированием
-        numeric_df = pd.DataFrame(index=df_batch.index)
-        numeric_df['startYear'] = (df_batch['startYear'] - 1900) / 100.0
-        numeric_df['runtimeMinutes'] = df_batch['runtimeMinutes'] / 100.0
-        numeric_df['numVotes'] = np.log1p(df_batch['numVotes'])
+            # Удаление NaN в ключевых колонках
+            initial_count = len(df_batch)
+            df_batch = df_batch.dropna(subset=['startYear', 'runtimeMinutes', 'averageRating', 'numVotes'])
+            if len(df_batch) < initial_count:
+                logger.debug(f"Удалено {initial_count - len(df_batch)} строк с NaN")
 
-        # Добавляем признаки режиссёра и актёров
-        if use_director_stats:
-            numeric_df['director_avg_rating'] = df_batch['tconst'].apply(
-                lambda t: director_avg.get(tconst_to_people.get(t, {}).get('directors', [None])[0], np.nan)
-                if tconst_to_people.get(t, {}).get('directors') else np.nan
-            )
+            # Фильтрация выбросов
+            initial_count = len(df_batch)
+            df_batch = df_batch[
+                (df_batch['startYear'] >= 1900) & (df_batch['startYear'] <= 2030) &
+                (df_batch['runtimeMinutes'] >= 10) & (df_batch['runtimeMinutes'] <= 300)
+            ]
+            if len(df_batch) < initial_count:
+                logger.debug(f"Удалено {initial_count - len(df_batch)} строк как выбросы по году/длительности")
 
-        if use_actor_stats:
-            # До 5 актёров
-            for i in range(5):
-                col_name = f'actor_{i+1}_avg_rating'
-                numeric_df[col_name] = df_batch['tconst'].apply(
-                    lambda t, idx=i: (
-                        actor_avg.get(tconst_to_people.get(t, {}).get('actors', [None]*idx)[idx], np.nan)
-                        if len(tconst_to_people.get(t, {}).get('actors', [])) > idx
-                        else np.nan
-                    )
-                )
+            q1 = df_batch['runtimeMinutes'].quantile(0.05)
+            q3 = df_batch['runtimeMinutes'].quantile(0.95)
+            initial_count = len(df_batch)
+            df_batch = df_batch[(df_batch['runtimeMinutes'] >= q1) & (df_batch['runtimeMinutes'] <= q3)]
+            if len(df_batch) < initial_count:
+                logger.debug(f"Удалено {initial_count - len(df_batch)} строк как выбросы по квантилям")
 
-        y = df_batch['averageRating'].astype(float)
-        X = pd.concat([genre_df, numeric_df], axis=1)
+            if len(df_batch) == 0:
+                logger.debug("Батч пуст после фильтрации, пропускаем")
+                continue
 
-        # --- ФИНАЛЬНАЯ ОЧИСТКА ОТ NaN ---
+            # Бинарные жанры
+            logger.debug(f"Создание признаков жанров для {len(df_batch)} записей")
+            genre_df = pd.DataFrame(0, index=df_batch.index, columns=genres, dtype=np.float32)
+            for idx, genres_str in enumerate(df_batch['genres']):
+                if genres_str:
+                    for g in genres_str.split(','):
+                        if g in genres:
+                            genre_df.loc[idx, g] = 1
 
-        mask = ~(X.isna().any(axis=1) | y.isna())
-        X = X[mask]
-        y = y[mask]
+            # Числовые признаки с ручным масштабированием
+            logger.debug("Создание числовых признаков")
+            numeric_df = pd.DataFrame(index=df_batch.index, dtype=np.float32)
+            numeric_df['startYear'] = (df_batch['startYear'] - 1900) / 100.0
+            numeric_df['runtimeMinutes'] = df_batch['runtimeMinutes'] / 100.0
+            numeric_df['numVotes'] = np.log1p(df_batch['numVotes']).astype(np.float32)
 
-        if len(X) == 0:
-            continue
+            # Добавляем признаки режиссёра и актёров
+            if use_director_stats:
+                logger.debug("Добавление признаков режиссёра")
+                numeric_df['director_avg_rating'] = df_batch['tconst'].apply(
+                    lambda t: director_avg.get(tconst_to_people.get(t, {}).get('directors', [None])[0], np.nan)
+                    if tconst_to_people.get(t, {}).get('directors') else np.nan
+                ).astype(np.float32)
 
-        total += len(X)
-        logger.info(f"Прочитано строк: {total}")
-        yield X, y, df_batch.loc[mask, 'primaryTitle'].tolist(), df_batch.loc[mask, 'tconst'].tolist()
+            if use_actor_stats:
+                logger.debug("Добавление признаков актёров")
+                # До 5 актёров
+                for i in range(5):
+                    col_name = f'actor_{i+1}_avg_rating'
+                    numeric_df[col_name] = df_batch['tconst'].apply(
+                        lambda t, idx=i: (
+                            actor_avg.get(tconst_to_people.get(t, {}).get('actors', [None]*idx)[idx], np.nan)
+                            if len(tconst_to_people.get(t, {}).get('actors', [])) > idx
+                            else np.nan
+                        )
+                    ).astype(np.float32)
 
-    conn.close()
+            y = df_batch['averageRating'].astype(np.float32)
+            X = pd.concat([genre_df, numeric_df], axis=1)
+
+            # --- ФИНАЛЬНАЯ ОЧИСТКА ОТ NaN ---
+            initial_count = len(X)
+            mask = ~(X.isna().any(axis=1) | y.isna())
+            X = X[mask]
+            y = y[mask]
+            if len(X) < initial_count:
+                logger.debug(f"Удалено {initial_count - len(X)} строк с NaN в признаках")
+
+            if len(X) == 0:
+                logger.debug("Батч пуст после очистки от NaN, пропускаем")
+                continue
+
+            total += len(X)
+            batches_count += 1
+            logger.info(f"Батч {batches_count}: обработано строк {len(X)}, всего: {total}")
+            yield X, y, df_batch.loc[mask, 'primaryTitle'].tolist(), df_batch.loc[mask, 'tconst'].tolist()
+
+            # Освобождаем память
+            del df_batch, genre_df, numeric_df, X, y, mask
+            gc.collect()
+
+    except Exception as e:
+        logger.error(f"Ошибка при генерации батчей: {e}")
+        raise
+    finally:
+        conn.close()
+        logger.info("Соединение с БД закрыто")
 
 def save_metadata(all_genres, model, scaler, director_avg, actor_avg, tconst_to_people, nconst_mapping):
     """Сохраняет метаданные и вспомогательные структуры"""
