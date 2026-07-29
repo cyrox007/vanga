@@ -85,7 +85,8 @@ def train_catboost_model(
             "dictionaries": [
                 {
                     "dictionary_id": "BiGram",
-                    "max_dictionary_size": 50000
+                    "dictionary_type": "BiGram",
+                    "max_dictionary_size": "50000"
                 }
             ]
         }
