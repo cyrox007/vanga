@@ -424,7 +424,9 @@ def get_batches(
             numeric_df = pd.DataFrame(index=df_batch.index, dtype=np.float32)
             numeric_df['startYear'] = (df_batch['startYear'] - 1900) / 100.0
             numeric_df['runtimeMinutes'] = df_batch['runtimeMinutes'] / 100.0
-            numeric_df['numVotes'] = np.log1p(df_batch['numVotes']).astype(np.float32)
+            numeric_df['numVotes_log'] = np.log1p(
+                df_batch['numVotes']
+            ).astype(np.float32)
             
             if use_director_stats:
                 numeric_df['director_avg_rating'] = df_batch['director_avg_rating'].astype(np.float32)
@@ -461,7 +463,6 @@ def get_batches(
             total_processed += len(X)
             batches_count += 1
             logger.info(f"Батч {batches_count}: {len(X)} строк. Всего: {total_processed}")
-            
             yield X, y, df_batch.loc[mask, 'primaryTitle'].tolist(), df_batch.loc[mask, 'tconst'].tolist()
 
             # Очистка памяти
@@ -469,7 +470,6 @@ def get_batches(
             gc.collect()
             
             offset += batch_size
-
     except Exception as e:
         logger.error(f"Ошибка при генерации батчей: {e}")
         raise

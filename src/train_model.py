@@ -36,17 +36,31 @@ def train_catboost_model(
     # Категориальные: genres (как строка), director_id, actor_ids (как строки)
     
     numeric_features = [
-        'startYear', 'runtimeMinutes', 'numVotes_log',
-        'director_avg_rating', 
-        'actor_1_avg_rating', 'actor_2_avg_rating', 'actor_3_avg_rating'
+        'startYear',
+        'runtimeMinutes',
+        'numVotes_log',
+        'director_avg_rating',
+        'actor_1_avg_rating',
+        'actor_2_avg_rating',
+        'actor_3_avg_rating'
     ]
-    
-    categorical_features = ['genres_combined', 'director_id', 'actor_ids_combined']
-    
-    all_feature_names = numeric_features + categorical_features
+
+    categorical_features = [
+        'genres_combined',
+        'director_id',
+        'actor_ids_combined'
+    ]
+
+    all_feature_names = (
+        numeric_features
+        + categorical_features
+    )
     
     # Индексы категориальных признаков для CatBoost (0-based)
-    cat_features_idx = list(range(len(numeric_features), len(all_feature_names)))
+    cat_features_idx = [
+        all_feature_names.index(x)
+        for x in categorical_features
+    ]
     
     logger.info(f"Числовые признаки ({len(numeric_features)}): {numeric_features}")
     logger.info(f"Категориальные признаки ({len(categorical_features)}): {categorical_features}")
@@ -54,15 +68,27 @@ def train_catboost_model(
 
     # Инициализация модели CatBoost
     model = CatBoostRegressor(
-        iterations=500,
-        depth=6,
-        learning_rate=0.1,
+        iterations=1500,
+        depth=8,
+        learning_rate=0.03,
         loss_function='RMSE',
-        verbose=50,
-        cat_features=cat_features_idx,
         random_seed=42,
-        early_stopping_rounds=50,
-        use_best_model=True
+        verbose=100,
+        text_processing={
+            "tokenizers": [
+                {
+                    "tokenizer_id": "Space",
+                    "separator_type": "ByDelimiter",
+                    "delimiter": " "
+                }
+            ],
+            "dictionaries": [
+                {
+                    "dictionary_id": "BiGram",
+                    "max_dictionary_size": 50000
+                }
+            ]
+        }
     )
     logger.info("Модель CatBoostRegressor инициализирована")
 
