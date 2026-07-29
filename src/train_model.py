@@ -29,7 +29,7 @@ def train_model(
     logger.info(f"Количество жанров: {len(all_genres)}")
     logger.info("=" * 60)
 
-    n_features = len(all_genres) + 3 + 5  # жанры + startYear + runtimeMinutes + numVotes + director_avg + 5 актёров
+    n_features = len(all_genres) + 3 + 1 + 3  # жанры + startYear + runtimeMinutes + numVotes + director_avg + 3 актёра
     logger.info(f"Количество признаков: {n_features}")
 
     scaler = StandardScaler()
@@ -50,6 +50,7 @@ def train_model(
     first_batch = True
     total_rows = 0
     batches_processed = 0
+    model_fitted = False
 
     try:
         for X, y, titles, tconsts in get_batches(all_genres, batch_size, max_batches=max_batches):
@@ -78,6 +79,7 @@ def train_model(
             model.partial_fit(X_scaled, y_np)
             total_rows += len(y_np)
             batches_processed += 1
+            model_fitted = True
 
             logger.info(f"Обработано строк: {total_rows}")
             logger.info(f"Текущие веса (первые 5): {model.coef_[:5]}")
@@ -95,7 +97,10 @@ def train_model(
         logger.info("ОБУЧЕНИЕ ЗАВЕРШЕНО")
         logger.info(f"Всего обработано строк: {total_rows}")
         logger.info(f"Всего обработано батчей: {batches_processed}")
-        logger.info(f"Финальные веса (первые 5): {model.coef_[:5]}")
+        if model_fitted:
+            logger.info(f"Финальные веса (первые 5): {model.coef_[:5]}")
+        else:
+            logger.warning("Модель не была обучена (не было ни одного батча)")
         logger.info("=" * 60)
 
     # Для совместимости возвращаем пустые словари - статистика теперь встроена в запросы
@@ -141,7 +146,7 @@ def save_trained_model(
     metadata = {
         'genres': all_genres,
         'feature_names': all_genres + ['startYear', 'runtimeMinutes', 'numVotes', 'director_avg_rating'] +
-                         [f'actor_{i+1}_avg_rating' for i in range(5)]
+                         [f'actor_{i+1}_avg_rating' for i in range(3)]
     }
     with open(model_dir / 'metadata.pkl', 'wb') as f:
         pickle.dump(metadata, f)
@@ -223,7 +228,7 @@ def interpret_model(model: SGDRegressor, scaler: StandardScaler, feature_names: 
         logger.info(f"Влияние логарифма голосов (на 1 единицу log): {coef_dict['numVotes']:.4f}")
     if 'director_avg_rating' in coef_dict:
         logger.info(f"Влияние среднего рейтинга режиссёра: {coef_dict['director_avg_rating']:.4f}")
-    for i in range(5):
+    for i in range(3):
         col_name = f'actor_{i+1}_avg_rating'
         if col_name in coef_dict:
             logger.info(f"Влияние рейтинга актёра #{i+1}: {coef_dict[col_name]:.4f}")
