@@ -15,6 +15,7 @@
 а не загружается из файлов. Это позволяет работать с ограниченной памятью.
 """
 
+from catboost import CatBoostRegressor
 import numpy as np
 import pickle
 from pathlib import Path
@@ -30,39 +31,36 @@ logger = setup_logger(__name__)
 class KinoVanga:
     """Класс для предсказания рейтинга фильма."""
 
-    def __init__(self, model_path: Optional[str] = None):
-        """
-        Инициализация модели.
-
-        Args:
-            model_path: Путь к директории с моделью. Если None, используется models/ в корне проекта.
-        """
-        if model_path is None:
-            self.model_dir = Path(f"{config.ABSPATH}/models")
-        else:
-            self.model_dir = Path(model_path)
-
+    def __init__(self, model_path, db_path=None):
+        self.model_path = Path(model_path)
         self.model = None
-        self.scaler = None
-        self.metadata = None
-        self.db_path = f"{config.ABSPATH}/imdb.duckdb"
-
+        self.db_path = (
+            Path(db_path)
+            if db_path
+            else Path(config.ABSPATH) / "imdb.duckdb"
+        )
         self._load_model()
 
+
     def _load_model(self):
-        """Загружает модель и метаданные."""
-        logger.info(f"Загрузка модели из {self.model_dir}")
+        logger.info(f"Загрузка модели из {self.model_path}")
 
-        with open(self.model_dir / 'model.pkl', 'rb') as f:
-            self.model = pickle.load(f)
+        # Загружаем CatBoost модель
+        self.model = CatBoostRegressor()
+        self.model.load_model(self.model_path)
 
-        with open(self.model_dir / 'scaler.pkl', 'rb') as f:
-            self.scaler = pickle.load(f)
+        logger.info("CatBoost модель загружена")
 
-        with open(self.model_dir / 'metadata.pkl', 'rb') as f:
+        # Загружаем метаданные
+        metadata_path = self.model_path.parent / "metadata.pkl"
+
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"Не найден файл метаданных: {metadata_path}")
+
+        with open(metadata_path, "rb") as f:
             self.metadata = pickle.load(f)
 
-        logger.info("Модель загружена успешно")
+        logger.info(f"Метаданные загружены: {metadata_path}")
 
     def _get_director_rating(self, director_name: str) -> float:
         """
@@ -154,64 +152,69 @@ class KinoVanga:
         director: Optional[str] = None,
         actors: Optional[List[str]] = None,
         num_votes: Optional[int] = None
-    ) -> np.ndarray:
-        """
-        Подготавливает вектор признаков для предсказания.
+    ):
 
-        Args:
-            year: Год выхода фильма
-            runtime: Длительность в минутах
-            genres: Жанр (строка через запятую или список)
-            director: Имя режиссёра (опционально)
-            actors: Список имён актёров (до 5, опционально)
-            num_votes: Количество голосов (опционально, для новых фильмов можно поставить среднее)
-
-        Returns:
-            Вектор признаков
-        """
-        # Получаем список жанров
-        if isinstance(genres, str):
-            genre_list = [g.strip() for g in genres.split(',')]
+        if isinstance(genres, list):
+            genres_combined = ",".join(genres)
         else:
-            genre_list = genres
+            genres_combined = genres or "Unknown"
 
-        # Создаём вектор жанров
-        all_genres = self.metadata['genres']
-        genre_vector = [1 if g in genre_list else 0 for g in all_genres]
 
-        # Числовые признаки
-        start_year_scaled = (year - 1900) / 100.0
-        runtime_scaled = runtime / 100.0
-
-        # Если num_votes не указан, используем медианное значение (примерно 7.5 в логарифме)
+        # количество голосов
         if num_votes is None:
-            num_votes_log = 7.5  # log1p(~1800)
+            num_votes_log = 7.5
         else:
             num_votes_log = np.log1p(num_votes)
 
-        # Признак режиссёра (если не найден - используем среднее ~6.5)
-        director_rating = self._get_director_rating(director) if director else np.nan
-        if np.isnan(director_rating):
-            director_rating = 6.5  # Средний рейтинг по умолчанию
 
-        # Признаки актёров (до 5)
+        # режиссёр
+        director_avg_rating = self._get_director_rating(director)
+
+        if np.isnan(director_avg_rating):
+            director_avg_rating = 6.5
+
+
+        # актёры
         actor_ratings = []
-        if actors:
-            for i in range(5):
-                if i < len(actors):
-                    rating = self._get_actor_rating(actors[i])
-                    if np.isnan(rating):
-                        rating = 6.5  # Средний рейтинг по умолчанию
-                else:
-                    rating = 6.5  # Если актёра нет, используем среднее
-                actor_ratings.append(rating)
-        else:
-            actor_ratings = [6.5] * 5  # Все актёры неизвестны - среднее
 
-        # Собираем все признаки
-        features = genre_vector + [start_year_scaled, runtime_scaled, num_votes_log, director_rating] + actor_ratings
+        actors = actors or []
 
-        return np.array(features).reshape(1, -1)
+        for i in range(3):
+            if i < len(actors):
+                rating = self._get_actor_rating(actors[i])
+
+                if np.isnan(rating):
+                    rating = 6.5
+
+            else:
+                rating = 6.5
+
+            actor_ratings.append(rating)
+
+
+        director_id = director or "Unknown"
+
+
+        actor_ids_combined = ",".join(
+            actors[:5]
+        ) if actors else "Unknown"
+
+
+        data = [
+            year,
+            runtime,
+            num_votes_log,
+            director_avg_rating,
+            actor_ratings[0],
+            actor_ratings[1],
+            actor_ratings[2],
+            genres_combined,
+            director_id,
+            actor_ids_combined
+        ]
+
+
+        return np.array(data, dtype=object).reshape(1, -1)
 
     def predict(
         self,

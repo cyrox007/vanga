@@ -5,10 +5,18 @@ from settings import config
 kino = KinoVanga(f"{config.ABSPATH}/models/model.cbm")
 
 # Предсказание
-rating = kino.predict_rating(
+rating = kino.predict(
     title="Дюна",
-    director="Дени Вильнёв",
+    director="Denis Villeneuve",
     year=2021,
     runtime=155,
-    description="Эпическая космическая сага о борьбе за ресурсы..."
+    genres="Adventure,Sci-Fi,Drama",
+    actors=[
+        "Timothée Chalamet",
+        "Rebecca Ferguson",
+        "Oscar Isaac"
+    ],
+    num_votes=850000
 )
+
+print(f"Рейтинг: {rating}")
