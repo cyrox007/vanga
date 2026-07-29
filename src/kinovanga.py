@@ -75,32 +75,34 @@ class KinoVanga:
         if not director_name:
             return np.nan
 
-        conn = duckdb.connect(self.db_path)
-        query = """
-            WITH movie_ratings AS (
-                SELECT b.tconst, r.averageRating
-                FROM title_basics b
-                JOIN title_ratings r ON b.tconst = r.tconst
-                WHERE b.titleType = 'movie' AND r.averageRating IS NOT NULL
-            )
-            SELECT AVG(mr.averageRating) AS avg_rating
-            FROM title_principals p
-            JOIN movie_ratings mr ON p.tconst = mr.tconst
-            JOIN name_basics n ON p.nconst = n.nconst
-            WHERE p.category = 'director'
-              AND LOWER(n.primaryName) = LOWER(?)
-            GROUP BY p.nconst
-            HAVING COUNT(*) >= 2
-            LIMIT 1
-        """
+        conn = None
         try:
+            conn = duckdb.connect(self.db_path, read_only=True)
+            query = """
+                WITH movie_ratings AS (
+                    SELECT b.tconst, r.averageRating
+                    FROM title_basics b
+                    JOIN title_ratings r ON b.tconst = r.tconst
+                    WHERE b.titleType = 'movie' AND r.averageRating IS NOT NULL
+                )
+                SELECT AVG(mr.averageRating) AS avg_rating
+                FROM title_principals p
+                JOIN movie_ratings mr ON p.tconst = mr.tconst
+                JOIN name_basics n ON p.nconst = n.nconst
+                WHERE p.category = 'director'
+                  AND LOWER(n.primaryName) = LOWER(?)
+                GROUP BY p.nconst
+                HAVING COUNT(*) >= 2
+                LIMIT 1
+            """
             result = conn.execute(query, [director_name]).fetchone()
-            conn.close()
             if result and result[0] is not None:
                 return result[0]
         except Exception as e:
             logger.warning(f"Ошибка при получении рейтинга режиссёра {director_name}: {e}")
-            conn.close()
+        finally:
+            if conn:
+                conn.close()
         return np.nan
 
     def _get_actor_rating(self, actor_name: str) -> float:
@@ -116,32 +118,34 @@ class KinoVanga:
         if not actor_name:
             return np.nan
 
-        conn = duckdb.connect(self.db_path)
-        query = """
-            WITH movie_ratings AS (
-                SELECT b.tconst, r.averageRating
-                FROM title_basics b
-                JOIN title_ratings r ON b.tconst = r.tconst
-                WHERE b.titleType = 'movie' AND r.averageRating IS NOT NULL
-            )
-            SELECT AVG(mr.averageRating) AS avg_rating
-            FROM title_principals p
-            JOIN movie_ratings mr ON p.tconst = mr.tconst
-            JOIN name_basics n ON p.nconst = n.nconst
-            WHERE p.category IN ('actor', 'actress')
-              AND LOWER(n.primaryName) = LOWER(?)
-            GROUP BY p.nconst
-            HAVING COUNT(*) >= 3
-            LIMIT 1
-        """
+        conn = None
         try:
+            conn = duckdb.connect(self.db_path, read_only=True)
+            query = """
+                WITH movie_ratings AS (
+                    SELECT b.tconst, r.averageRating
+                    FROM title_basics b
+                    JOIN title_ratings r ON b.tconst = r.tconst
+                    WHERE b.titleType = 'movie' AND r.averageRating IS NOT NULL
+                )
+                SELECT AVG(mr.averageRating) AS avg_rating
+                FROM title_principals p
+                JOIN movie_ratings mr ON p.tconst = mr.tconst
+                JOIN name_basics n ON p.nconst = n.nconst
+                WHERE p.category IN ('actor', 'actress')
+                  AND LOWER(n.primaryName) = LOWER(?)
+                GROUP BY p.nconst
+                HAVING COUNT(*) >= 3
+                LIMIT 1
+            """
             result = conn.execute(query, [actor_name]).fetchone()
-            conn.close()
             if result and result[0] is not None:
                 return result[0]
         except Exception as e:
             logger.warning(f"Ошибка при получении рейтинга актёра {actor_name}: {e}")
-            conn.close()
+        finally:
+            if conn:
+                conn.close()
         return np.nan
 
     def _prepare_features(
