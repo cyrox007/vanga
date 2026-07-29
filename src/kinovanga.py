@@ -10,12 +10,16 @@
 - до 5 актёров (имена)
 
 Возвращает предсказанный рейтинг (0-10).
+
+ВАЖНО: Статистика по режиссёрам и актёрам вычисляется на лету через DuckDB,
+а не загружается из файлов. Это позволяет работать с ограниченной памятью.
 """
 
 import numpy as np
 import pickle
 from pathlib import Path
 from typing import List, Optional, Union
+import duckdb
 
 from src.logger import setup_logger
 from settings import config
@@ -41,16 +45,12 @@ class KinoVanga:
         self.model = None
         self.scaler = None
         self.metadata = None
-        self.director_avg = None
-        self.actor_avg = None
-        self.tconst_to_people = None
-        self.nconst_mapping = None
-        self.name_to_nconst = None
+        self.db_path = f"{config.ABSPATH}/imdb.duckdb"
 
         self._load_model()
 
     def _load_model(self):
-        """Загружает модель и все необходимые метаданные."""
+        """Загружает модель и метаданные."""
         logger.info(f"Загрузка модели из {self.model_dir}")
 
         with open(self.model_dir / 'model.pkl', 'rb') as f:
@@ -62,53 +62,11 @@ class KinoVanga:
         with open(self.model_dir / 'metadata.pkl', 'rb') as f:
             self.metadata = pickle.load(f)
 
-        with open(self.model_dir / 'director_avg.pkl', 'rb') as f:
-            self.director_avg = pickle.load(f)
-
-        with open(self.model_dir / 'actor_avg.pkl', 'rb') as f:
-            self.actor_avg = pickle.load(f)
-
-        with open(self.model_dir / 'tconst_to_people.pkl', 'rb') as f:
-            self.tconst_to_people = pickle.load(f)
-
-        with open(self.model_dir / 'nconst_mapping.pkl', 'rb') as f:
-            self.nconst_mapping = pickle.load(f)
-
-        # Создаём обратный маппинг имя -> nconst
-        self.name_to_nconst = {v.lower().strip(): k for k, v in self.nconst_mapping.items()}
-
         logger.info("Модель загружена успешно")
-
-    def _find_nconst_by_name(self, name: str, is_director: bool = False) -> Optional[str]:
-        """
-        Ищет nconst по имени человека.
-
-        Args:
-            name: Имя человека
-            is_director: Если True, проверяем только среди режиссёров
-
-        Returns:
-            nconst или None, если не найдено
-        """
-        if not name:
-            return None
-
-        name_lower = name.lower().strip()
-
-        # Прямой поиск
-        if name_lower in self.name_to_nconst:
-            return self.name_to_nconst[name_lower]
-
-        # Поиск по частичному совпадению
-        for name_variant, nconst in self.name_to_nconst.items():
-            if name_lower in name_variant or name_variant in name_lower:
-                return nconst
-
-        return None
 
     def _get_director_rating(self, director_name: str) -> float:
         """
-        Получает средний рейтинг режиссёра.
+        Получает средний рейтинг режиссёра через DuckDB.
 
         Args:
             director_name: Имя режиссёра
@@ -116,14 +74,40 @@ class KinoVanga:
         Returns:
             Средний рейтинг или NaN, если не найдено
         """
-        nconst = self._find_nconst_by_name(director_name, is_director=True)
-        if nconst and nconst in self.director_avg:
-            return self.director_avg[nconst]
+        if not director_name:
+            return np.nan
+
+        conn = duckdb.connect(self.db_path)
+        query = """
+            WITH movie_ratings AS (
+                SELECT b.tconst, r.averageRating
+                FROM title_basics b
+                JOIN title_ratings r ON b.tconst = r.tconst
+                WHERE b.titleType = 'movie' AND r.averageRating IS NOT NULL
+            )
+            SELECT AVG(mr.averageRating) AS avg_rating
+            FROM title_principals p
+            JOIN movie_ratings mr ON p.tconst = mr.tconst
+            JOIN name_basics n ON p.nconst = n.nconst
+            WHERE p.category = 'director'
+              AND LOWER(n.primaryName) = LOWER(?)
+            GROUP BY p.nconst
+            HAVING COUNT(*) >= 2
+            LIMIT 1
+        """
+        try:
+            result = conn.execute(query, [director_name]).fetchone()
+            conn.close()
+            if result and result[0] is not None:
+                return result[0]
+        except Exception as e:
+            logger.warning(f"Ошибка при получении рейтинга режиссёра {director_name}: {e}")
+            conn.close()
         return np.nan
 
     def _get_actor_rating(self, actor_name: str) -> float:
         """
-        Получает средний рейтинг актёра.
+        Получает средний рейтинг актёра через DuckDB.
 
         Args:
             actor_name: Имя актёра
@@ -131,9 +115,35 @@ class KinoVanga:
         Returns:
             Средний рейтинг или NaN, если не найдено
         """
-        nconst = self._find_nconst_by_name(actor_name)
-        if nconst and nconst in self.actor_avg:
-            return self.actor_avg[nconst]
+        if not actor_name:
+            return np.nan
+
+        conn = duckdb.connect(self.db_path)
+        query = """
+            WITH movie_ratings AS (
+                SELECT b.tconst, r.averageRating
+                FROM title_basics b
+                JOIN title_ratings r ON b.tconst = r.tconst
+                WHERE b.titleType = 'movie' AND r.averageRating IS NOT NULL
+            )
+            SELECT AVG(mr.averageRating) AS avg_rating
+            FROM title_principals p
+            JOIN movie_ratings mr ON p.tconst = mr.tconst
+            JOIN name_basics n ON p.nconst = n.nconst
+            WHERE p.category IN ('actor', 'actress')
+              AND LOWER(n.primaryName) = LOWER(?)
+            GROUP BY p.nconst
+            HAVING COUNT(*) >= 3
+            LIMIT 1
+        """
+        try:
+            result = conn.execute(query, [actor_name]).fetchone()
+            conn.close()
+            if result and result[0] is not None:
+                return result[0]
+        except Exception as e:
+            logger.warning(f"Ошибка при получении рейтинга актёра {actor_name}: {e}")
+            conn.close()
         return np.nan
 
     def _prepare_features(

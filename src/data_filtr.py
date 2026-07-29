@@ -47,87 +47,86 @@ def get_director_actor_stats():
     """
     Вычисляет средние рейтинги для режиссёров и актёров на основе их прошлых работ.
     Возвращает словари: director_avg, actor_avg
+    
+    ВАЖНО: Вся агрегация выполняется в DuckDB, чтобы не перегружать память.
     """
     logger.info("Вычисление статистики по режиссёрам и актёрам")
 
     # Настраиваем DuckDB для работы с ограниченной памятью
     conn = duckdb.connect(f"{config.ABSPATH}/imdb.duckdb")
 
-    conn.execute("SET memory_limit = '512MB'")
+    conn.execute("SET memory_limit = '256MB'")
     temp_dir = Path(f"{config.ABSPATH}/temp")
     temp_dir.mkdir(parents=True, exist_ok=True)
     conn.execute(f"SET temp_directory = '{temp_dir}'")
 
-    # Получаем данные о режиссёрах и актёрах с рейтингами
-    query = """
+    # Получаем агрегированные данные для режиссёров напрямую из DuckDB
+    director_query = """
     WITH movie_ratings AS (
         SELECT
             b.tconst,
-            b.primaryTitle,
-            b.startYear,
-            r.averageRating,
-            r.numVotes
+            r.averageRating
         FROM title_basics b
         JOIN title_ratings r ON b.tconst = r.tconst
         WHERE b.titleType = 'movie'
-          AND b.startYear IS NOT NULL
           AND r.averageRating IS NOT NULL
     ),
-    principals_with_rating AS (
+    directors_agg AS (
         SELECT
-            p.tconst,
             p.nconst,
-            p.category,
-            mr.startYear,
-            mr.averageRating,
-            mr.numVotes
+            AVG(mr.averageRating) AS avg_rating,
+            COUNT(*) AS movie_count
         FROM title_principals p
         JOIN movie_ratings mr ON p.tconst = mr.tconst
-        WHERE p.category IN ('director', 'actor', 'actress')
+        WHERE p.category = 'director'
+        GROUP BY p.nconst
+        HAVING COUNT(*) >= 2
     )
-    SELECT * FROM principals_with_rating
-    ORDER BY startYear
+    SELECT nconst, avg_rating FROM directors_agg
     """
 
-
-    logger.info("Выполнение запроса для статистики персон")
-    df = conn.execute(query).df()
-    conn.close()
-    logger.info(f"Получено {len(df)} записей о персонах")
-
-    director_avg = {}
-    actor_avg = {}
-
-    # Директора
-    logger.info("Обработка режиссёров...")
-    directors = df[df['category'] == 'director']
-    if len(directors) > 0:
-        director_stats = directors.groupby('nconst').agg({
-            'averageRating': 'mean',
-            'tconst': 'count'
-        }).reset_index()
-        director_stats.columns = ['nconst', 'avg_rating', 'movie_count']
-        # Сохраняем только тех, у кого больше 1 фильма
-        director_stats = director_stats[director_stats['movie_count'] >= 2]
-        director_avg = dict(zip(director_stats['nconst'], director_stats['avg_rating']))
-        logger.info(f"Найдено режиссёров: {len(director_avg)}")
-
-    # Актёры
-    logger.info("Обработка актёров...")
-    actors = df[df['category'].isin(['actor', 'actress'])]
-    if len(actors) > 0:
-        actor_stats = actors.groupby('nconst').agg({
-            'averageRating': 'mean',
-            'tconst': 'count'
-        }).reset_index()
-        actor_stats.columns = ['nconst', 'avg_rating', 'movie_count']
-        # Сохраняем только тех, у кого больше 2 фильмов (чтобы статистика была надёжнее)
-        actor_stats = actor_stats[actor_stats['movie_count'] >= 3]
-        actor_avg = dict(zip(actor_stats['nconst'], actor_stats['avg_rating']))
-        logger.info(f"Найдено актёров: {len(actor_avg)}")
-
-    del df, directors, actors, director_stats, actor_stats
+    logger.info("Выполнение запроса для статистики режиссёров")
+    director_df = conn.execute(director_query).df()
+    director_avg = dict(zip(director_df['nconst'], director_df['avg_rating']))
+    logger.info(f"Найдено режиссёров: {len(director_avg)}")
+    
+    del director_df
     gc.collect()
+
+    # Получаем агрегированные данные для актёров напрямую из DuckDB
+    actor_query = """
+    WITH movie_ratings AS (
+        SELECT
+            b.tconst,
+            r.averageRating
+        FROM title_basics b
+        JOIN title_ratings r ON b.tconst = r.tconst
+        WHERE b.titleType = 'movie'
+          AND r.averageRating IS NOT NULL
+    ),
+    actors_agg AS (
+        SELECT
+            p.nconst,
+            AVG(mr.averageRating) AS avg_rating,
+            COUNT(*) AS movie_count
+        FROM title_principals p
+        JOIN movie_ratings mr ON p.tconst = mr.tconst
+        WHERE p.category IN ('actor', 'actress')
+        GROUP BY p.nconst
+        HAVING COUNT(*) >= 3
+    )
+    SELECT nconst, avg_rating FROM actors_agg
+    """
+
+    logger.info("Выполнение запроса для статистики актёров")
+    actor_df = conn.execute(actor_query).df()
+    actor_avg = dict(zip(actor_df['nconst'], actor_df['avg_rating']))
+    logger.info(f"Найдено актёров: {len(actor_avg)}")
+    
+    del actor_df
+    gc.collect()
+    
+    conn.close()
 
     logger.info(f"Статистика готова: {len(director_avg)} режиссёров, {len(actor_avg)} актёров")
     return director_avg, actor_avg
@@ -156,8 +155,15 @@ def get_nconst_mapping():
 def get_tconst_to_nconst():
     """
     Возвращает словарь: tconst -> {'directors': [nconst], 'actors': [nconst]}
+    
+    ВАЖНО: Данные обрабатываются потоком через fetchmany, чтобы не перегружать память.
     """
     conn = duckdb.connect(f"{config.ABSPATH}/imdb.duckdb")
+    conn.execute("SET memory_limit = '256MB'")
+    temp_dir = Path(f"{config.ABSPATH}/temp")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    conn.execute(f"SET temp_directory = '{temp_dir}'")
+    
     query = """
         SELECT
             tconst,
@@ -166,32 +172,42 @@ def get_tconst_to_nconst():
         FROM title_principals
         WHERE category IN ('director', 'actor', 'actress')
     """
-    df = conn.execute(query).df()
-    conn.close()
-
+    cursor = conn.execute(query)
+    
     result = {}
-    for _, row in df.iterrows():
-        tconst = row['tconst']
-        nconst = row['nconst']
-        category = row['category']
+    batch_size = 100000
+    total_processed = 0
+    
+    while True:
+        rows = cursor.fetchmany(batch_size)
+        if not rows:
+            break
+        
+        for row in rows:
+            tconst, nconst, category = row
+            
+            if tconst not in result:
+                result[tconst] = {'directors': [], 'actors': []}
 
-        if tconst not in result:
-            result[tconst] = {'directors': [], 'actors': []}
-
-        if category == 'director':
-            if nconst not in result[tconst]['directors']:
-                result[tconst]['directors'].append(nconst)
-        else:  # actor/actress
-            if nconst not in result[tconst]['actors']:
-                result[tconst]['actors'].append(nconst)
-
+            if category == 'director':
+                if nconst not in result[tconst]['directors']:
+                    result[tconst]['directors'].append(nconst)
+            else:  # actor/actress
+                if nconst not in result[tconst]['actors']:
+                    result[tconst]['actors'].append(nconst)
+        
+        total_processed += len(rows)
+        if total_processed % 500000 == 0:
+            logger.info(f"Обработано {total_processed} записей о персонах...")
+    
+    conn.close()
     logger.info(f"Найдено связей фильм-персона: {len(result)}")
     return result
 
 
 def get_batches(
     genres: list,
-    batch_size: int = 10000,
+    batch_size: int = 5000,
     use_director_stats: bool = True,
     use_actor_stats: bool = True,
     max_batches: Optional[int] = None
@@ -207,46 +223,140 @@ def get_batches(
     - numVotes (логарифмированный)
     - director_avg_rating (средний рейтинг режиссёра)
     - actor_1_avg_rating, actor_2_avg_rating, ... (до 5 актёров)
+    
+    ВАЖНО: Все данные загружаются через DuckDB с JOIN'ами прямо в запросе.
+    Статистика по персонам вычисляется заранее в DuckDB и сохраняется во временные таблицы.
+    Никакие большие словари в память не загружаются.
     """
     logger.info("Инициализация генератора батчей")
 
     # Настраиваем DuckDB для работы с ограниченной памятью
     conn = duckdb.connect(f"{config.ABSPATH}/imdb.duckdb")
 
-    conn.execute("SET memory_limit = '512MB'")
+    conn.execute("SET memory_limit = '256MB'")
     temp_dir = Path(f"{config.ABSPATH}/temp")
     temp_dir.mkdir(parents=True, exist_ok=True)
     conn.execute(f"SET temp_directory = '{temp_dir}'")
 
-    logger.info("Загрузка статистики по режиссёрам и актёрам")
-    director_avg, actor_avg = get_director_actor_stats()
-    tconst_to_people = get_tconst_to_nconst()
-    logger.info(f"Загружено {len(director_avg)} режиссёров и {len(actor_avg)} актёров")
+    logger.info("Создание временных таблиц со статистикой по персонам")
+    
+    # Создаём временную таблицу со статистикой режиссёров
+    conn.execute("""
+        CREATE TEMP TABLE IF NOT EXISTS director_stats AS
+        WITH movie_ratings AS (
+            SELECT b.tconst, r.averageRating
+            FROM title_basics b
+            JOIN title_ratings r ON b.tconst = r.tconst
+            WHERE b.titleType = 'movie' AND r.averageRating IS NOT NULL
+        )
+        SELECT p.nconst, AVG(mr.averageRating) AS avg_rating
+        FROM title_principals p
+        JOIN movie_ratings mr ON p.tconst = mr.tconst
+        WHERE p.category = 'director'
+        GROUP BY p.nconst
+        HAVING COUNT(*) >= 2
+    """)
+    
+    # Создаём временную таблицу со статистикой актёров
+    conn.execute("""
+        CREATE TEMP TABLE IF NOT EXISTS actor_stats AS
+        WITH movie_ratings AS (
+            SELECT b.tconst, r.averageRating
+            FROM title_basics b
+            JOIN title_ratings r ON b.tconst = r.tconst
+            WHERE b.titleType = 'movie' AND r.averageRating IS NOT NULL
+        )
+        SELECT p.nconst, AVG(mr.averageRating) AS avg_rating
+        FROM title_principals p
+        JOIN movie_ratings mr ON p.tconst = mr.tconst
+        WHERE p.category IN ('actor', 'actress')
+        GROUP BY p.nconst
+        HAVING COUNT(*) >= 3
+    """)
+    
+    logger.info("Временные таблицы созданы")
 
+    # Основной запрос с JOIN'ами для получения всех признаков сразу
+    # Для каждого фильма берём первого режиссёра и первых 5 актёров
     query = """
+        WITH movie_data AS (
+            SELECT 
+                b.tconst,
+                b.primaryTitle,
+                b.startYear,
+                b.runtimeMinutes,
+                b.genres,
+                r.averageRating,
+                r.numVotes
+            FROM title_basics b
+            JOIN title_ratings r ON b.tconst = r.tconst
+            WHERE b.titleType = 'movie'
+              AND b.startYear IS NOT NULL
+              AND b.runtimeMinutes IS NOT NULL
+              AND b.genres IS NOT NULL
+              AND r.averageRating IS NOT NULL
+        ),
+        principals_ranked AS (
+            SELECT 
+                tconst,
+                nconst,
+                category,
+                ROW_NUMBER() OVER (PARTITION BY tconst, category ORDER BY ordering) AS rn
+            FROM title_principals
+            WHERE category IN ('director', 'actor', 'actress')
+        ),
+        first_director AS (
+            SELECT tconst, nconst AS director_nconst
+            FROM principals_ranked
+            WHERE category = 'director' AND rn = 1
+        ),
+        first_actors AS (
+            SELECT tconst, nconst AS actor_nconst, rn AS actor_num
+            FROM principals_ranked
+            WHERE category IN ('actor', 'actress') AND rn <= 5
+        ),
+        director_ratings AS (
+            SELECT fd.tconst, ds.avg_rating AS director_avg_rating
+            FROM first_director fd
+            LEFT JOIN director_stats ds ON fd.director_nconst = ds.nconst
+        ),
+        actor_ratings_pivot AS (
+            SELECT 
+                fa.tconst,
+                MAX(CASE WHEN fa.actor_num = 1 THEN astat.avg_rating END) AS actor_1_avg_rating,
+                MAX(CASE WHEN fa.actor_num = 2 THEN astat.avg_rating END) AS actor_2_avg_rating,
+                MAX(CASE WHEN fa.actor_num = 3 THEN astat.avg_rating END) AS actor_3_avg_rating,
+                MAX(CASE WHEN fa.actor_num = 4 THEN astat.avg_rating END) AS actor_4_avg_rating,
+                MAX(CASE WHEN fa.actor_num = 5 THEN astat.avg_rating END) AS actor_5_avg_rating
+            FROM first_actors fa
+            LEFT JOIN actor_stats astat ON fa.actor_nconst = astat.nconst
+            GROUP BY fa.tconst
+        )
         SELECT 
-            b.tconst,
-            b.primaryTitle,
-            b.startYear,
-            b.runtimeMinutes,
-            b.genres,
-            r.averageRating,
-            r.numVotes
-        FROM title_basics b
-        JOIN title_ratings r ON b.tconst = r.tconst
-        WHERE b.titleType = 'movie'
-          AND b.startYear IS NOT NULL
-          AND b.runtimeMinutes IS NOT NULL
-          AND b.genres IS NOT NULL
-          AND r.averageRating IS NOT NULL
-        ORDER BY b.startYear
+            md.tconst,
+            md.primaryTitle,
+            md.startYear,
+            md.runtimeMinutes,
+            md.genres,
+            md.averageRating,
+            md.numVotes,
+            dr.director_avg_rating,
+            arp.actor_1_avg_rating,
+            arp.actor_2_avg_rating,
+            arp.actor_3_avg_rating,
+            arp.actor_4_avg_rating,
+            arp.actor_5_avg_rating
+        FROM movie_data md
+        LEFT JOIN director_ratings dr ON md.tconst = dr.tconst
+        LEFT JOIN actor_ratings_pivot arp ON md.tconst = arp.tconst
+        ORDER BY md.startYear
     """
 
     logger.info("Выполнение запроса к базе данных")
     cursor = conn.execute(query)
     total = 0
     batches_count = 0
-
+    
     try:
         while True:
             # Проверка лимита батчей
@@ -262,7 +372,10 @@ def get_batches(
             logger.debug(f"Получено {len(rows)} строк из БД")
 
             df_batch = pd.DataFrame(rows, columns=[
-                'tconst', 'primaryTitle', 'startYear', 'runtimeMinutes', 'genres', 'averageRating', 'numVotes'
+                'tconst', 'primaryTitle', 'startYear', 'runtimeMinutes', 'genres', 
+                'averageRating', 'numVotes', 'director_avg_rating',
+                'actor_1_avg_rating', 'actor_2_avg_rating', 'actor_3_avg_rating',
+                'actor_4_avg_rating', 'actor_5_avg_rating'
             ])
 
             # Приведение к числам
@@ -271,6 +384,11 @@ def get_batches(
             df_batch['runtimeMinutes'] = pd.to_numeric(df_batch['runtimeMinutes'], errors='coerce')
             df_batch['averageRating'] = pd.to_numeric(df_batch['averageRating'], errors='coerce')
             df_batch['numVotes'] = pd.to_numeric(df_batch['numVotes'], errors='coerce')
+            
+            # Приводим признаки актёров и режиссёров к float32
+            for col in ['director_avg_rating', 'actor_1_avg_rating', 'actor_2_avg_rating', 
+                       'actor_3_avg_rating', 'actor_4_avg_rating', 'actor_5_avg_rating']:
+                df_batch[col] = pd.to_numeric(df_batch[col], errors='coerce').astype(np.float32)
 
             # Удаление NaN в ключевых колонках
             initial_count = len(df_batch)
@@ -313,27 +431,17 @@ def get_batches(
             numeric_df['startYear'] = (df_batch['startYear'] - 1900) / 100.0
             numeric_df['runtimeMinutes'] = df_batch['runtimeMinutes'] / 100.0
             numeric_df['numVotes'] = np.log1p(df_batch['numVotes']).astype(np.float32)
-
-            # Добавляем признаки режиссёра и актёров
+            
+            # Добавляем признаки режиссёра и актёров (уже есть в df_batch)
             if use_director_stats:
                 logger.debug("Добавление признаков режиссёра")
-                numeric_df['director_avg_rating'] = df_batch['tconst'].apply(
-                    lambda t: director_avg.get(tconst_to_people.get(t, {}).get('directors', [None])[0], np.nan)
-                    if tconst_to_people.get(t, {}).get('directors') else np.nan
-                ).astype(np.float32)
+                numeric_df['director_avg_rating'] = df_batch['director_avg_rating']
 
             if use_actor_stats:
                 logger.debug("Добавление признаков актёров")
-                # До 5 актёров
                 for i in range(5):
                     col_name = f'actor_{i+1}_avg_rating'
-                    numeric_df[col_name] = df_batch['tconst'].apply(
-                        lambda t, idx=i: (
-                            actor_avg.get(tconst_to_people.get(t, {}).get('actors', [None]*idx)[idx], np.nan)
-                            if len(tconst_to_people.get(t, {}).get('actors', [])) > idx
-                            else np.nan
-                        )
-                    ).astype(np.float32)
+                    numeric_df[col_name] = df_batch[col_name]
 
             y = df_batch['averageRating'].astype(np.float32)
             X = pd.concat([genre_df, numeric_df], axis=1)
