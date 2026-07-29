@@ -31,6 +31,8 @@ def create_duckdb_table_direct(dataset_name: str, if_exists: str = "replace") ->
     """)
     logger.info(f"Таблица {table_name} создана/обновлена")
 
+    conn.execute(f"CREATE INDEX idx_{table_name}_tconst ON {table_name}(tconst);")
+
     row_count = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
     logger.info(f"Количество записей в {table_name}: {row_count}")
     conn.close()
