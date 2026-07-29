@@ -1,6 +1,9 @@
-venv/
-data/*
+```
+# Compiled Python files
+*.pyc
 __pycache__/
-.logs/*
-models/*
-*.duckdb
+
+# Logs
+*.log
+.logs/
+```

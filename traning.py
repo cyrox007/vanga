@@ -44,7 +44,7 @@ def main():
 
     # Сохраняем модель и все метаданные
     logger.info("Сохранение модели...")
-    save_trained_model(model, scaler, genres, director_avg, actor_avg, tconst_to_people, nconst_mapping)
+    save_trained_model(model, scaler, genres)
 
     logger.info("=" * 60)
     logger.info("ОБУЧЕНИЕ ЗАВЕРШЕНО УСПЕШНО")
