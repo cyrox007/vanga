@@ -1,11 +1,10 @@
-from typing import Optional, Tuple
-
+from typing import Optional, Tuple, List
 import gc
 import numpy as np
 import pickle
 from pathlib import Path
-from sklearn.linear_model import SGDRegressor
-from sklearn.preprocessing import StandardScaler
+import pandas as pd
+from catboost import CatBoostRegressor, Pool
 
 from src.data_filtr import get_batches, save_metadata
 from src.logger import setup_logger
@@ -14,43 +13,66 @@ from settings import config
 logger = setup_logger(__name__)
 
 
-def train_model(
+def train_catboost_model(
     all_genres: list,
-    batch_size: int = 5000,  # Уменьшено с 10000 для работы с ограниченной памятью
+    batch_size: int = 10000,
     max_batches: Optional[int] = None
-) -> Tuple[SGDRegressor, StandardScaler, dict, dict, dict, dict]:
+) -> Tuple[CatBoostRegressor, dict]:
     """
-    Обучает модель на батчах данных.
-    Возвращает обученную модель, scaler и вспомогательные данные.
+    Обучает CatBoost модель на батчах данных.
+    CatBoost умеет работать с категориальными признаками без one-hot кодирования.
+    
+    Returns:
+        model, metadata
     """
     logger.info("=" * 60)
-    logger.info("НАЧАЛО ОБУЧЕНИЯ МОДЕЛИ")
+    logger.info("НАЧАЛО ОБУЧЕНИЯ CATBOOST")
     logger.info(f"Параметры: batch_size={batch_size}, max_batches={max_batches}")
     logger.info(f"Количество жанров: {len(all_genres)}")
     logger.info("=" * 60)
 
-    n_features = len(all_genres) + 3 + 1 + 3  # жанры + startYear + runtimeMinutes + numVotes + director_avg + 3 актёра
-    logger.info(f"Количество признаков: {n_features}")
+    # Определяем признаки
+    # Числовые: startYear, runtimeMinutes, numVotes_log, director_avg_rating, actor_*_avg_rating
+    # Категориальные: genres (как строка), director_id, actor_ids (как строки)
+    
+    numeric_features = [
+        'startYear', 'runtimeMinutes', 'numVotes_log',
+        'director_avg_rating', 
+        'actor_1_avg_rating', 'actor_2_avg_rating', 'actor_3_avg_rating'
+    ]
+    
+    categorical_features = ['genres_combined', 'director_id', 'actor_ids_combined']
+    
+    all_feature_names = numeric_features + categorical_features
+    
+    # Индексы категориальных признаков для CatBoost (0-based)
+    cat_features_idx = list(range(len(numeric_features), len(all_feature_names)))
+    
+    logger.info(f"Числовые признаки ({len(numeric_features)}): {numeric_features}")
+    logger.info(f"Категориальные признаки ({len(categorical_features)}): {categorical_features}")
+    logger.info(f"Индексы категориальных признаков: {cat_features_idx}")
 
-    scaler = StandardScaler()
-    model = SGDRegressor(
-        loss='huber',
-        penalty='l2',
-        alpha=0.0001,
-        learning_rate='constant',
-        eta0=0.0001,
-        max_iter=1,
-        warm_start=True,
-        random_state=42,
-        tol=1e-3,
-        early_stopping=False
+    # Инициализация модели CatBoost
+    model = CatBoostRegressor(
+        iterations=500,
+        depth=6,
+        learning_rate=0.1,
+        loss_function='RMSE',
+        verbose=50,
+        cat_features=cat_features_idx,
+        random_seed=42,
+        early_stopping_rounds=50,
+        use_best_model=True
     )
-    logger.info("Модель SGDRegressor инициализирована")
+    logger.info("Модель CatBoostRegressor инициализирована")
 
-    first_batch = True
+    # Собираем все данные для обучения (CatBoost требует все данные сразу для построения деревьев)
+    # Для очень больших датасетов можно использовать catboost.Pool с параметром chunk_size
+    all_X_list = []
+    all_y_list = []
+    
     total_rows = 0
     batches_processed = 0
-    model_fitted = False
 
     try:
         for X, y, titles, tconsts in get_batches(all_genres, batch_size, max_batches=max_batches):
@@ -61,93 +83,121 @@ def train_model(
             logger.info(f"\n--- Обработка батча {batches_processed + 1} ---")
             logger.info(f"Размер батча: {len(X)} записей")
 
-            X_np = X.values.astype(np.float64)
-            y_np = y.values.astype(np.float64)
+            # Проверяем наличие всех необходимых колонок
+            missing_cols = [col for col in all_feature_names if col not in X.columns]
+            if missing_cols:
+                logger.warning(f"Отсутствуют колонки: {missing_cols}. Пропускаем батч.")
+                continue
 
-            # --- Стандартизация (один раз) ---
-            if first_batch:
-                logger.info("Первый батч: инициализация scaler")
-                scaler.partial_fit(X_np)
-                first_batch = False
-            else:
-                scaler.partial_fit(X_np)
+            # Заполняем пропуски
+            X_processed = X.copy()
+            
+            # Числовые признаки -> 0
+            for col in numeric_features:
+                if col in X_processed.columns:
+                    X_processed[col] = X_processed[col].fillna(0)
+            
+            # Категориальные признаки -> 'Unknown'
+            for col in categorical_features:
+                if col in X_processed.columns:
+                    X_processed[col] = X_processed[col].fillna('Unknown')
+                else:
+                    # Если колонки нет, создаем
+                    X_processed[col] = 'Unknown'
 
-            X_scaled = scaler.transform(X_np)
-            logger.debug(f"Данные масштабированы, shape: {X_scaled.shape}")
-
-            # --- Обучение ---
-            model.partial_fit(X_scaled, y_np)
-            total_rows += len(y_np)
+            all_X_list.append(X_processed[all_feature_names])
+            all_y_list.append(y.values)
+            
+            total_rows += len(y)
             batches_processed += 1
-            model_fitted = True
 
             logger.info(f"Обработано строк: {total_rows}")
-            logger.info(f"Текущие веса (первые 5): {model.coef_[:5]}")
-            logger.info(f"Свободный член: {model.intercept_[0]:.4f}")
 
             # Освобождаем память
-            del X_np, y_np, X_scaled
+            del X_processed
             gc.collect()
 
     except Exception as e:
-        logger.error(f"Критическая ошибка при обучении: {e}")
+        logger.error(f"Критическая ошибка при сборе данных: {e}")
         raise
     finally:
         logger.info("=" * 60)
-        logger.info("ОБУЧЕНИЕ ЗАВЕРШЕНО")
+        logger.info("СБОР ДАННЫХ ЗАВЕРШЕН")
         logger.info(f"Всего обработано строк: {total_rows}")
         logger.info(f"Всего обработано батчей: {batches_processed}")
-        if model_fitted:
-            logger.info(f"Финальные веса (первые 5): {model.coef_[:5]}")
-        else:
-            logger.warning("Модель не была обучена (не было ни одного батча)")
         logger.info("=" * 60)
 
-    # Для совместимости возвращаем пустые словари - статистика теперь встроена в запросы
-    director_avg = {}
-    actor_avg = {}
-    tconst_to_people = {}
-    nconst_mapping = {}
+    if total_rows == 0:
+        logger.error("Не удалось получить данные для обучения")
+        return None, {}
+
+    # Объединяем все батчи
+    logger.info("Объединение батчей...")
+    X_full = pd.concat(all_X_list, ignore_index=True)
+    y_full = np.concatenate(all_y_list)
     
-    return model, scaler, director_avg, actor_avg, tconst_to_people, nconst_mapping
+    logger.info(f"Итоговый размер выборки: {len(X_full)} записей")
+    
+    # Освобождаем память от списков
+    del all_X_list, all_y_list
+    gc.collect()
+
+    # Обучение модели
+    logger.info("Начало обучения CatBoost...")
+    
+    # Создаем Pool для CatBoost
+    train_pool = Pool(
+        data=X_full,
+        label=y_full,
+        cat_features=cat_features_idx,
+        feature_names=all_feature_names
+    )
+    
+    model.fit(train_pool)
+    
+    logger.info("Обучение завершено")
+    
+    # Вывод важности признаков
+    importance = model.get_feature_importance()
+    sorted_idx = np.argsort(importance)[::-1]
+    
+    logger.info("\n=== Топ-10 важных признаков ===")
+    for i in sorted_idx[:10]:
+        logger.info(f"{all_feature_names[i]}: {importance[i]:.4f}")
+    
+    # Метаданные
+    metadata = {
+        'feature_names': all_feature_names,
+        'cat_features_idx': cat_features_idx,
+        'numeric_features': numeric_features,
+        'categorical_features': categorical_features,
+        'total_rows_trained': total_rows,
+        'batches_processed': batches_processed
+    }
+    
+    return model, metadata
+
 
 def save_trained_model(
-    model: SGDRegressor,
-    scaler: StandardScaler,
-    all_genres: list
+    model: CatBoostRegressor,
+    metadata: dict
 ) -> None:
     """
-    Сохраняет обученную модель и все необходимые метаданные.
-
-    Args:
-        model: обученная модель
-        scaler: объект стандартизации
-        all_genres: список жанров
+    Сохраняет обученную CatBoost модель и метаданные.
     """
     logger.info("Начало сохранения модели и метаданных")
 
     model_dir = Path(f"{config.ABSPATH}/models")
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    # Сохраняем модель
+    # Сохраняем модель в формате CatBoost
     logger.info("Сохранение модели...")
-    with open(model_dir / 'model.pkl', 'wb') as f:
-        pickle.dump(model, f)
-    logger.info(f"Модель сохранена в {model_dir / 'model.pkl'}")
-
-    # Сохраняем scaler
-    logger.info("Сохранение scaler...")
-    with open(model_dir / 'scaler.pkl', 'wb') as f:
-        pickle.dump(scaler, f)
-    logger.info(f"Scaler сохранён в {model_dir / 'scaler.pkl'}")
+    model_path = model_dir / 'model.cbm'
+    model.save_model(model_path)
+    logger.info(f"Модель сохранена в {model_path}")
 
     # Сохраняем метаданные
     logger.info("Сохранение метаданных...")
-    metadata = {
-        'genres': all_genres,
-        'feature_names': all_genres + ['startYear', 'runtimeMinutes', 'numVotes', 'director_avg_rating'] +
-                         [f'actor_{i+1}_avg_rating' for i in range(3)]
-    }
     with open(model_dir / 'metadata.pkl', 'wb') as f:
         pickle.dump(metadata, f)
     logger.info(f"Метаданные сохранены в {model_dir / 'metadata.pkl'}")
@@ -160,75 +210,52 @@ def save_trained_model(
 
 def load_trained_model():
     """
-    Загружает обученную модель и все необходимые метаданные.
-
-    Returns:
-        model, scaler, metadata
+    Загружает обученную CatBoost модель и метаданные.
     """
     logger.info("Загрузка обученной модели и метаданных")
 
     model_dir = Path(f"{config.ABSPATH}/models")
-
     logger.info(f"Путь к моделям: {model_dir}")
 
-    with open(model_dir / 'model.pkl', 'rb') as f:
-        model = pickle.load(f)
+    # Загрузка модели CatBoost
+    model = CatBoostRegressor()
+    model.load_model(model_dir / 'model.cbm')
     logger.info("Модель загружена")
 
-    with open(model_dir / 'scaler.pkl', 'rb') as f:
-        scaler = pickle.load(f)
-    logger.info("Scaler загружен")
-
+    # Загрузка метаданных
     with open(model_dir / 'metadata.pkl', 'rb') as f:
         metadata = pickle.load(f)
-    logger.info(f"Метаданные загружены ({len(metadata['genres'])} жанров)")
+    logger.info(f"Метаданные загружены ({len(metadata['feature_names'])} признаков)")
 
     logger.info("=" * 60)
     logger.info("ВСЕ ДАННЫЕ УСПЕШНО ЗАГРУЖЕНЫ")
     logger.info("=" * 60)
 
-    return model, scaler, metadata
+    return model, metadata
 
-def interpret_model(model: SGDRegressor, scaler: StandardScaler, feature_names: list) -> None:
+
+def interpret_model(model: CatBoostRegressor, metadata: dict) -> None:
     """
-    Выводит коэффициенты модели в исходных единицах.
-    Для числовых признаков учтено ручное масштабирование.
+    Выводит важность признаков CatBoost модели.
     """
     logger.info("=" * 60)
-    logger.info("ИНТЕРПРЕТАЦИЯ МОДЕЛИ")
+    logger.info("ИНТЕРПРЕТАЦИЯ МОДЕЛИ CATBOOST")
     logger.info("=" * 60)
     
-    # Коэффициенты после учёта StandardScaler
-    coef_scaled = model.coef_ / scaler.scale_
-    coef_dict = dict(zip(feature_names, coef_scaled))
+    importance = model.get_feature_importance()
+    feature_names = metadata['feature_names']
     
-    # Поправка на ручное масштабирование для года и длительности
-    if 'startYear' in coef_dict:
-        coef_dict['startYear'] /= 100.0
-    if 'runtimeMinutes' in coef_dict:
-        coef_dict['runtimeMinutes'] /= 100.0
-    # Для numVotes поправка не нужна — он уже в логарифмическом масштабе
+    # Сортируем по важности
+    features_sorted = sorted(
+        zip(feature_names, importance),
+        key=lambda x: x[1],
+        reverse=True
+    )
     
-    # Сортируем
-    features_sorted = sorted(coef_dict.items(), key=lambda x: x[1], reverse=True)
-    
-    logger.info("=== Топ-10 положительных влияний (в исходных единицах) ===")
-    for name, val in features_sorted[:10]:
+    logger.info("=== Все признаки по важности ===")
+    for name, val in features_sorted:
         logger.info(f"{name}: {val:.4f}")
     
-    logger.info("\n=== Топ-10 отрицательных влияний ===")
-    for name, val in features_sorted[-10:]:
+    logger.info("\n=== Топ-5 важных признаков ===")
+    for name, val in features_sorted[:5]:
         logger.info(f"{name}: {val:.4f}")
-    
-    if 'startYear' in coef_dict:
-        logger.info(f"\nВлияние года выпуска (на 1 год): {coef_dict['startYear']:.4f}")
-    if 'runtimeMinutes' in coef_dict:
-        logger.info(f"Влияние длительности (на 1 минуту): {coef_dict['runtimeMinutes']:.4f}")
-    if 'numVotes' in coef_dict:
-        logger.info(f"Влияние логарифма голосов (на 1 единицу log): {coef_dict['numVotes']:.4f}")
-    if 'director_avg_rating' in coef_dict:
-        logger.info(f"Влияние среднего рейтинга режиссёра: {coef_dict['director_avg_rating']:.4f}")
-    for i in range(3):
-        col_name = f'actor_{i+1}_avg_rating'
-        if col_name in coef_dict:
-            logger.info(f"Влияние рейтинга актёра #{i+1}: {coef_dict[col_name]:.4f}")

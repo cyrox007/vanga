@@ -1,0 +1,2 @@
+2026-07-29 08:06:17 | INFO     | src.data_filtr:51 | Логгер 'src.data_filtr' инициализирован (уровень: INFO)
+2026-07-29 08:06:17 | INFO     | src.train_model:51 | Логгер 'src.train_model' инициализирован (уровень: INFO)

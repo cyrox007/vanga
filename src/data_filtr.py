@@ -330,7 +330,11 @@ def get_batches(
             bm.genres,
             bm.averageRating,
             bm.numVotes,
+            fd.nconst as director_nconst,
             ds.avg_rating as director_avg_rating,
+            ap.actor_1_nconst,
+            ap.actor_2_nconst,
+            ap.actor_3_nconst,
             a1s.avg_rating as actor_1_avg_rating,
             a2s.avg_rating as actor_2_avg_rating,
             a3s.avg_rating as actor_3_avg_rating
@@ -374,7 +378,8 @@ def get_batches(
 
             df_batch = pd.DataFrame(enriched_rows, columns=[
                 'tconst', 'primaryTitle', 'startYear', 'runtimeMinutes', 'genres', 
-                'averageRating', 'numVotes', 'director_avg_rating',
+                'averageRating', 'numVotes', 'director_nconst', 'director_avg_rating',
+                'actor_1_nconst', 'actor_2_nconst', 'actor_3_nconst',
                 'actor_1_avg_rating', 'actor_2_avg_rating', 'actor_3_avg_rating'
             ])
 
@@ -407,7 +412,7 @@ def get_batches(
                 offset += batch_size
                 continue
 
-            # Бинарные жанры
+            # Бинарные жанры (для совместимости со старым кодом, но можно убрать)
             genre_df = pd.DataFrame(0, index=df_batch.index, columns=genres, dtype=np.float32)
             for idx, genres_str in enumerate(df_batch['genres']):
                 if isinstance(genres_str, str):
@@ -429,11 +434,23 @@ def get_batches(
                     col_name = f'actor_{i+1}_avg_rating'
                     numeric_df[col_name] = df_batch[col_name].astype(np.float32)
 
-            y = df_batch['averageRating'].astype(np.float32)
-            X = pd.concat([genre_df, numeric_df], axis=1)
+            # Категориальные признаки для CatBoost
+            categorical_df = pd.DataFrame(index=df_batch.index)
+            categorical_df['genres_combined'] = df_batch['genres'].fillna('Unknown')
+            categorical_df['director_id'] = df_batch['director_nconst'].fillna('Unknown')
+            categorical_df['actor_ids_combined'] = (
+                df_batch['actor_1_nconst'].fillna('') + ',' +
+                df_batch['actor_2_nconst'].fillna('') + ',' +
+                df_batch['actor_3_nconst'].fillna('')
+            ).str.strip(',')
+            categorical_df['actor_ids_combined'] = categorical_df['actor_ids_combined'].replace('', 'Unknown')
 
-            # Финальная очистка от NaN
-            mask = ~(X.isna().any(axis=1) | y.isna())
+            y = df_batch['averageRating'].astype(np.float32)
+            X = pd.concat([numeric_df, categorical_df], axis=1)
+
+            # Финальная очистка от NaN (только для числовых признаков)
+            numeric_cols = numeric_df.columns.tolist()
+            mask = ~X[numeric_cols].isna().any(axis=1)
             X = X[mask]
             y = y[mask]
 
