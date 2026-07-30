@@ -315,4 +315,3 @@ def load_metadata():
         scaler = pickle.load(f)
     
     return metadata, scaler
-

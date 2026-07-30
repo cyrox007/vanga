@@ -4,6 +4,8 @@ import pickle
 from pathlib import Path
 import pandas as pd
 from catboost import CatBoostRegressor, Pool
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from src.data_filtr import get_batches
 from src.logger import setup_logger
 from settings import config
@@ -14,15 +16,17 @@ logger = setup_logger(__name__)
 def train_catboost_model(
     all_genres: list,
     batch_size: int = 10000,
-    max_batches: Optional[int] = None
+    max_batches: Optional[int] = None,
+    test_size: float = 0.2,
+    random_state: int = 42
 ) -> Tuple[CatBoostRegressor, dict]:
     """
     Обучает CatBoost модель на батчах данных.
-    Все батчи собираются в память (для 1 млн строк это ~200 МБ).
+    Разделяет данные на train/test и вычисляет метрики.
     """
     logger.info("=" * 60)
     logger.info("НАЧАЛО ОБУЧЕНИЯ CATBOOST")
-    logger.info(f"Параметры: batch_size={batch_size}, max_batches={max_batches}")
+    logger.info(f"Параметры: batch_size={batch_size}, max_batches={max_batches}, test_size={test_size}")
     logger.info("=" * 60)
 
     # Определяем признаки
@@ -62,7 +66,6 @@ def train_catboost_model(
                 else:
                     X_filled[col] = 'Unknown'
 
-            # Приводим к правильному порядку колонок
             X_ready = X_filled[all_feature_names]
             y_ready = y.values.astype(np.float32)
 
@@ -73,7 +76,6 @@ def train_catboost_model(
             batches_processed += 1
             logger.info(f"Батч {batches_processed}: {len(X_ready)} строк. Всего: {total_rows}")
 
-            # Периодически освобождаем память (не каждый батч)
             if batches_processed % 5 == 0:
                 import gc
                 gc.collect()
@@ -96,12 +98,23 @@ def train_catboost_model(
     X_full = pd.concat(all_X, ignore_index=True)
     y_full = np.concatenate(all_y)
 
-    # Очищаем списки
     del all_X, all_y
     import gc
     gc.collect()
 
     logger.info(f"Итоговый размер выборки: {len(X_full)} записей")
+
+    # Разделение на train/test
+    logger.info(f"Разделение данных: test_size={test_size}, random_state={random_state}")
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_full, y_full, test_size=test_size, random_state=random_state
+    )
+    logger.info(f"Обучающая выборка: {len(X_train)} записей")
+    logger.info(f"Тестовая выборка: {len(X_test)} записей")
+
+    # Освобождаем X_full, y_full (они больше не нужны)
+    del X_full, y_full
+    gc.collect()
 
     # Инициализация модели CatBoost
     model = CatBoostRegressor(
@@ -117,11 +130,11 @@ def train_catboost_model(
         }
     )
 
-    # Создаём Pool
-    logger.info("Создание Pool для CatBoost...")
+    # Создаём Pool для обучения
+    logger.info("Создание Pool для CatBoost (обучение)...")
     train_pool = Pool(
-        data=X_full,
-        label=y_full,
+        data=X_train,
+        label=y_train,
         cat_features=cat_features_idx,
         feature_names=all_feature_names
     )
@@ -131,6 +144,22 @@ def train_catboost_model(
     model.fit(train_pool)
     logger.info("Обучение завершено")
 
+    # Предсказание на тестовой выборке
+    logger.info("Оценка на тестовой выборке...")
+    y_pred = model.predict(X_test)
+
+    # Метрики
+    mae = mean_absolute_error(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    r2 = r2_score(y_test, y_pred)
+
+    logger.info("=" * 60)
+    logger.info("МЕТРИКИ НА ТЕСТОВОЙ ВЫБОРКЕ:")
+    logger.info(f"MAE  = {mae:.4f}")
+    logger.info(f"RMSE = {rmse:.4f}")
+    logger.info(f"R²   = {r2:.4f}")
+    logger.info("=" * 60)
+
     # Важность признаков
     importance = model.get_feature_importance()
     sorted_idx = np.argsort(importance)[::-1]
@@ -138,11 +167,18 @@ def train_catboost_model(
     for i in sorted_idx[:10]:
         logger.info(f"{all_feature_names[i]}: {importance[i]:.4f}")
 
+    # Метаданные включают метрики
     metadata = {
         'feature_names': all_feature_names,
         'cat_features_idx': cat_features_idx,
         'numeric_features': numeric_features,
         'categorical_features': categorical_features,
+        'test_size': test_size,
+        'test_mae': mae,
+        'test_rmse': rmse,
+        'test_r2': r2,
+        'total_rows': total_rows,
+        'batches_processed': batches_processed,
     }
     return model, metadata
 

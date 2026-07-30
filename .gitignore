@@ -11,3 +11,4 @@ data/*
 models/*
 *.wal
 temp/
+catboost_info/
