@@ -2,6 +2,8 @@ from src.create_db import create_duckdb_table_direct, create_indexes
 from src.data_loader import download_imdb_dataset
 import threading
 
+from src.database import cleanup_temp
+
 
 data = [
     "title.basics",
@@ -33,6 +35,7 @@ def main() -> None:
 
     create_duckdb_table_direct('name.basics')
     create_indexes()
+    cleanup_temp()
 
 if __name__ == "__main__":
     main()

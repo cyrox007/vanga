@@ -1,6 +1,7 @@
 import functools
 from pathlib import Path
 import duckdb
+import shutil
 
 from src.logger import setup_logger
 from settings import config
@@ -35,3 +36,21 @@ def db_connector(func):
         finally:
             db.close()
     return wrapper
+
+logger = setup_logger(__name__)
+
+def cleanup_temp():
+    """Удаляет всё содержимое временной папки, оставляя саму папку."""
+    temp_dir = Path(f"{config.ABSPATH}/temp")
+    if temp_dir.exists():
+        for item in temp_dir.iterdir():
+            try:
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+            except Exception as e:
+                logger.warning(f"Не удалось удалить {item}: {e}")
+        logger.info("Временная папка очищена")
+    else:
+        logger.debug("Временная папка не существует")
