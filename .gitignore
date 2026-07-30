@@ -10,3 +10,4 @@ data/*
 *.duckdb
 models/*
 *.wal
+temp/
