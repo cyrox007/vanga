@@ -34,14 +34,90 @@ class KinoVanga:
     def __init__(self, model_path, db_path=None):
         self.model_path = Path(model_path)
         self.model = None
-        self.db_path = (
-            Path(db_path)
-            if db_path
-            else Path(config.ABSPATH) / "imdb.duckdb"
-        )
+        self.db_path = Path(db_path) if db_path else Path(config.ABSPATH) / "imdb.duckdb"
         self.director_cache = {}
         self.actor_cache = {}
+        self._people_cache = {}  # общий кэш для всех персон
+        # Открываем соединение один раз
+        self.conn = duckdb.connect(str(self.db_path), read_only=True)
+        # Настройки памяти (опционально)
+        self.conn.execute("SET memory_limit = '400MB'")
+        self.conn.execute("SET threads = 2")
         self._load_model()
+
+    def __del__(self):
+        if hasattr(self, 'conn') and self.conn:
+            self.conn.close()
+
+    def _get_people_info(self, names: List[str]) -> dict:
+        """
+        Получает nconst и средний рейтинг для списка имён за один SQL-запрос.
+        """
+        if not names:
+            return {}
+        clean_names = [n for n in names if n and n.strip()]
+        if not clean_names:
+            return {}
+
+        # Проверяем кэш
+        cached = {}
+        missing = []
+        for name in clean_names:
+            if name in self._people_cache:
+                cached[name] = self._people_cache[name]
+            else:
+                missing.append(name)
+        if not missing:
+            return cached
+
+        # Формируем запрос для недостающих имён
+        placeholders = ','.join(['?' for _ in missing])
+        query = f"""
+            WITH person_names AS (
+                SELECT unnest(?) AS name
+            ),
+            person_ids AS (
+                SELECT DISTINCT
+                    n.nconst,
+                    n.primaryName
+                FROM name_basics n
+                JOIN person_names pn ON LOWER(n.primaryName) = LOWER(pn.name)
+            ),
+            person_stats AS (
+                SELECT
+                    pi.nconst,
+                    pi.primaryName,
+                    AVG(r.averageRating) AS avg_rating
+                FROM person_ids pi
+                LEFT JOIN title_principals tp ON pi.nconst = tp.nconst
+                LEFT JOIN title_basics b ON tp.tconst = b.tconst
+                LEFT JOIN title_ratings r ON b.tconst = r.tconst
+                WHERE b.titleType = 'movie'
+                  AND r.averageRating IS NOT NULL
+                GROUP BY pi.nconst, pi.primaryName
+            )
+            SELECT
+                ps.primaryName,
+                ps.nconst,
+                COALESCE(ps.avg_rating, 6.5) AS avg_rating
+            FROM person_stats ps
+            UNION ALL
+            SELECT
+                pn.name AS primaryName,
+                NULL AS nconst,
+                6.5 AS avg_rating
+            FROM person_names pn
+            WHERE NOT EXISTS (
+                SELECT 1 FROM person_ids pi WHERE LOWER(pi.primaryName) = LOWER(pn.name)
+            )
+        """
+        rows = self.conn.execute(query, [missing]).fetchall()
+        for row in rows:
+            name, nconst, avg_rating = row
+            info = {'nconst': nconst, 'avg_rating': avg_rating}
+            self._people_cache[name] = info
+            cached[name] = info
+        return cached
 
 
     def _load_model(self):
@@ -64,157 +140,6 @@ class KinoVanga:
 
         logger.info(f"Метаданные загружены: {metadata_path}")
 
-    def _get_director_rating(self, director_name: str) -> float:
-        """
-        Получает средний рейтинг режиссёра через DuckDB.
-        """
-
-        import time
-
-        if not director_name:
-            logger.warning("Режиссёр не указан")
-            return np.nan
-
-        conn = None
-        start_total = time.perf_counter()
-
-        logger.info(f"[DIRECTOR] Начало поиска рейтинга режиссёра: {director_name}")
-
-        try:
-            t = time.perf_counter()
-
-            logger.info(
-                f"[DIRECTOR] Подключение к DuckDB: {self.db_path}"
-            )
-
-            conn = duckdb.connect(
-                self.db_path,
-                read_only=True
-            )
-
-            logger.info(
-                f"[DIRECTOR] DuckDB подключен за "
-                f"{time.perf_counter() - t:.3f} сек"
-            )
-
-            query = """
-                WITH movie_ratings AS (
-                    SELECT b.tconst, r.averageRating
-                    FROM title_basics b
-                    JOIN title_ratings r 
-                        ON b.tconst = r.tconst
-                    WHERE b.titleType = 'movie'
-                    AND r.averageRating IS NOT NULL
-                )
-                SELECT AVG(mr.averageRating) AS avg_rating
-                FROM title_principals p
-                JOIN movie_ratings mr 
-                    ON p.tconst = mr.tconst
-                JOIN name_basics n 
-                    ON p.nconst = n.nconst
-                WHERE p.category = 'director'
-                AND LOWER(n.primaryName) = LOWER(?)
-                GROUP BY p.nconst
-                HAVING COUNT(*) >= 2
-                LIMIT 1
-            """
-
-            logger.info(
-                "[DIRECTOR] Выполнение SQL запроса..."
-            )
-
-            t = time.perf_counter()
-
-            result = conn.execute(
-                query,
-                [director_name]
-            ).fetchone()
-
-            sql_time = time.perf_counter() - t
-
-            logger.info(
-                f"[DIRECTOR] SQL выполнен за {sql_time:.3f} сек"
-            )
-
-            logger.info(
-                f"[DIRECTOR] Результат запроса: {result}"
-            )
-
-            if result and result[0] is not None:
-                logger.info(
-                    f"[DIRECTOR] Найден рейтинг: {result[0]}"
-                )
-
-                return float(result[0])
-
-            logger.warning(
-                f"[DIRECTOR] Рейтинг не найден для: {director_name}"
-            )
-
-        except Exception as e:
-            logger.exception(
-                f"[DIRECTOR] Ошибка получения рейтинга режиссёра "
-                f"{director_name}: {e}"
-            )
-
-        finally:
-            if conn:
-                conn.close()
-
-                logger.info(
-                    "[DIRECTOR] Соединение DuckDB закрыто"
-                )
-
-            logger.info(
-                f"[DIRECTOR] Общее время: "
-                f"{time.perf_counter() - start_total:.3f} сек"
-            )
-
-        return np.nan
-
-    def _get_actor_rating(self, actor_name: str) -> float:
-        """
-        Получает средний рейтинг актёра через DuckDB.
-
-        Args:
-            actor_name: Имя актёра
-
-        Returns:
-            Средний рейтинг или NaN, если не найдено
-        """
-        if not actor_name:
-            return np.nan
-
-        conn = None
-        try:
-            conn = duckdb.connect(self.db_path, read_only=True)
-            query = """
-                WITH movie_ratings AS (
-                    SELECT b.tconst, r.averageRating
-                    FROM title_basics b
-                    JOIN title_ratings r ON b.tconst = r.tconst
-                    WHERE b.titleType = 'movie' AND r.averageRating IS NOT NULL
-                )
-                SELECT AVG(mr.averageRating) AS avg_rating
-                FROM title_principals p
-                JOIN movie_ratings mr ON p.tconst = mr.tconst
-                JOIN name_basics n ON p.nconst = n.nconst
-                WHERE p.category IN ('actor', 'actress')
-                  AND LOWER(n.primaryName) = LOWER(?)
-                GROUP BY p.nconst
-                HAVING COUNT(*) >= 3
-                LIMIT 1
-            """
-            result = conn.execute(query, [actor_name]).fetchone()
-            if result and result[0] is not None:
-                return result[0]
-        except Exception as e:
-            logger.warning(f"Ошибка при получении рейтинга актёра {actor_name}: {e}")
-        finally:
-            if conn:
-                conn.close()
-        return np.nan
-
     def _prepare_features(
         self,
         year: int,
@@ -225,104 +150,49 @@ class KinoVanga:
         num_votes: Optional[int] = None
     ):
         import time
-
         t0 = time.perf_counter()
         logger.info("========== НАЧАЛО _prepare_features ==========")
 
-        logger.info(
-            f"Входные данные: year={year}, runtime={runtime}, "
-            f"genres={genres}, director={director}, "
-            f"actors={actors}, num_votes={num_votes}"
-        )
+        # 1. Жанры
+        genres_combined = ",".join(genres) if isinstance(genres, list) else (genres or "Unknown")
 
-        # ---------------------------------------------------------
-        logger.info("Шаг 1. Обработка жанров")
+        # 2. Логарифм голосов
+        num_votes_log = 7.5 if num_votes is None else np.log1p(num_votes)
 
-        if isinstance(genres, list):
-            genres_combined = ",".join(genres)
-        else:
-            genres_combined = genres or "Unknown"
+        # 3. Получаем информацию о всех персонах за один запрос
+        person_names = []
+        if director:
+            person_names.append(director)
+        if actors:
+            person_names.extend(actors[:3])
+        people_info = self._get_people_info(person_names) if person_names else {}
 
-        logger.info(f"genres_combined = {genres_combined}")
+        # 4. Данные режиссёра
+        director_info = people_info.get(director, {}) if director else {}
+        director_nconst = director_info.get('nconst')
+        director_avg_rating = director_info.get('avg_rating', 6.5)
 
-        # ---------------------------------------------------------
-        logger.info("Шаг 2. Обработка количества голосов")
+        # 5. Данные актёров (до 3)
+        actor_infos = []
+        if actors:
+            for actor in actors[:3]:
+                info = people_info.get(actor, {})
+                actor_infos.append({'nconst': info.get('nconst'), 'avg_rating': info.get('avg_rating', 6.5)})
+        # Дополняем до 3, если не хватает
+        while len(actor_infos) < 3:
+            actor_infos.append({'nconst': None, 'avg_rating': 6.5})
 
-        if num_votes is None:
-            num_votes_log = 7.5
-        else:
-            num_votes_log = np.log1p(num_votes)
+        actor_ratings = [a['avg_rating'] for a in actor_infos]
+        actor_nconsts = [a['nconst'] for a in actor_infos]
 
-        logger.info(f"num_votes_log = {num_votes_log}")
+        # 6. Категориальные признаки (используем nconst, а не имена)
+        director_id = director_nconst if director_nconst else 'Unknown'
+        actor_ids_combined = ','.join([n for n in actor_nconsts if n]) or 'Unknown'
 
-        # ---------------------------------------------------------
-        logger.info("Шаг 3. Получение рейтинга режиссёра")
-
-        t = time.perf_counter()
-
-        director_avg_rating = self._get_director_rating(director)
-
-        logger.info(
-            f"director_avg_rating = {director_avg_rating} "
-            f"(за {time.perf_counter()-t:.3f} сек)"
-        )
-
-        if np.isnan(director_avg_rating):
-            logger.info("Рейтинг режиссёра не найден, используем 6.5")
-            director_avg_rating = 6.5
-
-        # ---------------------------------------------------------
-        logger.info("Шаг 4. Получение рейтингов актёров")
-
-        actor_ratings = []
-        actors = actors or []
-
-        for i in range(3):
-
-            logger.info(f"Актёр #{i+1}")
-
-            if i < len(actors):
-
-                logger.info(f"Имя: {actors[i]}")
-
-                t = time.perf_counter()
-
-                rating = self._get_actor_rating(actors[i])
-
-                logger.info(
-                    f"Получен рейтинг {rating} "
-                    f"(за {time.perf_counter()-t:.3f} сек)"
-                )
-
-                if np.isnan(rating):
-                    logger.info("Не найден -> используем 6.5")
-                    rating = 6.5
-
-            else:
-                logger.info("Актёр отсутствует -> используем 6.5")
-                rating = 6.5
-
-            actor_ratings.append(rating)
-
-        logger.info(f"actor_ratings = {actor_ratings}")
-
-        # ---------------------------------------------------------
-        logger.info("Шаг 5. Формирование категориальных признаков")
-
-        director_id = director or "Unknown"
-
-        actor_ids_combined = (
-            ",".join(actors[:5])
-            if actors
-            else "Unknown"
-        )
-
-        logger.info(f"director_id = {director_id}")
+        logger.info(f"director_id = {director_id} (было имя: {director})")
         logger.info(f"actor_ids_combined = {actor_ids_combined}")
 
-        # ---------------------------------------------------------
-        logger.info("Шаг 6. Формирование итогового массива")
-
+        # 7. Итоговый массив признаков
         data = [
             year,
             runtime,
@@ -335,20 +205,8 @@ class KinoVanga:
             director_id,
             actor_ids_combined,
         ]
-
-        logger.info(f"Количество признаков: {len(data)}")
-        logger.info(f"Признаки: {data}")
-
         X = np.array(data, dtype=object).reshape(1, -1)
-
-        logger.info(f"Форма массива: {X.shape}")
-        logger.info(f"dtype: {X.dtype}")
-
-        logger.info(
-            f"_prepare_features завершён за {time.perf_counter()-t0:.3f} сек"
-        )
-        logger.info("========== КОНЕЦ _prepare_features ==========")
-
+        logger.info(f"_prepare_features завершён за {time.perf_counter()-t0:.3f} сек")
         return X
 
     def predict(
