@@ -10,6 +10,7 @@ import duckdb
 from src.database import db_connector
 from src.logger import setup_logger
 from settings import config
+from src.normalize import extract_title_features, normalize_genre_str
 
 logger = setup_logger(__name__)
 
@@ -244,9 +245,17 @@ def get_batches(
                     col = f'actor_{i+1}_avg_rating'
                     numeric_df[col] = df_batch[col].astype(np.float32)
 
+            title_features = df_batch['primaryTitle'].apply(extract_title_features).apply(pd.Series)
+            for col in title_features.columns:
+                if col.startswith('is_') or col in ['has_digit', 'has_colon']:
+                    numeric_df[col] = title_features[col].astype(np.float32)
+                else:
+                    # длина, кол-во слов - тоже числовые
+                    numeric_df[col] = title_features[col].astype(np.float32)
+
             # Категориальные признаки
             categorical_df = pd.DataFrame(index=df_batch.index)
-            categorical_df['genres_combined'] = df_batch['genres'].fillna('Unknown')
+            categorical_df['genres_combined'] = df_batch['genres'].fillna('Unknown').apply(normalize_genre_str)
             categorical_df['director_id'] = df_batch['director_nconst'].fillna('Unknown')
             categorical_df['actor_ids_combined'] = (
                 df_batch['actor_1_nconst'].fillna('') + ',' +
@@ -254,6 +263,14 @@ def get_batches(
                 df_batch['actor_3_nconst'].fillna('')
             ).str.strip(',')
             categorical_df['actor_ids_combined'] = categorical_df['actor_ids_combined'].replace('', 'Unknown')
+
+            title_features_df = df_batch['primaryTitle'].apply(
+                lambda x: pd.Series(extract_title_features(x))
+            )
+            # Добавляем в categorical_df или numeric_df
+            for col in title_features_df.columns:
+                categorical_df[col] = title_features_df[col].astype(str)  # как категориальные
+                # или числовые, если это бинарные флаги - их лучше оставить числовыми
 
             y = df_batch['averageRating'].astype(np.float32)
             X = pd.concat([numeric_df, categorical_df], axis=1)

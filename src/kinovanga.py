@@ -24,6 +24,7 @@ import duckdb
 
 from src.logger import setup_logger
 from settings import config
+from src.normalize import extract_title_features, normalize_genre_str
 
 logger = setup_logger(__name__)
 
@@ -147,19 +148,36 @@ class KinoVanga:
         genres: Union[str, List[str]],
         director: Optional[str] = None,
         actors: Optional[List[str]] = None,
-        num_votes: Optional[int] = None
+        num_votes: Optional[int] = None,
+        title: Optional[str] = None
     ):
         import time
         t0 = time.perf_counter()
         logger.info("========== НАЧАЛО _prepare_features ==========")
 
-        # 1. Жанры
-        genres_combined = ",".join(genres) if isinstance(genres, list) else (genres or "Unknown")
+        # 1. Нормализация жанров
+        if isinstance(genres, list):
+            genres_str = ",".join(genres)
+        else:
+            genres_str = genres or ""
+        genres_combined = normalize_genre_str(genres_str)
 
-        # 2. Логарифм голосов
+        # 2. Признаки из названия (если модель обучена с ними)
+        title_features_dict = {}
+        if title:
+            # Извлекаем все признаки из названия (функция возвращает словарь)
+            raw_title_features = extract_title_features(title)
+            # Оставляем только те, что присутствуют в метаданных модели
+            feature_names_set = set(self.metadata.get('feature_names', []))
+            for key, val in raw_title_features.items():
+                if key in feature_names_set:
+                    title_features_dict[key] = val
+
+        # 3. Логарифм голосов
         num_votes_log = 7.5 if num_votes is None else np.log1p(num_votes)
 
-        # 3. Получаем информацию о всех персонах за один запрос
+        # 4. Получаем информацию о всех персонах за один запрос
+        # 4. Получение информации о персонах (режиссёр, актёры)
         person_names = []
         if director:
             person_names.append(director)
@@ -167,12 +185,11 @@ class KinoVanga:
             person_names.extend(actors[:3])
         people_info = self._get_people_info(person_names) if person_names else {}
 
-        # 4. Данные режиссёра
         director_info = people_info.get(director, {}) if director else {}
         director_nconst = director_info.get('nconst')
         director_avg_rating = director_info.get('avg_rating', 6.5)
 
-        # 5. Данные актёров (до 3)
+        # 6. Данные актёров (до 3)
         actor_infos = []
         if actors:
             for actor in actors[:3]:
@@ -185,40 +202,47 @@ class KinoVanga:
         actor_ratings = [a['avg_rating'] for a in actor_infos]
         actor_nconsts = [a['nconst'] for a in actor_infos]
 
-        # 6. Категориальные признаки (используем nconst, а не имена)
+        # 7. Категориальные признаки (используем nconst, а не имена)
         director_id = director_nconst if director_nconst else 'Unknown'
         actor_ids_combined = ','.join([n for n in actor_nconsts if n]) or 'Unknown'
 
         logger.info(f"director_id = {director_id} (было имя: {director})")
-        logger.info(f"actor_ids_combined = {actor_ids_combined}")
+        logger.info(f"actor_ids_combined = {actor_ids_combined} ({",".join(actors)})")
 
-        # 7. Итоговый массив признаков
-        data = [
-            year,
-            runtime,
-            num_votes_log,
-            director_avg_rating,
-            actor_ratings[0],
-            actor_ratings[1],
-            actor_ratings[2],
-            genres_combined,
-            director_id,
-            actor_ids_combined,
-        ]
+        # 8. Итоговый массив признаков
+        features = {
+            'startYear': year,
+            'runtimeMinutes': runtime,
+            'numVotes_log': num_votes_log,
+            'director_avg_rating': director_avg_rating,
+            'actor_1_avg_rating': actor_ratings[0],
+            'actor_2_avg_rating': actor_ratings[1],
+            'actor_3_avg_rating': actor_ratings[2],
+            'genres_combined': genres_combined,
+            'director_id': director_id,
+            'actor_ids_combined': actor_ids_combined,
+        }
+        # Добавляем признаки из названия, если они есть
+        features.update(title_features_dict)
+
+        feature_names = self.metadata['feature_names']
+        data = []
+        for name in feature_names:
+            if name in features:
+                data.append(features[name])
+            else:
+                # Если признак отсутствует (не должен случиться), ставим разумное значение по умолчанию
+                if name in ['genres_combined', 'director_id', 'actor_ids_combined']:
+                    data.append('Unknown')
+                else:
+                    data.append(0.0)
+
         X = np.array(data, dtype=object).reshape(1, -1)
         logger.info(f"_prepare_features завершён за {time.perf_counter()-t0:.3f} сек")
         return X
 
-    def predict(
-        self,
-        year: int,
-        runtime: int,
-        genres: Union[str, List[str]],
-        director: Optional[str] = None,
-        actors: Optional[List[str]] = None,
-        num_votes: Optional[int] = None,
-        title: Optional[str] = None
-    ) -> float:
+    def predict(self, year, runtime, genres, director=None, 
+                actors=None, num_votes=None, title=None) -> float:
         """
         Предсказывает рейтинг фильма.
 
@@ -238,7 +262,7 @@ class KinoVanga:
             logger.info(f"Предсказание для фильма: {title} ({year})")
 
         # Подготовка признаков
-        X = self._prepare_features(year, runtime, genres, director, actors, num_votes)
+        X = self._prepare_features(year, runtime, genres, director, actors, num_votes, title=title)
 
         # Проверка размерности
         expected_features = len(self.metadata['feature_names'])
@@ -291,23 +315,15 @@ class KinoVanga:
 
         return dict(importance_sorted)
 
-    def explain_prediction(
-        self,
-        year: int,
-        runtime: int,
-        genres: Union[str, List[str]],
-        director: Optional[str] = None,
-        actors: Optional[List[str]] = None,
-        num_votes: Optional[int] = None,
-        title: Optional[str] = None
-    ) -> dict:
+    def explain_prediction(self, year, runtime, genres, director=None, 
+                           actors=None, num_votes=None, title=None) -> dict:
         """
         Объясняет предсказание, показывая вклад каждого признака.
 
         Returns:
             Словарь с объяснением предсказания
         """
-        X = self._prepare_features(year, runtime, genres, director, actors, num_votes)
+        X = self._prepare_features(year, runtime, genres, director, actors, num_votes, title=title)
         X_scaled = self.scaler.transform(X)
 
         # Вклад каждого признака
