@@ -29,21 +29,6 @@ def train_catboost_model(
     logger.info(f"Параметры: batch_size={batch_size}, max_batches={max_batches}, test_size={test_size}")
     logger.info("=" * 60)
 
-    # Определяем признаки
-    numeric_features = [
-        'startYear', 'runtimeMinutes', 'numVotes_log',
-        'director_avg_rating', 'actor_1_avg_rating',
-        'actor_2_avg_rating', 'actor_3_avg_rating'
-    ]
-    categorical_features = [
-        'genres_combined', 'director_id', 'actor_ids_combined'
-    ]
-    all_feature_names = numeric_features + categorical_features
-    cat_features_idx = [all_feature_names.index(x) for x in categorical_features]
-
-    logger.info(f"Числовые признаки: {numeric_features}")
-    logger.info(f"Категориальные признаки: {categorical_features}")
-
     # Списки для сбора данных
     all_X = []
     all_y = []
@@ -55,26 +40,21 @@ def train_catboost_model(
             if len(X) == 0:
                 continue
 
-            # Заполняем пропуски
+            # Универсальное заполнение пропусков
             X_filled = X.copy()
-            for col in numeric_features:
-                if col in X_filled.columns:
+            for col in X_filled.columns:
+                if pd.api.types.is_numeric_dtype(X_filled[col]):
                     X_filled[col] = X_filled[col].fillna(0)
-            for col in categorical_features:
-                if col in X_filled.columns:
-                    X_filled[col] = X_filled[col].fillna('Unknown')
                 else:
-                    X_filled[col] = 'Unknown'
+                    X_filled[col] = X_filled[col].fillna('Unknown')
 
-            X_ready = X_filled[all_feature_names]
-            y_ready = y.values.astype(np.float32)
+            # Сохраняем ВСЕ колонки
+            all_X.append(X_filled)
+            all_y.append(y.values.astype(np.float32))
 
-            all_X.append(X_ready)
-            all_y.append(y_ready)
-
-            total_rows += len(X_ready)
+            total_rows += len(X_filled)
             batches_processed += 1
-            logger.info(f"Батч {batches_processed}: {len(X_ready)} строк. Всего: {total_rows}")
+            logger.info(f"Батч {batches_processed}: {len(X_filled)} строк. Всего: {total_rows}")
 
             if batches_processed % 5 == 0:
                 import gc
@@ -97,6 +77,21 @@ def train_catboost_model(
     logger.info("Объединение батчей...")
     X_full = pd.concat(all_X, ignore_index=True)
     y_full = np.concatenate(all_y)
+
+    # Категориальные признаки (всегда такие)
+    categorical_features = ['genres_combined', 'director_id', 'actor_ids_combined']
+    # Все остальные колонки – числовые
+    all_columns = X_full.columns.tolist()
+    numeric_features = [col for col in all_columns if col not in categorical_features]
+
+    # Итоговый порядок признаков (сначала числовые, потом категориальные)
+    all_feature_names = numeric_features + categorical_features
+
+    # Индексы категориальных признаков
+    cat_features_idx = [all_feature_names.index(col) for col in categorical_features]
+
+    # Переупорядочиваем X_full в соответствии с all_feature_names
+    X_full = X_full[all_feature_names]
 
     del all_X, all_y
     import gc

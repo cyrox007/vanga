@@ -15,7 +15,7 @@
 а не загружается из файлов. Это позволяет работать с ограниченной памятью.
 """
 
-from catboost import CatBoostRegressor
+from catboost import CatBoostRegressor, Pool
 import numpy as np
 import pickle
 from pathlib import Path
@@ -241,8 +241,8 @@ class KinoVanga:
         logger.info(f"_prepare_features завершён за {time.perf_counter()-t0:.3f} сек")
         return X
 
-    def predict(self, year, runtime, genres, director=None, 
-                actors=None, num_votes=None, title=None) -> float:
+    def predict(self, year, runtime, genres, director=None,
+            actors=None, num_votes=None, title=None, explain=False) -> float:
         """
         Предсказывает рейтинг фильма.
 
@@ -273,14 +273,29 @@ class KinoVanga:
             )
 
         # Предсказание
-        rating = self.model.predict(X)[0]
-
-        # Ограничиваем диапазон 0-10
+        rating = float(self.model.predict(X)[0])
         rating = max(0, min(10, rating))
-
-        logger.info(f"Предсказанный рейтинг: {rating:.2f}")
-
-        return round(rating, 2)
+        rounded_rating = round(rating, 2)
+        
+        if not explain:
+            return rounded_rating
+        
+        # --- Объяснение через SHAP ---
+        test_pool = Pool(
+            data=X,
+            cat_features=self.metadata.get('cat_features_idx', []),
+            feature_names=self.metadata['feature_names']
+        )
+        shap_values = self.model.get_feature_importance(data=test_pool, type='ShapValues')[0]
+        base_value = shap_values[-1]
+        contributions = dict(zip(self.metadata['feature_names'], shap_values[:-1]))
+        
+        return {
+            'rating': rounded_rating,
+            'base': base_value,
+            'contributions': contributions,
+            'explanation': self._format_explanation(contributions)
+        }
 
     def predict_batch(self, movies: List[dict]) -> List[float]:
         """
@@ -315,36 +330,33 @@ class KinoVanga:
 
         return dict(importance_sorted)
 
-    def explain_prediction(self, year, runtime, genres, director=None, 
-                           actors=None, num_votes=None, title=None) -> dict:
-        """
-        Объясняет предсказание, показывая вклад каждого признака.
-
-        Returns:
-            Словарь с объяснением предсказания
-        """
+    def explain_prediction(self, year, runtime, genres, director=None,
+                       actors=None, num_votes=None, title=None) -> dict:
         X = self._prepare_features(year, runtime, genres, director, actors, num_votes, title=title)
-        X_scaled = self.scaler.transform(X)
+        # SHAP-значения: массив (1, n_features+1), последний элемент – базовое значение
+        shap_values = self.model.get_feature_importance(data=X, type='ShapValues')[0]
+        base_value = shap_values[-1]
+        contributions = dict(zip(self.metadata['feature_names'], shap_values[:-1]))
+        pred = float(self.model.predict(X)[0])
+        return {
+            'rating': pred,
+            'base': base_value,
+            'contributions': contributions,
+            'explanation': self._format_explanation(contributions)
+        }
 
-        # Вклад каждого признака
-        contributions = X_scaled[0] * self.model.coef_
-
-        feature_names = self.metadata['feature_names']
-        explanation = {}
-
-        for name, contrib in zip(feature_names, contributions):
-            explanation[name] = contrib
-
-        # Добавляем базовое значение (intercept)
-        explanation['base_value'] = self.model.intercept_[0]
-        explanation['predicted_rating'] = self.predict(year, runtime, genres, director, actors, num_votes, title)
-
-        # Топ-5 положительных и отрицательных влияний
-        sorted_contrib = sorted(explanation.items(), key=lambda x: x[1], reverse=True)
-        explanation['top_positive'] = sorted_contrib[:5]
-        explanation['top_negative'] = sorted_contrib[-5:]
-
-        return explanation
+    def _format_explanation(self, contributions):
+        parts = []
+        # Сортируем по абсолютному вкладу, берём топ-5
+        sorted_items = sorted(contributions.items(), key=lambda x: abs(x[1]), reverse=True)
+        for name, val in sorted_items[:5]:
+            if abs(val) > 0.05:  # порог значимости
+                sign = '+' if val > 0 else ''
+                parts.append(f"{name}: {sign}{val:.2f}")
+        if parts:
+            return "Рейтинг сформирован за счёт: " + "; ".join(parts)
+        else:
+            return "Нет значимых факторов"
 
 
 # Удобная функция для быстрого использования

@@ -264,14 +264,6 @@ def get_batches(
             ).str.strip(',')
             categorical_df['actor_ids_combined'] = categorical_df['actor_ids_combined'].replace('', 'Unknown')
 
-            title_features_df = df_batch['primaryTitle'].apply(
-                lambda x: pd.Series(extract_title_features(x))
-            )
-            # Добавляем в categorical_df или numeric_df
-            for col in title_features_df.columns:
-                categorical_df[col] = title_features_df[col].astype(str)  # как категориальные
-                # или числовые, если это бинарные флаги - их лучше оставить числовыми
-
             y = df_batch['averageRating'].astype(np.float32)
             X = pd.concat([numeric_df, categorical_df], axis=1)
 
@@ -301,23 +293,19 @@ def get_batches(
         conn.close()
         logger.info("Соединение с БД закрыто")
 
-def save_metadata(all_genres, model, scaler):
-    """Сохраняет метаданные и scaler. Статистика теперь встроена в SQL запросы."""
+def save_metadata(feature_names, model, scaler, genres=None):
     model_dir = Path(f"{config.ABSPATH}/models")
     model_dir.mkdir(parents=True, exist_ok=True)
     
     metadata = {
-        'genres': all_genres,
-        'feature_names': all_genres + ['startYear', 'runtimeMinutes', 'numVotes', 'director_avg_rating'] +
-                         [f'actor_{i+1}_avg_rating' for i in range(3)]
+        'feature_names': feature_names,
+        'genres': genres or [],
+        # можно добавить метрики теста
     }
-    
     with open(model_dir / 'metadata.pkl', 'wb') as f:
         pickle.dump(metadata, f)
-    
     with open(model_dir / 'scaler.pkl', 'wb') as f:
         pickle.dump(scaler, f)
-    
     logger.info("Метаданные сохранены")
 
 
