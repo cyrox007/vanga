@@ -400,6 +400,32 @@ class EnrichmentStore:
             [key, value, datetime.now(timezone.utc)],
         )
 
+    def reset_state(self, key: str) -> None:
+        self.conn.execute(
+            "DELETE FROM enrichment_state WHERE state_key = ?",
+            [key],
+        )
+
+    def load_retry_candidates(self, limit: int) -> list[MovieCandidate]:
+        rows = self.conn.execute(
+            """
+            SELECT imdb_id, imdb_title, imdb_year
+            FROM film_enrichment
+            WHERE status = 'error'
+            ORDER BY fetched_at
+            LIMIT ?
+            """,
+            [limit],
+        ).fetchall()
+        return [
+            MovieCandidate(
+                imdb_id=str(row[0]),
+                title=str(row[1] or ""),
+                year=int(row[2]) if row[2] is not None else None,
+            )
+            for row in rows
+        ]
+
     def upsert(
         self,
         candidate: MovieCandidate,
