@@ -29,3 +29,24 @@ rating = kino.predict_rating(
     description="Эпическая космическая сага о борьбе за ресурсы..."
 )
 print(rating)  # → 8.7
+
+## 🔐 Демонстрация интеграции с jsint-site
+
+Ветка `feature/jsint-site-demo` добавляет минимальный клиент control plane. Он показывает реальный сценарий: установка Vanga получает собственный `installation_id`, активируется лицензией из jsint-site и после этого отправляет heartbeat.
+
+Состояние хранится вне репозитория в `~/.vanga/jsint.json` (путь можно переопределить через `VANGA_JSINT_STATE`).
+
+```bash
+# Проверка API
+python jsint_demo.py --site https://your-jsint-site.example health
+
+# Активация одноразовым кодом из админки jsint-site
+python jsint_demo.py --site https://your-jsint-site.example activate --code <activation-code>
+
+# Проверка связи — после этого установка видна в реестре лицензий как «На связи»
+python jsint_demo.py --site https://your-jsint-site.example heartbeat
+```
+
+Для активации готовым подписанным токеном вместо кода используйте `--license <token>`.
+
+> Это демонстрационный клиент лицензирования/heartbeat. Доставка релизов Vanga пока намеренно не подключена: текущий release pipeline jsint-site ещё содержит Workspace Organizer-специфичные поля и будет обобщён отдельно.
