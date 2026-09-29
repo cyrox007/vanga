@@ -1,6 +1,11 @@
 from typing import Optional, Tuple
 import numpy as np
+import json
+import os
 import pickle
+import shutil
+from datetime import datetime, timezone
+from uuid import uuid4
 from pathlib import Path
 import pandas as pd
 from catboost import CatBoostRegressor, Pool
@@ -178,23 +183,105 @@ def train_catboost_model(
     return model, metadata
 
 
+def _model_root() -> Path:
+    root = Path(config.ABSPATH) / "models"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def resolve_current_model_path() -> Path:
+    """Возвращает путь к активной модели.
+
+    Новые обучения публикуются как неизменяемые каталоги releases/<generation>.
+    Переключение происходит атомарной заменой файла current.json. Для старых
+    установок оставлен fallback на models/model.cbm.
+    """
+    root = _model_root()
+    pointer = root / "current.json"
+    if pointer.exists():
+        try:
+            payload = json.loads(pointer.read_text(encoding="utf-8"))
+            generation = str(payload["generation"]).strip()
+            candidate = root / "releases" / generation / "model.cbm"
+            metadata = candidate.parent / "metadata.pkl"
+            if candidate.is_file() and metadata.is_file():
+                return candidate
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            logger.warning(f"Не удалось прочитать models/current.json: {exc}")
+
+    legacy = root / "model.cbm"
+    if legacy.is_file() and (root / "metadata.pkl").is_file():
+        return legacy
+    raise FileNotFoundError("Активная модель Vanga не найдена")
+
+
 def save_trained_model(model: CatBoostRegressor, metadata: dict) -> None:
-    """Сохраняет модель и метаданные."""
-    model_dir = Path(f"{config.ABSPATH}/models")
-    model_dir.mkdir(parents=True, exist_ok=True)
-    model.save_model(model_dir / 'model.cbm')
-    with open(model_dir / 'metadata.pkl', 'wb') as f:
-        pickle.dump(metadata, f)
-    logger.info(f"Модель и метаданные сохранены в {model_dir}")
+    """Публикует новую модель атомарно, не затрагивая рабочую версию при сбое."""
+    root = _model_root()
+    releases_dir = root / "releases"
+    releases_dir.mkdir(parents=True, exist_ok=True)
+
+    generation = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
+    release_dir = releases_dir / generation
+    release_dir.mkdir(parents=False, exist_ok=False)
+
+    model_path = release_dir / "model.cbm"
+    metadata_path = release_dir / "metadata.pkl"
+    try:
+        model.save_model(str(model_path), format="cbm")
+        with metadata_path.open("wb") as handle:
+            pickle.dump(metadata, handle)
+
+        # Проверяем, что обе части bundle реально читаются до публикации.
+        check_model = CatBoostRegressor()
+        check_model.load_model(str(model_path))
+        with metadata_path.open("rb") as handle:
+            check_metadata = pickle.load(handle)
+        if not isinstance(check_metadata, dict) or not check_metadata.get("feature_names"):
+            raise RuntimeError("Метаданные обученной модели повреждены")
+
+        pointer_tmp = root / ".current.json.tmp"
+        pointer_tmp.write_text(
+            json.dumps(
+                {
+                    "generation": generation,
+                    "published_at": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(pointer_tmp, root / "current.json")
+        logger.info(f"Опубликована новая модель: generation={generation}")
+
+        # Храним три последних поколения, чтобы был простой ручной rollback.
+        generations = sorted(
+            [item for item in releases_dir.iterdir() if item.is_dir()],
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in generations[3:]:
+            try:
+                shutil.rmtree(stale)
+            except OSError as exc:
+                logger.warning(f"Не удалось удалить старую модель {stale}: {exc}")
+    except Exception:
+        # До замены current.json рабочая модель остаётся прежней.
+        try:
+            shutil.rmtree(release_dir)
+        except OSError:
+            pass
+        raise
 
 
 def load_trained_model() -> Tuple[CatBoostRegressor, dict]:
-    """Загружает модель и метаданные."""
-    model_dir = Path(f"{config.ABSPATH}/models")
+    """Загружает текущую опубликованную модель и её метаданные."""
+    model_path = resolve_current_model_path()
     model = CatBoostRegressor()
-    model.load_model(model_dir / 'model.cbm')
-    with open(model_dir / 'metadata.pkl', 'rb') as f:
-        metadata = pickle.load(f)
+    model.load_model(str(model_path))
+    with (model_path.parent / "metadata.pkl").open("rb") as handle:
+        metadata = pickle.load(handle)
     return model, metadata
 
 
