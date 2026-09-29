@@ -1,0 +1,16 @@
+[Unit]
+Description=Vanga periodic model retraining
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vanga
+Group=vanga
+WorkingDirectory=/opt/vanga
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/traning.py
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=6h
