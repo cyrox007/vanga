@@ -1,0 +1,21 @@
+[Unit]
+Description=Vanga demo inference service
+After=network.target
+
+[Service]
+Type=simple
+User=vanga
+Group=vanga
+WorkingDirectory=/opt/vanga
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/vanga/.venv/bin/gunicorn --workers 1 --threads 2 --timeout 60 --bind 127.0.0.1:9100 api:app
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/vanga/models /opt/vanga/.logs /opt/vanga/temp
+
+[Install]
+WantedBy=multi-user.target
