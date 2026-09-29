@@ -1,8 +1,8 @@
 from src.kinovanga import KinoVanga
-from settings import config
+from src.train_model import resolve_current_model_path
 
 # Обучение (опционально)
-kino = KinoVanga(f"{config.ABSPATH}/models/model.cbm")
+kino = KinoVanga(resolve_current_model_path())
 
 # Предсказание
 result = kino.predict(
