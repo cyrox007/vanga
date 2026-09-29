@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Vanga model retraining
+
+[Timer]
+OnCalendar=Sun *-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=30m
+Unit=vanga-retrain.service
+
+[Install]
+WantedBy=timers.target
