@@ -452,7 +452,7 @@ class EnrichmentStore:
                 error,
                 datetime.now(timezone.utc),
             ],
-        ]
+        )
 
 
 def load_candidates(
