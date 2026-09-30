@@ -1,0 +1,22 @@
+[project]
+name = "kinovanga"
+version = "0.1.0"
+description = "Демонстрационная модель предсказания рейтинга фильма"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "catboost>=1.2,<2",
+  "duckdb>=1.1,<2",
+  "numpy>=2.0,<3",
+  "pandas>=2.2,<4",
+  "scikit-learn>=1.5,<2",
+  "Flask>=3.1,<4",
+  "gunicorn>=23,<24",
+  "requests>=2.32,<3",
+  "beautifulsoup4>=4.13,<5",
+]
+
+[tool.setuptools]
+py-modules = ["api", "enrich", "settings", "traning"]
+
+[tool.setuptools.packages.find]
+include = ["src*"]

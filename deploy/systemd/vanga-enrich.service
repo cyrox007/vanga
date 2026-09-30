@@ -1,0 +1,16 @@
+[Unit]
+Description=Vanga Wikimedia enrichment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vanga
+Group=vanga
+WorkingDirectory=/opt/vanga
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/enrich.py --since-year 2020 --max-items 250 --batch-size 10
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=2h
