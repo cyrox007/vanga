@@ -5,6 +5,10 @@ from pathlib import Path
 class Config:
     ABSPATH = os.path.dirname(os.path.abspath(__file__))
 
+    IMDB_DB_PATH = os.getenv(
+        "VANGA_IMDB_DB",
+        str(Path(ABSPATH) / "imdb.duckdb"),
+    )
     ENRICHMENT_DB_PATH = os.getenv(
         "VANGA_ENRICHMENT_DB",
         str(Path(ABSPATH) / "enrichment.duckdb"),
