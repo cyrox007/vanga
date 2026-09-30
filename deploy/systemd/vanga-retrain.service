@@ -9,9 +9,16 @@ User=vanga
 Group=vanga
 WorkingDirectory=/opt/vanga
 Environment=PYTHONUNBUFFERED=1
+Environment=MALLOC_ARENA_MAX=2
 ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/ds_update.py
 ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/traning.py
-Nice=10
+Nice=15
+CPUQuota=100%
+MemoryHigh=900M
+MemoryMax=1200M
+MemorySwapMax=2G
+OOMPolicy=stop
+OOMScoreAdjust=500
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 TimeoutStartSec=6h
