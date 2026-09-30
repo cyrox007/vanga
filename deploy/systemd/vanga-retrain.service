@@ -9,6 +9,7 @@ User=vanga
 Group=vanga
 WorkingDirectory=/opt/vanga
 Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/ds_update.py
 ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/traning.py
 Nice=10
 IOSchedulingClass=best-effort
