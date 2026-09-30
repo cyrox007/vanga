@@ -13,10 +13,12 @@ from src.data_filtr import get_batches
 class TrainingFeatureContractTests(unittest.TestCase):
     def test_features_use_only_past_films_and_keep_actor_rank(self):
         old_abspath = config.ABSPATH
+        old_imdb_db_path = config.IMDB_DB_PATH
         with tempfile.TemporaryDirectory() as tmp:
             config.ABSPATH = tmp
+            db_path = Path(tmp) / "imdb.duckdb"
+            config.IMDB_DB_PATH = str(db_path)
             try:
-                db_path = Path(tmp) / "imdb.duckdb"
                 conn = duckdb.connect(str(db_path))
                 conn.execute(
                     """
@@ -120,6 +122,7 @@ class TrainingFeatureContractTests(unittest.TestCase):
                 self.assertEqual(target_X["actor_3_id"], "nm_actor3")
             finally:
                 config.ABSPATH = old_abspath
+                config.IMDB_DB_PATH = old_imdb_db_path
 
 
 if __name__ == "__main__":
