@@ -19,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--imdb-db",
-        default=str(Path(config.ABSPATH) / "imdb.duckdb"),
+        default=config.IMDB_DB_PATH,
         help="Путь к исходной imdb.duckdb.",
     )
     parser.add_argument(
