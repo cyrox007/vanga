@@ -60,6 +60,17 @@ def _training_root() -> Path:
     return root
 
 
+def _ensure_free_disk(path: Path) -> None:
+    reserve_bytes = int(config.TRAIN_MIN_FREE_DISK_GB * 1024 ** 3)
+    free_bytes = shutil.disk_usage(path).free
+    if free_bytes < reserve_bytes:
+        raise RuntimeError(
+            "Недостаточно свободного места для disk-first обучения: "
+            f"свободно={free_bytes / 1024 ** 3:.2f} ГБ, "
+            f"требуемый резерв={config.TRAIN_MIN_FREE_DISK_GB:.2f} ГБ"
+        )
+
+
 def _actual_years(series: pd.Series) -> np.ndarray:
     return np.rint(
         series.to_numpy(dtype=np.float64) * 100.0 + 1900.0
@@ -122,6 +133,7 @@ def prepare_training_dataset(
         + uuid4().hex[:8]
     )
     root.mkdir(parents=False, exist_ok=False)
+    _ensure_free_disk(root)
 
     train_path = root / "train.tsv"
     test_path = root / "test.tsv"
@@ -214,6 +226,8 @@ def prepare_training_dataset(
         years = _actual_years(X_filled["startYear"])
         train_mask = years < test_from_year
         test_mask = ~train_mask
+
+        _ensure_free_disk(root)
 
         if train_mask.any():
             train_rows += _write_rows(
