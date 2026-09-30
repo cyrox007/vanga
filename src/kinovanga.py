@@ -35,7 +35,7 @@ class KinoVanga:
     def __init__(self, model_path, db_path=None):
         self.model_path = Path(model_path)
         self.model = None
-        self.db_path = Path(db_path) if db_path else Path(config.ABSPATH) / "imdb.duckdb"
+        self.db_path = Path(db_path) if db_path else Path(config.IMDB_DB_PATH)
         self.director_cache = {}
         self.actor_cache = {}
         self._people_cache = {}  # общий кэш для всех персон
