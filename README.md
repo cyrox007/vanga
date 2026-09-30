@@ -136,3 +136,21 @@ export VANGA_WIKIMEDIA_USER_AGENT='KinoVanga/0.1 (https://jsinteractive.ru; admi
 Для постоянного медленного наполнения есть `vanga-enrich.service` и `vanga-enrich.timer`. Таймер обрабатывает ограниченное число фильмов за запуск и не создаёт высокую нагрузку на Wikimedia.
 
 Важно: enrichment не заменяет обновление исходных IMDb datasets. Если локальная `imdb.duckdb` старая, сначала нужно обновить сам IMDb source pipeline; Wikimedia обогатит только фильмы, уже известные локальной базе.
+
+
+### Безопасное обучение на малом сервере
+
+Полное обучение больше не собирает все батчи в один pandas DataFrame. Подготовленные признаки пишутся в `temp/training/<generation>/train.tsv` и `test.tsv`, после чего CatBoost читает файловые Pool.
+
+Защита retrain-сервиса:
+
+- один поток CatBoost;
+- `used_ram_limit=900mb`;
+- systemd `MemoryHigh=900M`;
+- systemd `MemoryMax=1200M`;
+- `MemorySwapMax=2G`;
+- `CPUQuota=100%`;
+- повышенный `OOMScoreAdjust`, чтобы при нехватке памяти первым завершался retrain, а не inference;
+- минимум 3 ГБ свободного диска сохраняется как резерв. Порог меняется через `VANGA_TRAIN_MIN_FREE_DISK_GB`.
+
+Если retrain превышает лимиты или заканчивается ошибкой, новая модель не публикуется. `models/current.json` остаётся на предыдущем успешном поколении, поэтому работающий Vanga API продолжает обслуживать запросы старой моделью.
