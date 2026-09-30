@@ -59,7 +59,7 @@ def get_batches(
     del genres  # список жанров оставлен в сигнатуре для обратной совместимости
 
     logger.info("Инициализация генератора обучающих батчей")
-    conn = duckdb.connect(f"{config.ABSPATH}/imdb.duckdb")
+    conn = duckdb.connect(config.IMDB_DB_PATH)
     conn.execute("SET memory_limit = '700MB'")
     conn.execute("SET threads = 2")
     conn.execute("SET preserve_insertion_order = false")
