@@ -11,10 +11,9 @@ logger = setup_logger(__name__)
 def db_connector(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        db = duckdb.connect(f"{config.ABSPATH}/imdb.duckdb")
-
-        # 1. Ограничиваем память до 60% от 1 ГБ (~600 МБ), чтобы оставить запас для ОС и других операций[reference:7]
-        db = duckdb.connect(f"{config.ABSPATH}/imdb.duckdb")
+        # Ограничиваем рабочее соединение по памяти, чтобы подготовка данных
+        # не вытесняла inference и соседние сервисы.
+        db = duckdb.connect(config.IMDB_DB_PATH)
         try:
             # Настройки памяти
             db.execute("SET memory_limit = '600MB'")

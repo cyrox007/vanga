@@ -1,5 +1,5 @@
 [Unit]
-Description=Vanga periodic model retraining
+Description=Vanga Wikimedia enrichment
 After=network-online.target
 Wants=network-online.target
 
@@ -9,9 +9,8 @@ User=vanga
 Group=vanga
 WorkingDirectory=/opt/vanga
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/ds_update.py
-ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/traning.py
+ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/enrich.py --since-year 2020 --max-items 250 --batch-size 10
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
-TimeoutStartSec=6h
+TimeoutStartSec=2h
