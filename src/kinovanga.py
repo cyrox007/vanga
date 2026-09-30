@@ -50,74 +50,87 @@ class KinoVanga:
         if hasattr(self, 'conn') and self.conn:
             self.conn.close()
 
-    def _get_people_info(self, names: List[str]) -> dict:
-        """
-        Получает nconst и средний рейтинг для списка имён за один SQL-запрос.
-        """
-        if not names:
-            return {}
-        clean_names = [n for n in names if n and n.strip()]
+    def _get_people_info(self, names: List[str], before_year: int) -> dict:
+        """Возвращает ID и средний рейтинг персон только по прошлым фильмам."""
+        clean_names = [name.strip() for name in names if name and name.strip()]
         if not clean_names:
             return {}
 
-        # Проверяем кэш
-        cached = {}
-        missing = []
+        cached: dict[str, dict] = {}
+        missing: list[str] = []
+
         for name in clean_names:
-            if name in self._people_cache:
-                cached[name] = self._people_cache[name]
+            cache_key = (name.casefold(), int(before_year))
+            if cache_key in self._people_cache:
+                cached[name] = self._people_cache[cache_key]
             else:
                 missing.append(name)
+
         if not missing:
             return cached
 
-        # Формируем запрос для недостающих имён
-        placeholders = ','.join(['?' for _ in missing])
-        query = f"""
+        query = """
             WITH person_names AS (
                 SELECT unnest(?) AS name
             ),
             person_ids AS (
-                SELECT DISTINCT
+                SELECT
+                    pn.name AS requested_name,
                     n.nconst,
                     n.primaryName
-                FROM name_basics n
-                JOIN person_names pn ON LOWER(n.primaryName) = LOWER(pn.name)
+                FROM person_names pn
+                LEFT JOIN name_basics n
+                  ON LOWER(n.primaryName) = LOWER(pn.name)
             ),
             person_stats AS (
                 SELECT
+                    pi.requested_name,
                     pi.nconst,
-                    pi.primaryName,
-                    AVG(r.averageRating) AS avg_rating
+                    AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating
                 FROM person_ids pi
-                LEFT JOIN title_principals tp ON pi.nconst = tp.nconst
-                LEFT JOIN title_basics b ON tp.tconst = b.tconst
-                LEFT JOIN title_ratings r ON b.tconst = r.tconst
-                WHERE b.titleType = 'movie'
-                  AND r.averageRating IS NOT NULL
-                GROUP BY pi.nconst, pi.primaryName
+                LEFT JOIN title_principals tp
+                  ON tp.nconst = pi.nconst
+                LEFT JOIN title_basics b
+                  ON b.tconst = tp.tconst
+                LEFT JOIN title_ratings r
+                  ON r.tconst = b.tconst
+                WHERE pi.nconst IS NOT NULL
+                  AND b.titleType = 'movie'
+                  AND TRY_CAST(b.startYear AS INTEGER) < ?
+                  AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
+                GROUP BY pi.requested_name, pi.nconst
+            ),
+            ranked AS (
+                SELECT
+                    requested_name,
+                    nconst,
+                    avg_rating,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY LOWER(requested_name)
+                        ORDER BY avg_rating DESC NULLS LAST, nconst
+                    ) AS rn
+                FROM person_stats
             )
             SELECT
-                ps.primaryName,
-                ps.nconst,
-                COALESCE(ps.avg_rating, 6.5) AS avg_rating
-            FROM person_stats ps
-            UNION ALL
-            SELECT
-                pn.name AS primaryName,
-                NULL AS nconst,
-                6.5 AS avg_rating
+                pn.name,
+                r.nconst,
+                COALESCE(r.avg_rating, 6.5)
             FROM person_names pn
-            WHERE NOT EXISTS (
-                SELECT 1 FROM person_ids pi WHERE LOWER(pi.primaryName) = LOWER(pn.name)
-            )
+            LEFT JOIN ranked r
+              ON LOWER(r.requested_name) = LOWER(pn.name)
+             AND r.rn = 1
         """
-        rows = self.conn.execute(query, [missing]).fetchall()
-        for row in rows:
-            name, nconst, avg_rating = row
-            info = {'nconst': nconst, 'avg_rating': avg_rating}
-            self._people_cache[name] = info
-            cached[name] = info
+
+        rows = self.conn.execute(query, [missing, int(before_year)]).fetchall()
+        for name, nconst, avg_rating in rows:
+            info = {
+                "nconst": nconst,
+                "avg_rating": float(avg_rating) if avg_rating is not None else 6.5,
+            }
+            cache_key = (str(name).casefold(), int(before_year))
+            self._people_cache[cache_key] = info
+            cached[str(name)] = info
+
         return cached
 
 
@@ -149,97 +162,83 @@ class KinoVanga:
         director: Optional[str] = None,
         actors: Optional[List[str]] = None,
         num_votes: Optional[int] = None,
-        title: Optional[str] = None
+        title: Optional[str] = None,
     ):
+        """Готовит признаки в точности в том же виде, что и training pipeline."""
         import time
-        t0 = time.perf_counter()
-        logger.info("========== НАЧАЛО _prepare_features ==========")
 
-        # 1. Нормализация жанров
-        if isinstance(genres, list):
-            genres_str = ",".join(genres)
-        else:
-            genres_str = genres or ""
+        del num_votes  # пострелизный признак намеренно не используется
+
+        t0 = time.perf_counter()
+        actors = actors or []
+
+        genres_str = ",".join(genres) if isinstance(genres, list) else (genres or "")
         genres_combined = normalize_genre_str(genres_str)
 
-        # 2. Признаки из названия (если модель обучена с ними)
+        feature_names_set = set(self.metadata.get("feature_names", []))
         title_features_dict = {}
         if title:
-            # Извлекаем все признаки из названия (функция возвращает словарь)
-            raw_title_features = extract_title_features(title)
-            # Оставляем только те, что присутствуют в метаданных модели
-            feature_names_set = set(self.metadata.get('feature_names', []))
-            for key, val in raw_title_features.items():
+            for key, value in extract_title_features(title).items():
                 if key in feature_names_set:
-                    title_features_dict[key] = val
+                    title_features_dict[key] = value
 
-        # 3. Логарифм голосов
-        num_votes_log = 7.5 if num_votes is None else np.log1p(num_votes)
-
-        # 4. Получаем информацию о всех персонах за один запрос
-        # 4. Получение информации о персонах (режиссёр, актёры)
-        person_names = []
+        person_names: list[str] = []
         if director:
             person_names.append(director)
-        if actors:
-            person_names.extend(actors[:3])
-        people_info = self._get_people_info(person_names) if person_names else {}
+        person_names.extend(actors[:3])
+        people_info = (
+            self._get_people_info(person_names, before_year=int(year))
+            if person_names
+            else {}
+        )
 
         director_info = people_info.get(director, {}) if director else {}
-        director_nconst = director_info.get('nconst')
-        director_avg_rating = director_info.get('avg_rating', 6.5)
+        director_id = director_info.get("nconst") or "Unknown"
+        director_avg_rating = float(director_info.get("avg_rating", 6.5))
 
-        # 6. Данные актёров (до 3)
-        actor_infos = []
-        if actors:
-            for actor in actors[:3]:
-                info = people_info.get(actor, {})
-                actor_infos.append({'nconst': info.get('nconst'), 'avg_rating': info.get('avg_rating', 6.5)})
-        # Дополняем до 3, если не хватает
+        actor_infos: list[dict] = []
+        for actor in actors[:3]:
+            info = people_info.get(actor, {})
+            actor_infos.append(
+                {
+                    "nconst": info.get("nconst") or "Unknown",
+                    "avg_rating": float(info.get("avg_rating", 6.5)),
+                }
+            )
         while len(actor_infos) < 3:
-            actor_infos.append({'nconst': None, 'avg_rating': 6.5})
+            actor_infos.append({"nconst": "Unknown", "avg_rating": 6.5})
 
-        actor_ratings = [a['avg_rating'] for a in actor_infos]
-        actor_nconsts = [a['nconst'] for a in actor_infos]
-
-        # 7. Категориальные признаки (используем nconst, а не имена)
-        director_id = director_nconst if director_nconst else 'Unknown'
-        actor_ids_combined = ','.join([n for n in actor_nconsts if n]) or 'Unknown'
-
-        logger.info(f"director_id = {director_id} (было имя: {director})")
-        logger.info(f"actor_ids_combined = {actor_ids_combined} ({",".join(actors)})")
-
-        # 8. Итоговый массив признаков
         features = {
-            'startYear': year,
-            'runtimeMinutes': runtime,
-            'numVotes_log': num_votes_log,
-            'director_avg_rating': director_avg_rating,
-            'actor_1_avg_rating': actor_ratings[0],
-            'actor_2_avg_rating': actor_ratings[1],
-            'actor_3_avg_rating': actor_ratings[2],
-            'genres_combined': genres_combined,
-            'director_id': director_id,
-            'actor_ids_combined': actor_ids_combined,
+            "startYear": (int(year) - 1900) / 100.0,
+            "runtimeMinutes": int(runtime) / 100.0,
+            "director_avg_rating": director_avg_rating,
+            "actor_1_avg_rating": actor_infos[0]["avg_rating"],
+            "actor_2_avg_rating": actor_infos[1]["avg_rating"],
+            "actor_3_avg_rating": actor_infos[2]["avg_rating"],
+            "genres_combined": genres_combined,
+            "director_id": director_id,
+            "actor_1_id": actor_infos[0]["nconst"],
+            "actor_2_id": actor_infos[1]["nconst"],
+            "actor_3_id": actor_infos[2]["nconst"],
         }
-        # Добавляем признаки из названия, если они есть
         features.update(title_features_dict)
 
-        feature_names = self.metadata['feature_names']
+        categorical = set(self.metadata.get("categorical_features", []))
         data = []
-        for name in feature_names:
+        for name in self.metadata["feature_names"]:
             if name in features:
                 data.append(features[name])
+            elif name in categorical:
+                data.append("Unknown")
             else:
-                # Если признак отсутствует (не должен случиться), ставим разумное значение по умолчанию
-                if name in ['genres_combined', 'director_id', 'actor_ids_combined']:
-                    data.append('Unknown')
-                else:
-                    data.append(0.0)
+                data.append(0.0)
 
         X = np.array(data, dtype=object).reshape(1, -1)
-        logger.info(f"_prepare_features завершён за {time.perf_counter()-t0:.3f} сек")
+        logger.info(
+            f"_prepare_features завершён за {time.perf_counter() - t0:.3f} сек"
+        )
         return X
+
 
     def predict(self, year, runtime, genres, director=None,
             actors=None, num_votes=None, title=None, explain=False) -> float:
@@ -314,36 +313,62 @@ class KinoVanga:
         return ratings
 
     def get_feature_importance(self) -> dict:
-        """
-        Возвращает важность признаков (коэффициенты модели).
+        """Возвращает встроенную CatBoost importance по признакам."""
+        values = self.model.get_feature_importance()
+        pairs = zip(self.metadata["feature_names"], values)
+        return dict(
+            sorted(
+                pairs,
+                key=lambda item: abs(float(item[1])),
+                reverse=True,
+            )
+        )
 
-        Returns:
-            Словарь {признак: коэффициент}
-        """
-        coef_scaled = self.model.coef_ / self.scaler.scale_
-        feature_names = self.metadata['feature_names']
 
-        importance = dict(zip(feature_names, coef_scaled))
-
-        # Сортируем по абсолютному значению
-        importance_sorted = sorted(importance.items(), key=lambda x: abs(x[1]), reverse=True)
-
-        return dict(importance_sorted)
-
-    def explain_prediction(self, year, runtime, genres, director=None,
-                       actors=None, num_votes=None, title=None) -> dict:
-        X = self._prepare_features(year, runtime, genres, director, actors, num_votes, title=title)
-        # SHAP-значения: массив (1, n_features+1), последний элемент – базовое значение
-        shap_values = self.model.get_feature_importance(data=X, type='ShapValues')[0]
-        base_value = shap_values[-1]
-        contributions = dict(zip(self.metadata['feature_names'], shap_values[:-1]))
+    def explain_prediction(
+        self,
+        year,
+        runtime,
+        genres,
+        director=None,
+        actors=None,
+        num_votes=None,
+        title=None,
+    ) -> dict:
+        X = self._prepare_features(
+            year,
+            runtime,
+            genres,
+            director,
+            actors,
+            num_votes,
+            title=title,
+        )
+        pool = Pool(
+            data=X,
+            cat_features=self.metadata.get("cat_features_idx", []),
+            feature_names=self.metadata["feature_names"],
+        )
+        shap_values = self.model.get_feature_importance(
+            data=pool,
+            type="ShapValues",
+        )[0]
+        base_value = float(shap_values[-1])
+        contributions = {
+            name: float(value)
+            for name, value in zip(
+                self.metadata["feature_names"],
+                shap_values[:-1],
+            )
+        }
         pred = float(self.model.predict(X)[0])
         return {
-            'rating': pred,
-            'base': base_value,
-            'contributions': contributions,
-            'explanation': self._format_explanation(contributions)
+            "rating": round(max(0.0, min(10.0, pred)), 2),
+            "base": base_value,
+            "contributions": contributions,
+            "explanation": self._format_explanation(contributions),
         }
+
 
     def _format_explanation(self, contributions):
         parts = []
@@ -384,6 +409,9 @@ def predict_movie_rating(
     Returns:
         Предсказанный рейтинг
     """
+    if model_path is None:
+        from src.train_model import resolve_current_model_path
+        model_path = str(resolve_current_model_path())
     kino = KinoVanga(model_path=model_path)
     return kino.predict(
         year=year,
