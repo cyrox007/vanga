@@ -2,10 +2,23 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
+
 from src.kinovanga import KinoVanga
+from src.train_model import calibrate_absolute_error_quantiles
 
 
 class PredictionUncertaintyTests(unittest.TestCase):
+    def test_calibration_quantiles_use_absolute_temporal_errors(self):
+        quantiles = calibrate_absolute_error_quantiles(
+            np.asarray([5.0, 6.0, 7.0, 8.0], dtype=np.float32),
+            np.asarray([5.0, 5.0, 9.0, 4.0], dtype=np.float32),
+        )
+
+        self.assertAlmostEqual(quantiles["q50"], 1.5, places=5)
+        self.assertGreaterEqual(quantiles["q80"], quantiles["q50"])
+        self.assertGreaterEqual(quantiles["q95"], quantiles["q90"])
+
     def _engine(self, metadata: dict) -> KinoVanga:
         engine = KinoVanga.__new__(KinoVanga)
         engine.metadata = metadata
