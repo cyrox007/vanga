@@ -92,8 +92,20 @@ def main() -> int:
 
     target = Path(config.IMDB_DB_PATH)
     if target.exists() and not changed:
-        logger.info("IMDb datasets не изменились — пересборка БД не требуется")
-        return 0
+        try:
+            _validate_database(target)
+        except Exception as exc:
+            logger.warning(
+                "IMDb datasets не изменились, но локальная схема устарела "
+                "или повреждена (%s) — пересобираем БД",
+                exc,
+            )
+        else:
+            logger.info(
+                "IMDb datasets не изменились и схема актуальна — "
+                "пересборка БД не требуется"
+            )
+            return 0
 
     logger.info("Собираем новую IMDb БД в staging-файле")
     _build_staged_database(target)
