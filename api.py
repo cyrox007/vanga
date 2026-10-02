@@ -163,6 +163,7 @@ def predict():
             "ok": True,
             "title": title,
             "rating": result["rating"],
+            "base": result.get("base"),
             "explanation": result["explanation"],
             "contributions": result["contributions"],
         }
