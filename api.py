@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 _lock = threading.RLock()
+_catalog_lock = threading.RLock()
 _engine: KinoVanga | None = None
 _generation: str | None = None
 _last_reload_error: str | None = None
@@ -62,9 +63,9 @@ def _ensure_engine() -> KinoVanga:
 
         if previous is not None:
             try:
-                previous.conn.close()
+                previous.close()
             except Exception:
-                logger.exception("Не удалось закрыть старое соединение DuckDB")
+                logger.exception("Не удалось закрыть старые соединения DuckDB")
 
         logger.info("Активировано новое поколение модели Vanga")
         return candidate
@@ -100,8 +101,8 @@ def search_movies():
             return _json_error("year вне допустимого диапазона", 400)
 
     try:
-        with _lock:
-            engine = _ensure_engine()
+        engine = _ensure_engine()
+        with _catalog_lock:
             items = engine.catalog.search_movies(
                 query,
                 limit=_search_limit(),
@@ -127,8 +128,8 @@ def search_people():
         return _json_error("role должен быть director или actor", 400)
 
     try:
-        with _lock:
-            engine = _ensure_engine()
+        engine = _ensure_engine()
+        with _catalog_lock:
             items = engine.catalog.search_people(
                 query,
                 role=role,
