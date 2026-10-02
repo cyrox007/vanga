@@ -210,14 +210,20 @@ def health():
 def model_info():
     try:
         engine = _ensure_engine()
+        metadata = engine.metadata if isinstance(engine.metadata, dict) else {}
         return jsonify(
             {
                 "ok": True,
                 "generation": _generation,
+                "schema_version": metadata.get("schema_version"),
+                "feature_names": metadata.get("feature_names") or [],
+                "categorical_features": metadata.get("categorical_features") or [],
                 "quality": engine.quality_summary(),
                 "uncertainty_available": bool(
-                    engine.metadata.get("test_abs_error_quantiles")
+                    metadata.get("test_abs_error_quantiles")
                 ),
+                "quality_gate": metadata.get("quality_gate"),
+                "model_size_bytes": metadata.get("model_size_bytes"),
             }
         )
     except Exception:
