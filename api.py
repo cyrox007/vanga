@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 _lock = threading.RLock()
+_catalog_lock = threading.RLock()
 _engine: KinoVanga | None = None
 _generation: str | None = None
 _last_reload_error: str | None = None
@@ -62,9 +63,12 @@ def _ensure_engine() -> KinoVanga:
 
         if previous is not None:
             try:
-                previous.conn.close()
+                # Search может ещё использовать catalog connection старого
+                # поколения; закрываем его только после завершения такого запроса.
+                with _catalog_lock:
+                    previous.close()
             except Exception:
-                logger.exception("Не удалось закрыть старое соединение DuckDB")
+                logger.exception("Не удалось закрыть старые соединения DuckDB")
 
         logger.info("Активировано новое поколение модели Vanga")
         return candidate
@@ -72,6 +76,73 @@ def _ensure_engine() -> KinoVanga:
 
 def _json_error(message: str, status: int):
     return jsonify({"ok": False, "error": message}), status
+
+
+def _search_limit() -> int:
+    try:
+        return max(1, min(int(request.args.get("limit", "8")), 12))
+    except ValueError:
+        return 8
+
+
+@app.get("/search/movies")
+def search_movies():
+    query = str(request.args.get("q") or "").strip()
+    if len(query) < 2:
+        return jsonify({"ok": True, "items": []})
+    if len(query) > 120:
+        return _json_error("Слишком длинный поисковый запрос", 400)
+
+    raw_year = str(request.args.get("year") or "").strip()
+    year = None
+    if raw_year:
+        try:
+            year = int(raw_year)
+        except ValueError:
+            return _json_error("year должен быть целым числом", 400)
+        if not (1888 <= year <= 2100):
+            return _json_error("year вне допустимого диапазона", 400)
+
+    try:
+        engine = _ensure_engine()
+        with _catalog_lock:
+            items = engine.catalog.search_movies(
+                query,
+                limit=_search_limit(),
+                year=year,
+            )
+    except Exception:
+        logger.exception("Ошибка поиска фильмов Vanga")
+        return _json_error("Поиск фильмов временно недоступен", 503)
+
+    return jsonify({"ok": True, "items": items, "generation": _generation})
+
+
+@app.get("/search/people")
+def search_people():
+    query = str(request.args.get("q") or "").strip()
+    if len(query) < 2:
+        return jsonify({"ok": True, "items": []})
+    if len(query) > 120:
+        return _json_error("Слишком длинный поисковый запрос", 400)
+
+    role = str(request.args.get("role") or "actor").strip().lower()
+    if role not in {"director", "actor"}:
+        return _json_error("role должен быть director или actor", 400)
+
+    try:
+        engine = _ensure_engine()
+        with _catalog_lock:
+            items = engine.catalog.search_people(
+                query,
+                role=role,
+                limit=_search_limit(),
+            )
+    except Exception:
+        logger.exception("Ошибка поиска персон Vanga")
+        return _json_error("Поиск персон временно недоступен", 503)
+
+    return jsonify({"ok": True, "items": items, "generation": _generation})
 
 
 @app.get("/health")
@@ -114,6 +185,7 @@ def predict():
     director = str(payload.get("director") or "").strip()
     genres = payload.get("genres")
     actors = payload.get("actors") or []
+    imdb_id = str(payload.get("imdb_id") or "").strip()
 
     try:
         year = int(payload.get("year"))
@@ -127,6 +199,8 @@ def predict():
         return _json_error("runtime вне допустимого диапазона", 400)
     if not title or len(title) > 240:
         return _json_error("Укажите название фильма", 400)
+    if imdb_id and (len(imdb_id) > 16 or not imdb_id.startswith("tt")):
+        return _json_error("Некорректный imdb_id", 400)
     if not director or len(director) > 240:
         return _json_error("Укажите режиссёра", 400)
     if isinstance(genres, str):
@@ -162,6 +236,14 @@ def predict():
         {
             "ok": True,
             "title": title,
+            "imdb_id": (
+                imdb_id
+                or (
+                    (result.get("input_resolution") or {}).get("title") or {}
+                ).get("imdb_id")
+                or None
+            ),
+            "generation": _generation,
             "rating": result["rating"],
             "base": result.get("base"),
             "explanation": result["explanation"],
