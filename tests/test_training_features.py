@@ -51,6 +51,23 @@ class TrainingFeatureContractTests(unittest.TestCase):
                     )
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE title_crew (
+                        tconst VARCHAR,
+                        directors VARCHAR,
+                        writers VARCHAR
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE title_writers (
+                        tconst VARCHAR,
+                        nconst VARCHAR
+                    )
+                    """
+                )
 
                 conn.executemany(
                     "INSERT INTO title_basics VALUES (?, ?, ?, ?, ?, ?)",
@@ -91,6 +108,22 @@ class TrainingFeatureContractTests(unittest.TestCase):
                     "INSERT INTO title_principals VALUES (?, ?, ?, ?)",
                     principals,
                 )
+                conn.executemany(
+                    "INSERT INTO title_crew VALUES (?, ?, ?)",
+                    [
+                        ("tt0000001", "nm_director", "nm_writer"),
+                        ("tt0000002", "nm_director", "nm_writer"),
+                        ("tt0000003", "nm_director", "nm_writer"),
+                    ],
+                )
+                conn.executemany(
+                    "INSERT INTO title_writers VALUES (?, ?)",
+                    [
+                        ("tt0000001", "nm_writer"),
+                        ("tt0000002", "nm_writer"),
+                        ("tt0000003", "nm_writer"),
+                    ],
+                )
                 conn.close()
 
                 target_X = None
@@ -112,11 +145,17 @@ class TrainingFeatureContractTests(unittest.TestCase):
                     places=5,
                 )
                 self.assertAlmostEqual(
+                    float(target_X["writer_avg_rating"]),
+                    8.0,
+                    places=5,
+                )
+                self.assertAlmostEqual(
                     float(target_X["actor_1_avg_rating"]),
                     8.0,
                     places=5,
                 )
 
+                self.assertEqual(target_X["writer_id"], "nm_writer")
                 self.assertEqual(target_X["actor_1_id"], "nm_actor1")
                 self.assertEqual(target_X["actor_2_id"], "nm_actor2")
                 self.assertEqual(target_X["actor_3_id"], "nm_actor3")
