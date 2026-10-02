@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import csv
 import json
 import os
@@ -319,13 +320,9 @@ def train_catboost_model(
     )
 
     try:
-        logger.info("Создание файловых Pool без общего pandas DataFrame")
+        logger.info("Создание тренировочного файлового Pool без общего pandas DataFrame")
         train_pool = _pool_from_file(
             prepared.train_path,
-            prepared.column_description_path,
-        )
-        test_pool = _pool_from_file(
-            prepared.test_path,
             prepared.column_description_path,
         )
 
@@ -345,6 +342,18 @@ def train_catboost_model(
         model.fit(train_pool)
         logger.info("Обучение завершено")
 
+        # Большой train Pool больше не нужен. На малом сервере удержание его
+        # одновременно с test Pool вызывало активный swap и многоминутный I/O stall.
+        del train_pool
+        gc.collect()
+        logger.info("Тренировочный Pool освобождён перед оценкой")
+
+        logger.info("Создание тестового файлового Pool")
+        test_pool = _pool_from_file(
+            prepared.test_path,
+            prepared.column_description_path,
+        )
+
         logger.info("Оценка на временной тестовой выборке")
         y_test = np.asarray(test_pool.get_label(), dtype=np.float32)
         y_pred = np.asarray(model.predict(test_pool), dtype=np.float32)
@@ -359,6 +368,12 @@ def train_catboost_model(
         logger.info(f"RMSE = {rmse:.4f}")
         logger.info(f"R²   = {r2:.4f}")
         logger.info("=" * 60)
+
+        # После расчёта метрик test Pool и массивы прогнозов больше не нужны.
+        # Освобождаем их до интерпретации и публикации модели.
+        del test_pool, y_test, y_pred
+        gc.collect()
+        logger.info("Тестовый Pool освобождён после оценки")
 
         importance = model.get_feature_importance()
         sorted_idx = np.argsort(importance)[::-1]
