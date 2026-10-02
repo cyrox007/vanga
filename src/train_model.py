@@ -490,9 +490,132 @@ def resolve_current_model_path() -> Path:
     raise FileNotFoundError("Активная модель Vanga не найдена")
 
 
+def _read_active_metadata() -> dict | None:
+    """Читает metadata активной модели без загрузки второй CatBoost-модели."""
+    try:
+        model_path = resolve_current_model_path()
+    except FileNotFoundError:
+        return None
+
+    metadata_path = model_path.parent / "metadata.pkl"
+    try:
+        with metadata_path.open("rb") as handle:
+            payload = pickle.load(handle)
+    except (OSError, pickle.PickleError, EOFError, ValueError, TypeError) as exc:
+        logger.warning(
+            "Не удалось прочитать metadata активной модели для quality gate: %s",
+            exc,
+        )
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def evaluate_candidate_quality(
+    candidate: dict,
+    active: dict | None,
+    *,
+    max_mae_regression: float,
+) -> dict:
+    """Сравнивает candidate с активной моделью на сопоставимом holdout.
+
+    Мы намеренно не загружаем активную CatBoost-модель повторно. Сравнение
+    выполняется только когда обе metadata относятся к одному temporal holdout.
+    Если период изменился, candidate не блокируется: такие MAE нельзя честно
+    интерпретировать как прямое A/B-сравнение.
+    """
+    try:
+        candidate_mae = float(candidate["test_mae"])
+    except (KeyError, TypeError, ValueError):
+        return {
+            "comparable": False,
+            "passed": False,
+            "reason": "candidate_mae_missing",
+        }
+
+    if active is None:
+        return {
+            "comparable": False,
+            "passed": True,
+            "reason": "no_active_model",
+            "candidate_mae": candidate_mae,
+        }
+
+    try:
+        active_mae = float(active["test_mae"])
+    except (KeyError, TypeError, ValueError):
+        return {
+            "comparable": False,
+            "passed": True,
+            "reason": "active_mae_missing",
+            "candidate_mae": candidate_mae,
+        }
+
+    candidate_period = (
+        candidate.get("test_year_from"),
+        candidate.get("test_year_to"),
+    )
+    active_period = (
+        active.get("test_year_from"),
+        active.get("test_year_to"),
+    )
+    if (
+        None in candidate_period
+        or None in active_period
+        or candidate_period != active_period
+    ):
+        return {
+            "comparable": False,
+            "passed": True,
+            "reason": "different_temporal_holdout",
+            "candidate_mae": candidate_mae,
+            "active_mae": active_mae,
+            "candidate_period": candidate_period,
+            "active_period": active_period,
+        }
+
+    tolerance = max(0.0, float(max_mae_regression))
+    regression = candidate_mae - active_mae
+    passed = regression <= tolerance
+    return {
+        "comparable": True,
+        "passed": passed,
+        "reason": "within_mae_gate" if passed else "mae_regression",
+        "candidate_mae": candidate_mae,
+        "active_mae": active_mae,
+        "mae_regression": regression,
+        "max_mae_regression": tolerance,
+        "test_year_from": candidate_period[0],
+        "test_year_to": candidate_period[1],
+    }
+
+
 def save_trained_model(model: CatBoostRegressor, metadata: dict) -> None:
     """Публикует новую модель атомарно, не затрагивая рабочую версию при сбое."""
     root = _model_root()
+
+    active_metadata = _read_active_metadata()
+    gate = evaluate_candidate_quality(
+        metadata,
+        active_metadata,
+        max_mae_regression=config.TRAIN_MAX_MAE_REGRESSION,
+    )
+    logger.info(
+        "Quality gate: passed=%s comparable=%s reason=%s candidate_mae=%s active_mae=%s",
+        gate.get("passed"),
+        gate.get("comparable"),
+        gate.get("reason"),
+        gate.get("candidate_mae"),
+        gate.get("active_mae"),
+    )
+    if not gate.get("passed"):
+        raise RuntimeError(
+            "Новая модель не прошла quality gate: "
+            f"MAE candidate={gate.get('candidate_mae'):.4f}, "
+            f"active={gate.get('active_mae'):.4f}, "
+            f"ухудшение={gate.get('mae_regression'):.4f}, "
+            f"допустимо={gate.get('max_mae_regression'):.4f}"
+        )
+
     releases_dir = root / "releases"
     releases_dir.mkdir(parents=True, exist_ok=True)
 
@@ -516,6 +639,7 @@ def save_trained_model(model: CatBoostRegressor, metadata: dict) -> None:
             )
 
         persisted_metadata = dict(metadata)
+        persisted_metadata["quality_gate"] = gate
         persisted_metadata["model_size_bytes"] = model_size_bytes
         with metadata_path.open("wb") as handle:
             pickle.dump(persisted_metadata, handle)
