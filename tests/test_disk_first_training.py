@@ -118,6 +118,20 @@ class DiskFirstTrainingTests(unittest.TestCase):
         self.assertNotIn("all_y", source)
         self.assertNotIn("pd.concat(", source)
 
+    def test_training_releases_train_pool_before_test_pool(self):
+        source = (
+            Path(__file__).parents[1] / "src" / "train_model.py"
+        ).read_text(encoding="utf-8")
+
+        # Train и test Pool не должны одновременно удерживать большой набор данных.
+        train_release = source.index("del train_pool")
+        test_create = source.index("test_pool = _pool_from_file")
+        test_release = source.index("del test_pool, y_test, y_pred")
+
+        self.assertLess(train_release, test_create)
+        self.assertGreater(test_release, test_create)
+        self.assertGreaterEqual(source.count("gc.collect()"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
