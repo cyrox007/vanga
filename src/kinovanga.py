@@ -24,6 +24,7 @@ import duckdb
 
 from src.logger import setup_logger
 from settings import config
+from src.input_aliases import RussianInputResolver
 from src.normalize import extract_title_features, normalize_genre_str
 
 logger = setup_logger(__name__)
@@ -44,6 +45,7 @@ class KinoVanga:
         # Настройки памяти (опционально)
         self.conn.execute("SET memory_limit = '400MB'")
         self.conn.execute("SET threads = 2")
+        self.input_resolver = RussianInputResolver(self.conn)
         self._load_model()
 
     def __del__(self):
@@ -260,8 +262,27 @@ class KinoVanga:
         if title:
             logger.info(f"Предсказание для фильма: {title} ({year})")
 
-        # Подготовка признаков
-        X = self._prepare_features(year, runtime, genres, director, actors, num_votes, title=title)
+        resolved_input = self.input_resolver.resolve_inputs(
+            title=title,
+            director=director,
+            actors=actors or [],
+            year=int(year),
+        )
+        resolved_title = resolved_input["title"]
+        resolved_director = resolved_input["director"]
+        resolved_actors = resolved_input["actors"]
+
+        # Подготовка признаков. Русские названия/имена при найденном
+        # соответствии уже заменены на канонические значения локального IMDb.
+        X = self._prepare_features(
+            year,
+            runtime,
+            genres,
+            resolved_director,
+            resolved_actors,
+            num_votes,
+            title=resolved_title,
+        )
 
         # Проверка размерности
         expected_features = len(self.metadata['feature_names'])
@@ -293,7 +314,8 @@ class KinoVanga:
             'rating': rounded_rating,
             'base': base_value,
             'contributions': contributions,
-            'explanation': self._format_explanation(contributions)
+            'explanation': self._format_explanation(contributions),
+            'input_resolution': resolved_input["matches"],
         }
 
     def predict_batch(self, movies: List[dict]) -> List[float]:
