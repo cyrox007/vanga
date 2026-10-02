@@ -63,6 +63,7 @@ class ApiPredictionOutputTests(unittest.TestCase):
         payload = {
             "title": "Inception",
             "director": "Christopher Nolan",
+            "writer": "Jonathan Nolan",
             "genres": ["Action", "Sci-Fi"],
             "actors": ["Leonardo DiCaprio"],
             "year": 2010,
@@ -108,11 +109,13 @@ class ApiPredictionOutputTests(unittest.TestCase):
         ):
             movies = self.client.get("/search/movies?q=Interstellar")
             people = self.client.get("/search/people?q=Nolan&role=director")
+            writers = self.client.get("/search/people?q=Nolan&role=writer")
 
         self.assertEqual(movies.status_code, 200)
         self.assertEqual(movies.get_json()["items"][0]["imdb_id"], "tt0816692")
         self.assertEqual(people.status_code, 200)
         self.assertEqual(people.get_json()["items"][0]["imdb_id"], "nm0634240")
+        self.assertEqual(writers.status_code, 200)
 
 
 if __name__ == "__main__":

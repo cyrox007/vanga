@@ -127,8 +127,8 @@ def search_people():
         return _json_error("Слишком длинный поисковый запрос", 400)
 
     role = str(request.args.get("role") or "actor").strip().lower()
-    if role not in {"director", "actor"}:
-        return _json_error("role должен быть director или actor", 400)
+    if role not in {"director", "writer", "actor"}:
+        return _json_error("role должен быть director, writer или actor", 400)
 
     try:
         engine = _ensure_engine()
@@ -236,6 +236,7 @@ def predict():
 
     title = str(payload.get("title") or "").strip()
     director = str(payload.get("director") or "").strip()
+    writer = str(payload.get("writer") or "").strip()
     genres = payload.get("genres")
     actors = payload.get("actors") or []
     imdb_id = str(payload.get("imdb_id") or "").strip()
@@ -256,6 +257,8 @@ def predict():
         return _json_error("Некорректный imdb_id", 400)
     if not director or len(director) > 240:
         return _json_error("Укажите режиссёра", 400)
+    if len(writer) > 240:
+        return _json_error("Слишком длинное имя сценариста", 400)
     if isinstance(genres, str):
         genres_value: str | list[str] = genres.strip()
     elif isinstance(genres, list) and all(isinstance(item, str) for item in genres):
@@ -275,6 +278,7 @@ def predict():
             result: Any = engine.predict(
                 title=title,
                 director=director,
+                writer=writer or None,
                 year=year,
                 runtime=runtime,
                 genres=genres_value,

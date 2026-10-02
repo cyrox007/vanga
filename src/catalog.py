@@ -16,6 +16,7 @@ class MovieSearchItem:
     runtime: int | None
     genres: list[str]
     director: str | None
+    writer: str | None
     actors: list[str]
 
     def to_dict(self) -> dict:
@@ -27,6 +28,7 @@ class MovieSearchItem:
             "runtime": self.runtime,
             "genres": self.genres,
             "director": self.director,
+            "writer": self.writer,
             "actors": self.actors,
         }
 
@@ -41,6 +43,20 @@ class CatalogSearch:
     ) -> None:
         self.conn = conn
         self.resolver = resolver
+        self._writer_schema_available = self._table_exists("title_crew") and self._table_exists("title_writers")
+
+    def _table_exists(self, table_name: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'main'
+              AND table_name = ?
+            LIMIT 1
+            """,
+            [table_name],
+        ).fetchone()
+        return row is not None
 
     @staticmethod
     def _clean_query(query: str) -> str:
@@ -91,6 +107,25 @@ class CatalogSearch:
             if category in {"actor", "actress"} and name
         ][:5]
 
+        writer = None
+        if self._writer_schema_available:
+            writer_row = self.conn.execute(
+                """
+                SELECT n.primaryName
+                FROM title_crew c
+                LEFT JOIN name_basics n
+                  ON n.nconst = NULLIF(TRIM(split_part(c.writers, ',', 1)), '')
+                WHERE c.tconst = ?
+                LIMIT 1
+                """,
+                [imdb_id],
+            ).fetchone()
+            writer = (
+                str(writer_row[0]).strip()
+                if writer_row and writer_row[0]
+                else None
+            )
+
         genres = [
             item.strip()
             for item in str(row[5] or "").split(",")
@@ -105,6 +140,7 @@ class CatalogSearch:
             runtime=int(row[4]) if row[4] is not None else None,
             genres=genres,
             director=director,
+            writer=writer,
             actors=actors,
         )
 
@@ -211,36 +247,66 @@ class CatalogSearch:
         if len(clean) < 2:
             return []
 
-        role = role if role in {"director", "actor"} else "actor"
-        categories = ("director",) if role == "director" else ("actor", "actress")
-        placeholders = ",".join("?" for _ in categories)
+        role = role if role in {"director", "writer", "actor"} else "actor"
         limit = max(1, min(int(limit), 12))
         pattern = f"%{clean}%"
         prefix = f"{clean}%"
 
-        rows = self.conn.execute(
-            f"""
-            SELECT
-                n.nconst,
-                n.primaryName,
-                COUNT(DISTINCT p.tconst) AS known_for_count
-            FROM name_basics n
-            JOIN title_principals p ON p.nconst = n.nconst
-            WHERE p.category IN ({placeholders})
-              AND n.primaryName ILIKE ?
-            GROUP BY n.nconst, n.primaryName
-            ORDER BY
-                CASE
-                    WHEN LOWER(n.primaryName) = LOWER(?) THEN 0
-                    WHEN n.primaryName ILIKE ? THEN 1
-                    ELSE 2
-                END,
-                known_for_count DESC,
-                n.primaryName
-            LIMIT ?
-            """,
-            [*categories, pattern, clean, prefix, limit],
-        ).fetchall()
+        if role == "writer":
+            if not self._writer_schema_available:
+                return []
+            rows = self.conn.execute(
+                """
+                SELECT
+                    n.nconst,
+                    n.primaryName,
+                    COUNT(DISTINCT tw.tconst) AS known_for_count
+                FROM name_basics n
+                JOIN title_writers tw ON tw.nconst = n.nconst
+                WHERE n.primaryName ILIKE ?
+                GROUP BY n.nconst, n.primaryName
+                ORDER BY
+                    CASE
+                        WHEN LOWER(n.primaryName) = LOWER(?) THEN 0
+                        WHEN n.primaryName ILIKE ? THEN 1
+                        ELSE 2
+                    END,
+                    known_for_count DESC,
+                    n.primaryName
+                LIMIT ?
+                """,
+                [pattern, clean, prefix, limit],
+            ).fetchall()
+        else:
+            categories = (
+                ("director",)
+                if role == "director"
+                else ("actor", "actress")
+            )
+            placeholders = ",".join("?" for _ in categories)
+            rows = self.conn.execute(
+                f"""
+                SELECT
+                    n.nconst,
+                    n.primaryName,
+                    COUNT(DISTINCT p.tconst) AS known_for_count
+                FROM name_basics n
+                JOIN title_principals p ON p.nconst = n.nconst
+                WHERE p.category IN ({placeholders})
+                  AND n.primaryName ILIKE ?
+                GROUP BY n.nconst, n.primaryName
+                ORDER BY
+                    CASE
+                        WHEN LOWER(n.primaryName) = LOWER(?) THEN 0
+                        WHEN n.primaryName ILIKE ? THEN 1
+                        ELSE 2
+                    END,
+                    known_for_count DESC,
+                    n.primaryName
+                LIMIT ?
+                """,
+                [*categories, pattern, clean, prefix, limit],
+            ).fetchall()
 
         items = [
             {
@@ -257,12 +323,15 @@ class CatalogSearch:
                 kwargs = {
                     "title": None,
                     "director": clean if role == "director" else None,
+                    "writer": clean if role == "writer" else None,
                     "actors": [clean] if role == "actor" else [],
                     "year": None,
                 }
                 resolved = self.resolver.resolve_inputs(**kwargs)
                 if role == "director":
                     match = resolved.get("matches", {}).get("director")
+                elif role == "writer":
+                    match = resolved.get("matches", {}).get("writer")
                 else:
                     actor_matches = resolved.get("matches", {}).get("actors") or []
                     match = actor_matches[0] if actor_matches else None

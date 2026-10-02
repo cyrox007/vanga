@@ -6,7 +6,11 @@ from pathlib import Path
 import duckdb
 
 from settings import config
-from src.create_db import create_duckdb_table_direct, create_indexes
+from src.create_db import (
+    create_derived_tables,
+    create_duckdb_table_direct,
+    create_indexes,
+)
 from src.data_loader import download_imdb_dataset
 from src.database import cleanup_temp
 from src.logger import setup_logger
@@ -18,6 +22,7 @@ DATASETS = [
     "title.basics",
     "title.ratings",
     "title.principals",
+    "title.crew",
     "name.basics",
 ]
 
@@ -29,6 +34,8 @@ def _validate_database(path: Path) -> None:
             "title_basics": 1,
             "title_ratings": 1,
             "title_principals": 1,
+            "title_crew": 1,
+            "title_writers": 1,
             "name_basics": 1,
         }
         for table_name, minimum in required.items():
@@ -58,6 +65,8 @@ def _build_staged_database(target: Path) -> None:
         create_duckdb_table_direct("title.basics")
         create_duckdb_table_direct("title.ratings")
         create_duckdb_table_direct("title.principals")
+        create_duckdb_table_direct("title.crew")
+        create_derived_tables()
         create_duckdb_table_direct("name.basics")
         create_indexes()
 
@@ -83,8 +92,20 @@ def main() -> int:
 
     target = Path(config.IMDB_DB_PATH)
     if target.exists() and not changed:
-        logger.info("IMDb datasets не изменились — пересборка БД не требуется")
-        return 0
+        try:
+            _validate_database(target)
+        except Exception as exc:
+            logger.warning(
+                "IMDb datasets не изменились, но локальная схема устарела "
+                "или повреждена (%s) — пересобираем БД",
+                exc,
+            )
+        else:
+            logger.info(
+                "IMDb datasets не изменились и схема актуальна — "
+                "пересборка БД не требуется"
+            )
+            return 0
 
     logger.info("Собираем новую IMDb БД в staging-файле")
     _build_staged_database(target)
