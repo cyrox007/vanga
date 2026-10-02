@@ -45,13 +45,14 @@ def get_batches(
     batch_size: int = 5000,
     use_director_stats: bool = True,
     use_actor_stats: bool = True,
+    use_writer_stats: bool = True,
     max_batches: Optional[int] = None,
 ) -> Generator[Tuple[pd.DataFrame, pd.Series, List[str], List[str]], None, None]:
     """
     Генерирует обучающие батчи с признаками, доступными до релиза фильма.
 
     Важные правила:
-    - статистика режиссёра и актёров считается только по фильмам прошлых лет;
+    - статистика режиссёра, сценариста и актёров считается только по фильмам прошлых лет;
     - numVotes не используется, потому что до релиза этот признак неизвестен;
     - первые три актёра выбираются по рангу среди актёров, а не по глобальному ordering;
     - неизвестная историческая статистика заполняется нейтральным значением 6.5.
@@ -126,6 +127,30 @@ def get_batches(
               AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
             GROUP BY bm.tconst, fd.nconst
         ),
+        first_writer AS (
+            SELECT
+                c.tconst,
+                NULLIF(TRIM(split_part(c.writers, ',', 1)), '') AS nconst
+            FROM title_crew c
+            WHERE c.tconst IN (SELECT tconst FROM batch_movies)
+              AND c.writers IS NOT NULL
+              AND c.writers <> '\\N'
+        ),
+        writer_history AS (
+            SELECT
+                bm.tconst,
+                fw.nconst,
+                AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating
+            FROM batch_movies bm
+            JOIN first_writer fw ON fw.tconst = bm.tconst
+            JOIN title_writers tw ON tw.nconst = fw.nconst
+            JOIN title_basics b ON b.tconst = tw.tconst
+            JOIN title_ratings r ON r.tconst = b.tconst
+            WHERE b.titleType = 'movie'
+              AND TRY_CAST(b.startYear AS INTEGER) < bm.startYear
+              AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
+            GROUP BY bm.tconst, fw.nconst
+        ),
         actor_ranked AS (
             SELECT tconst, nconst, rn
             FROM (
@@ -186,6 +211,8 @@ def get_batches(
             bm.averageRating,
             fd.nconst AS director_nconst,
             dh.avg_rating AS director_avg_rating,
+            fw.nconst AS writer_nconst,
+            wh.avg_rating AS writer_avg_rating,
             ap.actor_1_nconst,
             ap.actor_2_nconst,
             ap.actor_3_nconst,
@@ -195,6 +222,8 @@ def get_batches(
         FROM batch_movies bm
         LEFT JOIN first_director fd ON fd.tconst = bm.tconst
         LEFT JOIN director_history dh ON dh.tconst = bm.tconst
+        LEFT JOIN first_writer fw ON fw.tconst = bm.tconst
+        LEFT JOIN writer_history wh ON wh.tconst = bm.tconst
         LEFT JOIN actors_pivot ap ON ap.tconst = bm.tconst
         LEFT JOIN actor_history_pivot ah ON ah.tconst = bm.tconst
     """
@@ -232,6 +261,8 @@ def get_batches(
                     "averageRating",
                     "director_nconst",
                     "director_avg_rating",
+                    "writer_nconst",
+                    "writer_avg_rating",
                     "actor_1_nconst",
                     "actor_2_nconst",
                     "actor_3_nconst",
@@ -246,6 +277,7 @@ def get_batches(
                 "runtimeMinutes",
                 "averageRating",
                 "director_avg_rating",
+                "writer_avg_rating",
                 "actor_1_avg_rating",
                 "actor_2_avg_rating",
                 "actor_3_avg_rating",
@@ -278,6 +310,11 @@ def get_batches(
                     df_batch["director_avg_rating"].fillna(6.5).astype(np.float32)
                 )
 
+            if use_writer_stats:
+                numeric_df["writer_avg_rating"] = (
+                    df_batch["writer_avg_rating"].fillna(6.5).astype(np.float32)
+                )
+
             if use_actor_stats:
                 for i in range(3):
                     col = f"actor_{i + 1}_avg_rating"
@@ -300,6 +337,9 @@ def get_batches(
             )
             categorical_df["director_id"] = (
                 df_batch["director_nconst"].fillna("Unknown")
+            )
+            categorical_df["writer_id"] = (
+                df_batch["writer_nconst"].fillna("Unknown")
             )
             for i in range(3):
                 categorical_df[f"actor_{i + 1}_id"] = (
