@@ -55,6 +55,23 @@ class CatalogSearchTests(unittest.TestCase):
             )
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE title_crew (
+                tconst VARCHAR,
+                directors VARCHAR,
+                writers VARCHAR
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE title_writers (
+                tconst VARCHAR,
+                nconst VARCHAR
+            )
+            """
+        )
         self.conn.executemany(
             "INSERT INTO title_basics VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
@@ -75,6 +92,7 @@ class CatalogSearchTests(unittest.TestCase):
                 ("nm0634240", "Christopher Nolan"),
                 ("nm0000138", "Leonardo DiCaprio"),
                 ("nm0004266", "Anne Hathaway"),
+                ("nm0254645", "Jonathan Nolan"),
             ],
         )
         self.conn.executemany(
@@ -84,6 +102,17 @@ class CatalogSearchTests(unittest.TestCase):
                 ("tt0816692", "2", "nm0000138", "actor"),
                 ("tt0816692", "3", "nm0004266", "actress"),
             ],
+        )
+        self.conn.executemany(
+            "INSERT INTO title_crew VALUES (?, ?, ?)",
+            [
+                ("tt0816692", "nm0634240", "nm0254645"),
+                ("tt9999999", "\\N", "\\N"),
+            ],
+        )
+        self.conn.execute(
+            "INSERT INTO title_writers VALUES (?, ?)",
+            ["tt0816692", "nm0254645"],
         )
 
         self.resolver = Mock()
@@ -101,6 +130,7 @@ class CatalogSearchTests(unittest.TestCase):
 
         self.assertEqual(items[0]["imdb_id"], "tt0816692")
         self.assertEqual(items[0]["director"], "Christopher Nolan")
+        self.assertEqual(items[0]["writer"], "Jonathan Nolan")
         self.assertEqual(items[0]["runtime"], 169)
         self.assertIn("Sci-Fi", items[0]["genres"])
         self.assertEqual(
@@ -111,9 +141,11 @@ class CatalogSearchTests(unittest.TestCase):
     def test_people_search_filters_role(self):
         directors = self.catalog.search_people("Christopher", role="director")
         actors = self.catalog.search_people("Leonardo", role="actor")
+        writers = self.catalog.search_people("Jonathan", role="writer")
 
         self.assertEqual(directors[0]["imdb_id"], "nm0634240")
         self.assertEqual(actors[0]["imdb_id"], "nm0000138")
+        self.assertEqual(writers[0]["imdb_id"], "nm0254645")
 
     def test_current_ratings_returns_local_imdb_values_in_request_order(self):
         items = self.catalog.current_ratings(
