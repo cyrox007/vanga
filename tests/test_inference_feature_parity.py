@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import duckdb
+
+from src.kinovanga import KinoVanga
+
+
+class InferenceFeatureParityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp.name) / "imdb.duckdb"
+        self.conn = duckdb.connect(str(self.db_path))
+
+        self.conn.execute(
+            """
+            CREATE TABLE title_basics (
+                tconst VARCHAR,
+                titleType VARCHAR,
+                primaryTitle VARCHAR,
+                startYear VARCHAR,
+                runtimeMinutes VARCHAR,
+                genres VARCHAR
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE title_ratings (
+                tconst VARCHAR,
+                averageRating DOUBLE,
+                numVotes BIGINT
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE title_principals (
+                tconst VARCHAR,
+                ordering INTEGER,
+                nconst VARCHAR,
+                category VARCHAR
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE name_basics (
+                nconst VARCHAR,
+                primaryName VARCHAR
+            )
+            """
+        )
+
+        self.conn.executemany(
+            "INSERT INTO title_basics VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                ("tt_dir", "movie", "Directed Past", "2020", "100", "Drama"),
+                ("tt_act", "movie", "Acted Past", "2021", "100", "Drama"),
+                ("tt_future", "movie", "Future", "2025", "100", "Drama"),
+            ],
+        )
+        self.conn.executemany(
+            "INSERT INTO title_ratings VALUES (?, ?, ?)",
+            [
+                ("tt_dir", 8.0, 1000),
+                ("tt_act", 4.0, 1000),
+                ("tt_future", 10.0, 1000),
+            ],
+        )
+        self.conn.executemany(
+            "INSERT INTO name_basics VALUES (?, ?)",
+            [
+                ("nm_same", "Role Switcher"),
+                ("nm_future", "Future Only"),
+            ],
+        )
+        self.conn.executemany(
+            "INSERT INTO title_principals VALUES (?, ?, ?, ?)",
+            [
+                ("tt_dir", 1, "nm_same", "director"),
+                ("tt_act", 1, "nm_same", "actor"),
+                ("tt_future", 1, "nm_same", "director"),
+                ("tt_future", 2, "nm_same", "actor"),
+                ("tt_future", 3, "nm_future", "actor"),
+            ],
+        )
+
+        self.engine = KinoVanga.__new__(KinoVanga)
+        self.engine.conn = self.conn
+        self.engine._people_cache = {}
+
+    def tearDown(self):
+        self.conn.close()
+        self.temp.cleanup()
+
+    def test_director_history_uses_only_director_credits(self):
+        info = self.engine._get_people_info(
+            ["Role Switcher"],
+            before_year=2024,
+            role="director",
+        )
+
+        self.assertEqual(info["Role Switcher"]["nconst"], "nm_same")
+        self.assertAlmostEqual(
+            info["Role Switcher"]["avg_rating"],
+            8.0,
+            places=5,
+        )
+
+    def test_actor_history_uses_only_actor_actress_credits(self):
+        info = self.engine._get_people_info(
+            ["Role Switcher"],
+            before_year=2024,
+            role="actor",
+        )
+
+        self.assertEqual(info["Role Switcher"]["nconst"], "nm_same")
+        self.assertAlmostEqual(
+            info["Role Switcher"]["avg_rating"],
+            4.0,
+            places=5,
+        )
+
+    def test_cache_key_keeps_roles_separate(self):
+        director = self.engine._get_people_info(
+            ["Role Switcher"],
+            before_year=2024,
+            role="director",
+        )
+        actor = self.engine._get_people_info(
+            ["Role Switcher"],
+            before_year=2024,
+            role="actor",
+        )
+
+        self.assertEqual(director["Role Switcher"]["avg_rating"], 8.0)
+        self.assertEqual(actor["Role Switcher"]["avg_rating"], 4.0)
+        self.assertIn(
+            ("director", "role switcher", 2024),
+            self.engine._people_cache,
+        )
+        self.assertIn(
+            ("actor", "role switcher", 2024),
+            self.engine._people_cache,
+        )
+
+    def test_future_credits_do_not_leak_into_history(self):
+        info = self.engine._get_people_info(
+            ["Future Only"],
+            before_year=2024,
+            role="actor",
+        )
+
+        self.assertIsNone(info["Future Only"]["nconst"])
+        self.assertEqual(info["Future Only"]["avg_rating"], 6.5)
+
+    def test_invalid_role_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.engine._get_people_info(
+                ["Role Switcher"],
+                before_year=2024,
+                role="writer",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
