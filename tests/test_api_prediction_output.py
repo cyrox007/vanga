@@ -27,6 +27,27 @@ class _FakeCatalog:
 
 class _FakeEngine:
     catalog = _FakeCatalog()
+    metadata = {
+        "schema_version": 5,
+        "feature_names": ["startYear", "writer_avg_rating", "writer_id"],
+        "categorical_features": ["writer_id"],
+        "test_abs_error_quantiles": {"q80": 1.1},
+        "quality_gate": {"passed": True, "reason": "within_mae_gate"},
+        "model_size_bytes": 8393184,
+    }
+
+    def quality_summary(self):
+        return {
+            "mae": 1.02,
+            "rmse": 1.34,
+            "r2": 0.28,
+            "test_year_from": 2024,
+            "test_year_to": 2025,
+            "test_rows": 13993,
+            "train_year_from": 1900,
+            "train_year_to": 2023,
+            "train_rows": 298298,
+        }
 
     def predict(self, **kwargs):
         return {
@@ -85,6 +106,25 @@ class ApiPredictionOutputTests(unittest.TestCase):
         self.assertEqual(body["uncertainty"]["coverage"], 0.8)
         self.assertEqual(body["quality"]["mae"], 1.02)
         self.assertIn("director_avg_rating", body["contributions"])
+
+    def test_model_info_exposes_reproducibility_metadata(self):
+        with (
+            patch.object(api, "_ensure_engine", return_value=_FakeEngine()),
+            patch.object(api, "_generation", "generation-test"),
+        ):
+            response = self.client.get("/model-info")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["generation"], "generation-test")
+        self.assertEqual(body["schema_version"], 5)
+        self.assertIn("writer_avg_rating", body["feature_names"])
+        self.assertIn("writer_id", body["categorical_features"])
+        self.assertEqual(body["quality"]["mae"], 1.02)
+        self.assertTrue(body["uncertainty_available"])
+        self.assertTrue(body["quality_gate"]["passed"])
+        self.assertEqual(body["model_size_bytes"], 8393184)
 
     def test_catalog_ratings_endpoint_returns_current_values(self):
         with (
