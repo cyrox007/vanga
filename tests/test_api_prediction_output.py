@@ -26,6 +26,21 @@ class _FakeEngine:
                 "director_avg_rating": 0.67,
                 "genres_combined": -0.43,
             },
+            "uncertainty": {
+                "lower": 6.2,
+                "upper": 8.4,
+                "margin": 1.1,
+                "coverage": 0.8,
+                "method": "temporal_holdout_absolute_error",
+            },
+            "quality": {
+                "mae": 1.02,
+                "rmse": 1.34,
+                "r2": 0.28,
+                "test_year_from": 2024,
+                "test_year_to": 2025,
+                "test_rows": 13993,
+            },
         }
 
 
@@ -55,6 +70,8 @@ class ApiPredictionOutputTests(unittest.TestCase):
         self.assertEqual(body["rating"], 7.31)
         self.assertEqual(body["base"], 6.11)
         self.assertEqual(body["generation"], "generation-test")
+        self.assertEqual(body["uncertainty"]["coverage"], 0.8)
+        self.assertEqual(body["quality"]["mae"], 1.02)
         self.assertIn("director_avg_rating", body["contributions"])
 
     def test_search_endpoints_proxy_catalog(self):

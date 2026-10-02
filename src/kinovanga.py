@@ -177,6 +177,78 @@ class KinoVanga:
 
         logger.info(f"Метаданные загружены: {metadata_path}")
 
+    def quality_summary(self) -> dict:
+        """Возвращает проверяемые метрики активной модели из metadata.pkl."""
+        metadata = self.metadata if isinstance(self.metadata, dict) else {}
+
+        def _float(name: str):
+            value = metadata.get(name)
+            try:
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        def _int(name: str):
+            value = metadata.get(name)
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            "mae": _float("test_mae"),
+            "rmse": _float("test_rmse"),
+            "r2": _float("test_r2"),
+            "test_year_from": _int("test_year_from"),
+            "test_year_to": _int("test_year_to"),
+            "test_rows": _int("test_rows"),
+            "train_year_from": _int("train_year_from"),
+            "train_year_to": _int("train_year_to"),
+            "train_rows": _int("train_rows"),
+        }
+
+    def uncertainty_for_rating(self, rating: float) -> dict | None:
+        """Строит эмпирический диапазон по ошибкам temporal holdout.
+
+        Диапазон не является вероятностью конкретного фильма. Он показывает,
+        какую абсолютную ошибку модель не превышала примерно в указанной доле
+        объектов временной тестовой выборки.
+        """
+        metadata = self.metadata if isinstance(self.metadata, dict) else {}
+        quantiles = metadata.get("test_abs_error_quantiles")
+        if not isinstance(quantiles, dict):
+            return None
+
+        try:
+            margin = float(quantiles["q80"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not np.isfinite(margin) or margin < 0:
+            return None
+
+        coverage_raw = metadata.get("uncertainty_default_coverage", 0.80)
+        try:
+            coverage = float(coverage_raw)
+        except (TypeError, ValueError):
+            coverage = 0.80
+        coverage = max(0.0, min(1.0, coverage))
+
+        center = float(rating)
+        return {
+            "lower": round(max(0.0, center - margin), 2),
+            "upper": round(min(10.0, center + margin), 2),
+            "margin": round(margin, 2),
+            "coverage": round(coverage, 2),
+            "method": str(
+                metadata.get("uncertainty_method")
+                or "temporal_holdout_absolute_error"
+            ),
+            "test_year_from": metadata.get("test_year_from"),
+            "test_year_to": metadata.get("test_year_to"),
+            "test_rows": metadata.get("test_rows"),
+        }
+
+
     def _prepare_features(
         self,
         year: int,
@@ -337,6 +409,8 @@ class KinoVanga:
             'contributions': contributions,
             'explanation': self._format_explanation(contributions),
             'input_resolution': resolved_input["matches"],
+            'uncertainty': self.uncertainty_for_rating(rounded_rating),
+            'quality': self.quality_summary(),
         }
 
     def predict_batch(self, movies: List[dict]) -> List[float]:
@@ -405,11 +479,14 @@ class KinoVanga:
             )
         }
         pred = float(self.model.predict(X)[0])
+        rounded = round(max(0.0, min(10.0, pred)), 2)
         return {
-            "rating": round(max(0.0, min(10.0, pred)), 2),
+            "rating": rounded,
             "base": base_value,
             "contributions": contributions,
             "explanation": self._format_explanation(contributions),
+            "uncertainty": self.uncertainty_for_rating(rounded),
+            "quality": self.quality_summary(),
         }
 
 
