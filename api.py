@@ -145,6 +145,40 @@ def search_people():
     return jsonify({"ok": True, "items": items, "generation": _generation})
 
 
+@app.post("/catalog/ratings")
+def catalog_ratings():
+    if request.content_length is not None and request.content_length > 32 * 1024:
+        return _json_error("Слишком большой запрос", 413)
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _json_error("Ожидается JSON-объект", 400)
+
+    imdb_ids = payload.get("imdb_ids")
+    if not isinstance(imdb_ids, list) or any(
+        not isinstance(item, str) for item in imdb_ids
+    ):
+        return _json_error("imdb_ids должен быть массивом строк", 400)
+    if len(imdb_ids) > 100:
+        return _json_error("За один запрос можно проверить не больше 100 фильмов", 400)
+
+    try:
+        engine = _ensure_engine()
+        with _catalog_lock:
+            items = engine.catalog.current_ratings(imdb_ids)
+    except Exception:
+        logger.exception("Ошибка чтения текущих IMDb ratings")
+        return _json_error("Рейтинги временно недоступны", 503)
+
+    return jsonify(
+        {
+            "ok": True,
+            "items": items,
+            "generation": _generation,
+        }
+    )
+
+
 @app.get("/health")
 def health():
     try:

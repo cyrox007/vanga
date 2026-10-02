@@ -269,3 +269,56 @@ class CatalogSearch:
                 pass
 
         return items[:limit]
+
+
+    def current_ratings(self, imdb_ids: list[str]) -> list[dict]:
+        """Возвращает текущий IMDb rating для известных фильмов.
+
+        Метод ничего не скачивает из сети: читает только локальную
+        `title_ratings`, которую обновляет штатный IMDb dataset pipeline.
+        """
+        clean: list[str] = []
+        seen: set[str] = set()
+        for raw in imdb_ids[:100]:
+            imdb_id = str(raw or "").strip()
+            if (
+                not imdb_id.startswith("tt")
+                or not imdb_id[2:].isdigit()
+                or len(imdb_id) > 16
+                or imdb_id in seen
+            ):
+                continue
+            seen.add(imdb_id)
+            clean.append(imdb_id)
+
+        if not clean:
+            return []
+
+        placeholders = ",".join("?" for _ in clean)
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                b.tconst,
+                b.primaryTitle,
+                TRY_CAST(b.startYear AS INTEGER),
+                TRY_CAST(r.averageRating AS DOUBLE),
+                TRY_CAST(r.numVotes AS BIGINT)
+            FROM title_basics b
+            LEFT JOIN title_ratings r ON r.tconst = b.tconst
+            WHERE b.tconst IN ({placeholders})
+              AND b.titleType = 'movie'
+            """,
+            clean,
+        ).fetchall()
+
+        by_id = {
+            str(imdb_id): {
+                "imdb_id": str(imdb_id),
+                "title": str(title or ""),
+                "year": int(year) if year is not None else None,
+                "rating": float(rating) if rating is not None else None,
+                "num_votes": int(num_votes) if num_votes is not None else None,
+            }
+            for imdb_id, title, year, rating, num_votes in rows
+        }
+        return [by_id[imdb_id] for imdb_id in clean if imdb_id in by_id]
