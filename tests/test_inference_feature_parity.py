@@ -54,6 +54,14 @@ class InferenceFeatureParityTests(unittest.TestCase):
             )
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE title_writers (
+                tconst VARCHAR,
+                nconst VARCHAR
+            )
+            """
+        )
 
         self.conn.executemany(
             "INSERT INTO title_basics VALUES (?, ?, ?, ?, ?, ?)",
@@ -76,6 +84,7 @@ class InferenceFeatureParityTests(unittest.TestCase):
             [
                 ("nm_same", "Role Switcher"),
                 ("nm_future", "Future Only"),
+                ("nm_writer", "Writer Person"),
             ],
         )
         self.conn.executemany(
@@ -86,6 +95,13 @@ class InferenceFeatureParityTests(unittest.TestCase):
                 ("tt_future", 1, "nm_same", "director"),
                 ("tt_future", 2, "nm_same", "actor"),
                 ("tt_future", 3, "nm_future", "actor"),
+            ],
+        )
+        self.conn.executemany(
+            "INSERT INTO title_writers VALUES (?, ?)",
+            [
+                ("tt_dir", "nm_writer"),
+                ("tt_future", "nm_writer"),
             ],
         )
 
@@ -158,12 +174,26 @@ class InferenceFeatureParityTests(unittest.TestCase):
         self.assertIsNone(info["Future Only"]["nconst"])
         self.assertEqual(info["Future Only"]["avg_rating"], 6.5)
 
+    def test_writer_history_uses_only_past_writer_credits(self):
+        info = self.engine._get_people_info(
+            ["Writer Person"],
+            before_year=2024,
+            role="writer",
+        )
+
+        self.assertEqual(info["Writer Person"]["nconst"], "nm_writer")
+        self.assertAlmostEqual(
+            info["Writer Person"]["avg_rating"],
+            8.0,
+            places=5,
+        )
+
     def test_invalid_role_is_rejected(self):
         with self.assertRaises(ValueError):
             self.engine._get_people_info(
                 ["Role Switcher"],
                 before_year=2024,
-                role="writer",
+                role="producer",
             )
 
 
