@@ -27,6 +27,7 @@ logger = setup_logger(__name__)
 CATEGORICAL_FEATURES = [
     "genres_combined",
     "director_id",
+    "writer_id",
     "actor_1_id",
     "actor_2_id",
     "actor_3_id",
@@ -430,7 +431,7 @@ def train_catboost_model(
             )
 
         metadata = {
-            "schema_version": 4,
+            "schema_version": 5,
             "training_storage": "disk-first-dsv",
             "feature_names": prepared.feature_names,
             "cat_features_idx": prepared.cat_features_idx,
