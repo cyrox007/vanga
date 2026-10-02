@@ -42,6 +42,14 @@ class RussianInputAliasTests(unittest.TestCase):
             )
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE title_writers (
+                tconst VARCHAR,
+                nconst VARCHAR
+            )
+            """
+        )
         self.conn.executemany(
             "INSERT INTO title_basics VALUES (?, ?, ?)",
             [
@@ -54,6 +62,7 @@ class RussianInputAliasTests(unittest.TestCase):
             [
                 ("nm0634240", "Christopher Nolan"),
                 ("nm0000138", "Leonardo DiCaprio"),
+                ("nm0254645", "Jonathan Nolan"),
             ],
         )
         self.conn.executemany(
@@ -62,6 +71,10 @@ class RussianInputAliasTests(unittest.TestCase):
                 ("tt0816692", "nm0634240", "director"),
                 ("tt0816692", "nm0000138", "actor"),
             ],
+        )
+        self.conn.execute(
+            "INSERT INTO title_writers VALUES (?, ?)",
+            ["tt0816692", "nm0254645"],
         )
         self.resolver = RussianInputResolver(self.conn)
 
@@ -93,6 +106,25 @@ class RussianInputAliasTests(unittest.TestCase):
         self.assertEqual(
             resolved["matches"]["director"]["imdb_id"],
             "nm0634240",
+        )
+
+    def test_resolves_russian_writer_to_local_imdb(self):
+        matches = {
+            "джонатан нолан": ["nm0254645"],
+        }
+        with patch.object(self.resolver, "_query_wikidata", return_value=matches):
+            resolved = self.resolver.resolve_inputs(
+                title=None,
+                director=None,
+                writer="Джонатан Нолан",
+                actors=[],
+                year=2014,
+            )
+
+        self.assertEqual(resolved["writer"], "Jonathan Nolan")
+        self.assertEqual(
+            resolved["matches"]["writer"]["imdb_id"],
+            "nm0254645",
         )
 
     def test_latin_input_skips_remote_resolution(self):
