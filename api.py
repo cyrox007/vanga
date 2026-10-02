@@ -63,7 +63,10 @@ def _ensure_engine() -> KinoVanga:
 
         if previous is not None:
             try:
-                previous.close()
+                # Search может ещё использовать catalog connection старого
+                # поколения; закрываем его только после завершения такого запроса.
+                with _catalog_lock:
+                    previous.close()
             except Exception:
                 logger.exception("Не удалось закрыть старые соединения DuckDB")
 
