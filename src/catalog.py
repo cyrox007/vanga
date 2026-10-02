@@ -43,6 +43,20 @@ class CatalogSearch:
     ) -> None:
         self.conn = conn
         self.resolver = resolver
+        self._writer_schema_available = self._table_exists("title_crew") and self._table_exists("title_writers")
+
+    def _table_exists(self, table_name: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'main'
+              AND table_name = ?
+            LIMIT 1
+            """,
+            [table_name],
+        ).fetchone()
+        return row is not None
 
     @staticmethod
     def _clean_query(query: str) -> str:
@@ -93,22 +107,24 @@ class CatalogSearch:
             if category in {"actor", "actress"} and name
         ][:5]
 
-        writer_row = self.conn.execute(
-            """
-            SELECT n.primaryName
-            FROM title_crew c
-            LEFT JOIN name_basics n
-              ON n.nconst = NULLIF(TRIM(split_part(c.writers, ',', 1)), '')
-            WHERE c.tconst = ?
-            LIMIT 1
-            """,
-            [imdb_id],
-        ).fetchone()
-        writer = (
-            str(writer_row[0]).strip()
-            if writer_row and writer_row[0]
-            else None
-        )
+        writer = None
+        if self._writer_schema_available:
+            writer_row = self.conn.execute(
+                """
+                SELECT n.primaryName
+                FROM title_crew c
+                LEFT JOIN name_basics n
+                  ON n.nconst = NULLIF(TRIM(split_part(c.writers, ',', 1)), '')
+                WHERE c.tconst = ?
+                LIMIT 1
+                """,
+                [imdb_id],
+            ).fetchone()
+            writer = (
+                str(writer_row[0]).strip()
+                if writer_row and writer_row[0]
+                else None
+            )
 
         genres = [
             item.strip()
@@ -237,6 +253,8 @@ class CatalogSearch:
         prefix = f"{clean}%"
 
         if role == "writer":
+            if not self._writer_schema_available:
+                return []
             rows = self.conn.execute(
                 """
                 SELECT
