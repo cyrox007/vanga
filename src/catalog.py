@@ -123,8 +123,17 @@ class CatalogSearch:
         pattern = f"%{clean}%"
         prefix = f"{clean}%"
 
+        year_order_sql = "9999"
+        params: list[object] = [pattern, pattern, clean, prefix, prefix]
+        if year is not None:
+            year_order_sql = (
+                "ABS(COALESCE(TRY_CAST(startYear AS INTEGER), 0) - ?)"
+            )
+            params.append(int(year))
+        params.append(limit)
+
         rows = self.conn.execute(
-            """
+            f"""
             SELECT tconst
             FROM title_basics
             WHERE titleType = 'movie'
@@ -139,15 +148,12 @@ class CatalogSearch:
                     WHEN originalTitle ILIKE ? THEN 2
                     ELSE 3
                 END,
-                CASE
-                    WHEN ? IS NULL THEN 9999
-                    ELSE ABS(COALESCE(TRY_CAST(startYear AS INTEGER), 0) - ?)
-                END,
+                {year_order_sql},
                 TRY_CAST(startYear AS INTEGER) DESC NULLS LAST,
                 tconst
             LIMIT ?
             """,
-            [pattern, pattern, clean, prefix, prefix, year, year, limit],
+            params,
         ).fetchall()
 
         ids = [str(row[0]) for row in rows]
