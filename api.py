@@ -172,6 +172,25 @@ def health():
         ), 503
 
 
+@app.get("/model-info")
+def model_info():
+    try:
+        engine = _ensure_engine()
+        return jsonify(
+            {
+                "ok": True,
+                "generation": _generation,
+                "quality": engine.quality_summary(),
+                "uncertainty_available": bool(
+                    engine.metadata.get("test_abs_error_quantiles")
+                ),
+            }
+        )
+    except Exception:
+        logger.exception("Не удалось получить сведения о модели Vanga")
+        return _json_error("Сведения о модели временно недоступны", 503)
+
+
 @app.post("/predict")
 def predict():
     if request.content_length is not None and request.content_length > 32 * 1024:
@@ -246,6 +265,8 @@ def predict():
             "generation": _generation,
             "rating": result["rating"],
             "base": result.get("base"),
+            "uncertainty": result.get("uncertainty"),
+            "quality": result.get("quality") or {},
             "explanation": result["explanation"],
             "contributions": result["contributions"],
             "input_resolution": result.get("input_resolution", {}),
