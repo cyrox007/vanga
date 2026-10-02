@@ -47,7 +47,10 @@ class RussianInputResolver:
         client: WikimediaClient | None = None,
     ) -> None:
         self.conn = imdb_conn
-        self.client = client or WikimediaClient()
+        self.client = client or WikimediaClient(
+            min_interval_seconds=0.2,
+            timeout_seconds=4,
+        )
         self._cache: dict[tuple[str, str, int | None], AliasMatch | None] = {}
 
     @staticmethod
@@ -106,12 +109,20 @@ SELECT DISTINCT ?query ?imdb WHERE {{
   ?item wdt:P345 ?imdb .
 }}
 """
-        payload = self.client._request_json(
-            "POST",
+        # Inference не должен зависать на внешнем enrichment. Один короткий
+        # запрос без retry: при проблеме просто используем исходный ввод.
+        self.client._throttle()
+        response = self.client.session.post(
             WIKIDATA_SPARQL_URL,
             data={"query": query, "format": "json"},
             headers={"Accept": "application/sparql-results+json"},
+            timeout=min(self.client.timeout_seconds, 4),
         )
+        self.client._last_request_at = __import__("time").monotonic()
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Wikidata вернула неожиданный JSON")
 
         result: dict[str, list[str]] = {}
         for binding in payload.get("results", {}).get("bindings", []):
