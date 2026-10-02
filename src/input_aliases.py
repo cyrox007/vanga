@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import asdict, dataclass
 from typing import Iterable
 
@@ -118,7 +119,7 @@ SELECT DISTINCT ?query ?imdb WHERE {{
             headers={"Accept": "application/sparql-results+json"},
             timeout=min(self.client.timeout_seconds, 4),
         )
-        self.client._last_request_at = __import__("time").monotonic()
+        self.client._last_request_at = time.monotonic()
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
