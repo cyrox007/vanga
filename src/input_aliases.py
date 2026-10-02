@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 _IMDB_TITLE_RE = re.compile(r"tt\d+")
 _IMDB_PERSON_RE = re.compile(r"nm\d+")
+_WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,11 @@ class RussianInputResolver:
             AliasMatch | None,
         ] = OrderedDict()
         self._cache_limit = 2048
+        self._search_cache: OrderedDict[
+            tuple[str, str, int | None],
+            list[AliasMatch],
+        ] = OrderedDict()
+        self._search_cache_limit = 512
 
     @staticmethod
     def needs_resolution(value: str | None) -> bool:
@@ -74,6 +80,196 @@ class RussianInputResolver:
         self._cache[key] = match
         while len(self._cache) > self._cache_limit:
             self._cache.popitem(last=False)
+
+    def _remember_search(
+        self,
+        key: tuple[str, str, int | None],
+        matches: list[AliasMatch],
+    ) -> None:
+        if key in self._search_cache:
+            self._search_cache.move_to_end(key)
+        self._search_cache[key] = list(matches)
+        while len(self._search_cache) > self._search_cache_limit:
+            self._search_cache.popitem(last=False)
+
+    def _wikidata_action_get(self, params: dict) -> dict:
+        """Один короткий Wikimedia Action API запрос без retry/backoff."""
+        self.client._throttle()
+        response = self.client.session.get(
+            _WIKIDATA_API_URL,
+            params=params,
+            timeout=min(self.client.timeout_seconds, 3),
+        )
+        self.client._last_request_at = time.monotonic()
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Wikidata вернула неожиданный JSON")
+        return payload
+
+    @staticmethod
+    def _claim_imdb_ids(entity: dict) -> list[str]:
+        claims = entity.get("claims")
+        if not isinstance(claims, dict):
+            return []
+
+        result: list[str] = []
+        for claim in claims.get("P345") or []:
+            try:
+                value = claim["mainsnak"]["datavalue"]["value"]
+            except (KeyError, TypeError):
+                continue
+            imdb_id = str(value or "").strip()
+            if imdb_id and imdb_id not in result:
+                result.append(imdb_id)
+        return result
+
+    def search_aliases(
+        self,
+        raw: str,
+        *,
+        role: str,
+        year: int | None = None,
+        limit: int = 5,
+    ) -> list[AliasMatch]:
+        """Ищет опечатки/варианты русского ввода через wbsearchentities.
+
+        Используется только в autocomplete. Финальный кандидат всё равно
+        проверяется по локальной IMDb БД, поэтому Wikidata не становится
+        источником признаков модели.
+        """
+        clean = " ".join(str(raw or "").strip().split())
+        if (
+            not self.needs_resolution(clean)
+            or len(clean) < 4
+            or role not in {"title", "director", "actor"}
+        ):
+            return []
+
+        key = (role, clean.casefold(), year if role == "title" else None)
+        cached = self._search_cache.get(key)
+        if cached is not None:
+            self._search_cache.move_to_end(key)
+            return list(cached[:limit])
+
+        limit = max(1, min(int(limit), 8))
+        try:
+            search_payload = self._wikidata_action_get(
+                {
+                    "action": "wbsearchentities",
+                    "search": clean,
+                    "language": "ru",
+                    "uselang": "ru",
+                    "type": "item",
+                    "limit": min(12, max(6, limit * 2)),
+                    "format": "json",
+                }
+            )
+            qids = [
+                str(item.get("id") or "")
+                for item in search_payload.get("search", [])
+                if isinstance(item, dict)
+                and re.fullmatch(r"Q\d+", str(item.get("id") or ""))
+            ]
+            if not qids:
+                self._remember_search(key, [])
+                return []
+
+            entity_payload = self._wikidata_action_get(
+                {
+                    "action": "wbgetentities",
+                    "ids": "|".join(qids),
+                    "props": "claims",
+                    "format": "json",
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "Не удалось выполнить fuzzy-поиск русского ввода %r: %s",
+                clean,
+                exc,
+            )
+            return []
+
+        entities = entity_payload.get("entities")
+        if not isinstance(entities, dict):
+            self._remember_search(key, [])
+            return []
+
+        ordered_ids: list[str] = []
+        for qid in qids:
+            entity = entities.get(qid)
+            if not isinstance(entity, dict):
+                continue
+            for imdb_id in self._claim_imdb_ids(entity):
+                if imdb_id not in ordered_ids:
+                    ordered_ids.append(imdb_id)
+
+        matches: list[AliasMatch] = []
+        if role == "title":
+            candidates: list[tuple[int, int, AliasMatch]] = []
+            for order, imdb_id in enumerate(ordered_ids):
+                if not _IMDB_TITLE_RE.fullmatch(imdb_id):
+                    continue
+                row = self.conn.execute(
+                    """
+                    SELECT primaryTitle, TRY_CAST(startYear AS INTEGER)
+                    FROM title_basics
+                    WHERE tconst = ?
+                    LIMIT 1
+                    """,
+                    [imdb_id],
+                ).fetchone()
+                if not row or not row[0]:
+                    continue
+                candidate_year = int(row[1]) if row[1] is not None else None
+                distance = (
+                    abs(candidate_year - year)
+                    if year is not None and candidate_year is not None
+                    else 9999
+                )
+                candidates.append(
+                    (
+                        distance,
+                        order,
+                        AliasMatch(
+                            input=clean,
+                            canonical=str(row[0]).strip(),
+                            imdb_id=imdb_id,
+                            source="wikidata-search",
+                        ),
+                    )
+                )
+            candidates.sort(key=lambda item: (item[0], item[1]))
+            matches = [item[2] for item in candidates[:limit]]
+        else:
+            for imdb_id in ordered_ids:
+                if not _IMDB_PERSON_RE.fullmatch(imdb_id):
+                    continue
+                row = self.conn.execute(
+                    """
+                    SELECT primaryName
+                    FROM name_basics
+                    WHERE nconst = ?
+                    LIMIT 1
+                    """,
+                    [imdb_id],
+                ).fetchone()
+                if not row or not row[0] or not self._person_supports_role(imdb_id, role):
+                    continue
+                matches.append(
+                    AliasMatch(
+                        input=clean,
+                        canonical=str(row[0]).strip(),
+                        imdb_id=imdb_id,
+                        source="wikidata-search",
+                    )
+                )
+                if len(matches) >= limit:
+                    break
+
+        self._remember_search(key, matches)
+        return list(matches)
 
     @staticmethod
     def _literal(value: str) -> str:
