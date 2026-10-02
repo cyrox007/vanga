@@ -2,6 +2,7 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 import sys
+from pathlib import Path
 
 
 def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
@@ -31,12 +32,15 @@ def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
     console.setLevel(log_level)
     console.setFormatter(console_formatter)
 
-    # Создаём директорию для логов
-    os.makedirs(".logs", exist_ok=True)
+    # Логи всегда храним внутри каталога проекта, а не относительно текущего
+    # рабочего каталога процесса. Это важно для запуска через sudo/systemd.
+    project_root = Path(__file__).resolve().parents[1]
+    logs_dir = project_root / ".logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     # Файловый обработчик с ротацией
     file = RotatingFileHandler(
-        ".logs/app.log",
+        logs_dir / "app.log",
         maxBytes=10_000_000,  # 10 MB
         backupCount=5,
         encoding="utf-8"
