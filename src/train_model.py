@@ -335,6 +335,12 @@ def train_catboost_model(
             verbose=100,
             thread_count=1,
             used_ram_limit="900mb",
+            # Сдерживаем рост CTR-таблиц для высококардинальных персональных ID.
+            # Это критично для VPS с 2 ГБ RAM: модель должна оставаться пригодной
+            # для последующей загрузки inference-процессом.
+            model_size_reg=5.0,
+            ctr_leaf_count_limit=50_000,
+            max_ctr_complexity=1,
             allow_writing_files=False,
         )
 
@@ -454,14 +460,33 @@ def save_trained_model(model: CatBoostRegressor, metadata: dict) -> None:
     metadata_path = release_dir / "metadata.pkl"
     try:
         model.save_model(str(model_path), format="cbm")
-        with metadata_path.open("wb") as handle:
-            pickle.dump(metadata, handle)
+        model_size_bytes = model_path.stat().st_size
+        max_model_size_bytes = int(config.TRAIN_MAX_MODEL_SIZE_MB * 1024 * 1024)
+        if model_size_bytes <= 0:
+            raise RuntimeError("CatBoost сохранил пустой файл модели")
+        if model_size_bytes > max_model_size_bytes:
+            raise RuntimeError(
+                "Модель получилась слишком большой для безопасного inference: "
+                f"{model_size_bytes / 1024 / 1024:.1f} МБ при лимите "
+                f"{config.TRAIN_MAX_MODEL_SIZE_MB} МБ"
+            )
 
-        check_model = CatBoostRegressor()
-        check_model.load_model(str(model_path))
+        persisted_metadata = dict(metadata)
+        persisted_metadata["model_size_bytes"] = model_size_bytes
+        with metadata_path.open("wb") as handle:
+            pickle.dump(persisted_metadata, handle)
+
+        # Не загружаем model.cbm второй раз в процессе обучения: на малом VPS
+        # это временно удваивает память CatBoost и приводит к swap-thrashing.
+        # Успешный save_model + проверка размера + повторное чтение metadata
+        # дают дешёвую проверку артефактов перед атомарным переключением.
         with metadata_path.open("rb") as handle:
             check_metadata = pickle.load(handle)
-        if not isinstance(check_metadata, dict) or not check_metadata.get("feature_names"):
+        if (
+            not isinstance(check_metadata, dict)
+            or not check_metadata.get("feature_names")
+            or check_metadata.get("model_size_bytes") != model_size_bytes
+        ):
             raise RuntimeError("Метаданные обученной модели повреждены")
 
         pointer_tmp = root / ".current.json.tmp"
