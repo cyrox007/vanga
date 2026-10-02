@@ -138,6 +138,19 @@ class CatalogSearchTests(unittest.TestCase):
             ["Leonardo DiCaprio", "Anne Hathaway"],
         )
 
+    def test_movie_details_keep_working_when_writer_schema_is_not_ready(self):
+        self.catalog._writer_schema_available = False
+
+        item = self.catalog._movie_details("tt0816692")
+
+        self.assertIsNotNone(item)
+        self.assertEqual(item.title, "Interstellar")
+        self.assertIsNone(item.writer)
+        self.assertEqual(
+            self.catalog.search_people("Jonathan", role="writer"),
+            [],
+        )
+
     def test_people_search_filters_role(self):
         directors = self.catalog.search_people("Christopher", role="director")
         actors = self.catalog.search_people("Leonardo", role="actor")
