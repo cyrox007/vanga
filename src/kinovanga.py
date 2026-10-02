@@ -381,13 +381,17 @@ class KinoVanga:
             if director
             else {}
         )
+        writer_features_enabled = {
+            "writer_id",
+            "writer_avg_rating",
+        }.issubset(feature_names_set)
         writer_people = (
             self._get_people_info(
                 [writer],
                 before_year=int(year),
                 role="writer",
             )
-            if writer
+            if writer and writer_features_enabled
             else {}
         )
         actor_people = (
@@ -475,10 +479,14 @@ class KinoVanga:
         if title:
             logger.info(f"Предсказание для фильма: {title} ({year})")
 
+        writer_features_enabled = {
+            "writer_id",
+            "writer_avg_rating",
+        }.issubset(set(self.metadata.get("feature_names", [])))
         resolved_input = self.input_resolver.resolve_inputs(
             title=title,
             director=director,
-            writer=writer,
+            writer=writer if writer_features_enabled else None,
             actors=actors or [],
             year=int(year),
         )
