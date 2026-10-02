@@ -24,6 +24,7 @@ import duckdb
 
 from src.logger import setup_logger
 from settings import config
+from src.catalog import CatalogSearch
 from src.input_aliases import RussianInputResolver
 from src.normalize import extract_title_features, normalize_genre_str
 
@@ -46,6 +47,7 @@ class KinoVanga:
         self.conn.execute("SET memory_limit = '400MB'")
         self.conn.execute("SET threads = 2")
         self.input_resolver = RussianInputResolver(self.conn)
+        self.catalog = CatalogSearch(self.conn, self.input_resolver)
         self._load_model()
 
     def __del__(self):
