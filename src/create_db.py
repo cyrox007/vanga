@@ -45,9 +45,15 @@ def create_duckdb_table_direct(db: duckdb.DuckDBPyConnection, dataset_name: str,
                 AND category IN ('director', 'actor', 'actress')
          """
 
+    if table_name == "title_crew":
+        query += """ 
+            WHERE tconst IN (SELECT tconst FROM title_basics)
+         """
+
     if table_name == "name_basics":
         query += """ 
             WHERE nconst IN (SELECT DISTINCT nconst FROM title_principals)
+               OR nconst IN (SELECT DISTINCT nconst FROM title_writers)
          """
         
     db.execute(query)
@@ -56,6 +62,26 @@ def create_duckdb_table_direct(db: duckdb.DuckDBPyConnection, dataset_name: str,
     row_count = db.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
     logger.info(f"Количество записей в {table_name}: {row_count}")
     
+
+@db_connector
+def create_derived_tables(db: duckdb.DuckDBPyConnection) -> None:
+    """Создаёт нормализованные компактные таблицы поверх IMDb datasets."""
+    db.execute(
+        """
+        CREATE OR REPLACE TABLE title_writers AS
+        SELECT
+            tconst,
+            TRIM(writer_id) AS nconst
+        FROM title_crew,
+             UNNEST(string_split(writers, ',')) AS t(writer_id)
+        WHERE writers IS NOT NULL
+          AND TRIM(writer_id) <> ''
+          AND TRIM(writer_id) <> '\\N'
+        """
+    )
+    count = db.execute("SELECT COUNT(*) FROM title_writers").fetchone()[0]
+    logger.info(f"Таблица title_writers создана/обновлена: {count} строк")
+
 
 @db_connector
 def create_indexes(db: duckdb.DuckDBPyConnection) -> None:
@@ -67,6 +93,9 @@ def create_indexes(db: duckdb.DuckDBPyConnection) -> None:
         ("title_principals", "idx_title_principals_tconst", "tconst"),
         ("title_principals", "idx_title_principals_nconst", "nconst"),
         ("title_principals", "idx_title_principals_category", "category"),
+        ("title_crew", "idx_title_crew_tconst", "tconst"),
+        ("title_writers", "idx_title_writers_tconst", "tconst"),
+        ("title_writers", "idx_title_writers_nconst", "nconst"),
         ("name_basics", "idx_name_basics_nconst", "nconst"),
         ("name_basics", "idx_name_basics_primaryName", "primaryName"),
     ]
