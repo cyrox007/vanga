@@ -30,6 +30,15 @@ class CatalogSearchTests(unittest.TestCase):
         )
         self.conn.execute(
             """
+            CREATE TABLE title_ratings (
+                tconst VARCHAR,
+                averageRating VARCHAR,
+                numVotes VARCHAR
+            )
+            """
+        )
+        self.conn.execute(
+            """
             CREATE TABLE name_basics (
                 nconst VARCHAR,
                 primaryName VARCHAR
@@ -51,6 +60,13 @@ class CatalogSearchTests(unittest.TestCase):
             [
                 ("tt0816692", "movie", "Interstellar", "Interstellar", "2014", "169", "Adventure,Drama,Sci-Fi"),
                 ("tt9999999", "movie", "Interstellar Legacy", "Interstellar Legacy", "2030", "140", "Sci-Fi"),
+            ],
+        )
+        self.conn.executemany(
+            "INSERT INTO title_ratings VALUES (?, ?, ?)",
+            [
+                ("tt0816692", "8.7", "2200000"),
+                ("tt9999999", "7.1", "1234"),
             ],
         )
         self.conn.executemany(
@@ -98,6 +114,18 @@ class CatalogSearchTests(unittest.TestCase):
 
         self.assertEqual(directors[0]["imdb_id"], "nm0634240")
         self.assertEqual(actors[0]["imdb_id"], "nm0000138")
+
+    def test_current_ratings_returns_local_imdb_values_in_request_order(self):
+        items = self.catalog.current_ratings(
+            ["tt9999999", "bad", "tt0816692", "tt9999999"]
+        )
+
+        self.assertEqual(
+            [item["imdb_id"] for item in items],
+            ["tt9999999", "tt0816692"],
+        )
+        self.assertEqual(items[0]["rating"], 7.1)
+        self.assertEqual(items[1]["num_votes"], 2200000)
 
     def test_short_queries_do_not_hit_database(self):
         self.assertEqual(self.catalog.search_movies("I"), [])
