@@ -13,6 +13,16 @@ class Config:
         "VANGA_ENRICHMENT_DB",
         str(Path(ABSPATH) / "enrichment.duckdb"),
     )
+    TRAIN_MIN_FREE_DISK_GB = max(
+        1.0,
+        float(os.getenv("VANGA_TRAIN_MIN_FREE_DISK_GB", "3")),
+    )
+    # Жёсткий бюджет размера опубликованной модели. Большая модель может
+    # сохраниться успешно, но не поместиться в память inference-сервиса.
+    TRAIN_MAX_MODEL_SIZE_MB = max(
+        64,
+        int(os.getenv("VANGA_TRAIN_MAX_MODEL_SIZE_MB", "512")),
+    )
     WIKIMEDIA_USER_AGENT = os.getenv(
         "VANGA_WIKIMEDIA_USER_AGENT",
         "KinoVanga/0.1 (https://github.com/cyrox007/vanga)",
