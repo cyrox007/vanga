@@ -373,16 +373,35 @@ def train_catboost_model(
         rmse = float(np.sqrt(mean_squared_error(y_test, y_pred)))
         r2 = float(r2_score(y_test, y_pred))
 
+        # Эмпирическая калибровка неопределённости на временном holdout.
+        # Мы не выдаём её за вероятность конкретного прогноза: это распределение
+        # абсолютной ошибки модели на последних двух календарных годах выборки.
+        abs_errors = np.abs(y_test - y_pred)
+        error_quantiles = {
+            "q50": float(np.quantile(abs_errors, 0.50)),
+            "q80": float(np.quantile(abs_errors, 0.80)),
+            "q90": float(np.quantile(abs_errors, 0.90)),
+            "q95": float(np.quantile(abs_errors, 0.95)),
+        }
+
         logger.info("=" * 60)
         logger.info("МЕТРИКИ НА ВРЕМЕННОЙ ТЕСТОВОЙ ВЫБОРКЕ:")
         logger.info(f"MAE  = {mae:.4f}")
         logger.info(f"RMSE = {rmse:.4f}")
         logger.info(f"R²   = {r2:.4f}")
+        logger.info(
+            "Абсолютная ошибка, квантили: "
+            "q50=%.4f q80=%.4f q90=%.4f q95=%.4f",
+            error_quantiles["q50"],
+            error_quantiles["q80"],
+            error_quantiles["q90"],
+            error_quantiles["q95"],
+        )
         logger.info("=" * 60)
 
         # После расчёта метрик test Pool и массивы прогнозов больше не нужны.
         # Освобождаем их до интерпретации и публикации модели.
-        del test_pool, y_test, y_pred
+        del test_pool, y_test, y_pred, abs_errors
         gc.collect()
         logger.info("Тестовый Pool освобождён после оценки")
 
@@ -395,7 +414,7 @@ def train_catboost_model(
             )
 
         metadata = {
-            "schema_version": 3,
+            "schema_version": 4,
             "training_storage": "disk-first-dsv",
             "feature_names": prepared.feature_names,
             "cat_features_idx": prepared.cat_features_idx,
@@ -404,6 +423,9 @@ def train_catboost_model(
             "test_mae": mae,
             "test_rmse": rmse,
             "test_r2": r2,
+            "test_abs_error_quantiles": error_quantiles,
+            "uncertainty_method": "temporal_holdout_absolute_error",
+            "uncertainty_default_coverage": 0.80,
             "train_year_from": prepared.min_year,
             "train_year_to": prepared.test_from_year - 1,
             "test_year_from": prepared.test_from_year,
