@@ -113,6 +113,23 @@ class InferenceFeatureParityTests(unittest.TestCase):
         self.conn.close()
         self.temp.cleanup()
 
+    def test_old_model_schema_ignores_writer_without_writer_features(self):
+        self.engine.metadata = {
+            "feature_names": ["startYear", "runtimeMinutes"],
+            "categorical_features": [],
+        }
+
+        X = self.engine._prepare_features(
+            2024,
+            120,
+            ["Drama"],
+            writer="Writer Person",
+        )
+
+        self.assertEqual(X.shape, (1, 2))
+        self.assertAlmostEqual(float(X[0, 0]), 1.24, places=5)
+        self.assertAlmostEqual(float(X[0, 1]), 1.20, places=5)
+
     def test_director_history_uses_only_director_credits(self):
         info = self.engine._get_people_info(
             ["Role Switcher"],
