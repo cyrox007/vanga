@@ -89,8 +89,8 @@ class KinoVanga:
         clean_names = [name.strip() for name in names if name and name.strip()]
         if not clean_names:
             return {}
-        if role not in {"director", "actor"}:
-            raise ValueError("role должен быть director или actor")
+        if role not in {"director", "writer", "actor"}:
+            raise ValueError("role должен быть director, writer или actor")
 
         categories = (
             ("director",)
@@ -112,68 +112,129 @@ class KinoVanga:
         if not missing:
             return cached
 
-        query = f"""
-            WITH person_names AS (
-                SELECT unnest(?) AS name
-            ),
-            person_ids AS (
+        if role == "writer":
+            query = """
+                WITH person_names AS (
+                    SELECT unnest(?) AS name
+                ),
+                person_ids AS (
+                    SELECT
+                        pn.name AS requested_name,
+                        n.nconst,
+                        n.primaryName
+                    FROM person_names pn
+                    LEFT JOIN name_basics n
+                      ON LOWER(n.primaryName) = LOWER(pn.name)
+                ),
+                person_stats AS (
+                    SELECT
+                        pi.requested_name,
+                        pi.nconst,
+                        AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating,
+                        COUNT(DISTINCT tw.tconst) AS works_count
+                    FROM person_ids pi
+                    LEFT JOIN title_writers tw
+                      ON tw.nconst = pi.nconst
+                    LEFT JOIN title_basics b
+                      ON b.tconst = tw.tconst
+                    LEFT JOIN title_ratings r
+                      ON r.tconst = b.tconst
+                    WHERE pi.nconst IS NOT NULL
+                      AND b.titleType = 'movie'
+                      AND TRY_CAST(b.startYear AS INTEGER) < ?
+                      AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
+                    GROUP BY pi.requested_name, pi.nconst
+                ),
+                ranked AS (
+                    SELECT
+                        requested_name,
+                        nconst,
+                        avg_rating,
+                        works_count,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY LOWER(requested_name)
+                            ORDER BY
+                                works_count DESC,
+                                avg_rating DESC NULLS LAST,
+                                nconst
+                        ) AS rn
+                    FROM person_stats
+                )
                 SELECT
-                    pn.name AS requested_name,
-                    n.nconst,
-                    n.primaryName
+                    pn.name,
+                    r.nconst,
+                    COALESCE(r.avg_rating, 6.5)
                 FROM person_names pn
-                LEFT JOIN name_basics n
-                  ON LOWER(n.primaryName) = LOWER(pn.name)
-            ),
-            person_stats AS (
+                LEFT JOIN ranked r
+                  ON LOWER(r.requested_name) = LOWER(pn.name)
+                 AND r.rn = 1
+            """
+            rows = self.conn.execute(
+                query,
+                [missing, int(before_year)],
+            ).fetchall()
+        else:
+            query = f"""
+                WITH person_names AS (
+                    SELECT unnest(?) AS name
+                ),
+                person_ids AS (
+                    SELECT
+                        pn.name AS requested_name,
+                        n.nconst,
+                        n.primaryName
+                    FROM person_names pn
+                    LEFT JOIN name_basics n
+                      ON LOWER(n.primaryName) = LOWER(pn.name)
+                ),
+                person_stats AS (
+                    SELECT
+                        pi.requested_name,
+                        pi.nconst,
+                        AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating,
+                        COUNT(DISTINCT tp.tconst) AS works_count
+                    FROM person_ids pi
+                    LEFT JOIN title_principals tp
+                      ON tp.nconst = pi.nconst
+                     AND tp.category IN ({placeholders})
+                    LEFT JOIN title_basics b
+                      ON b.tconst = tp.tconst
+                    LEFT JOIN title_ratings r
+                      ON r.tconst = b.tconst
+                    WHERE pi.nconst IS NOT NULL
+                      AND b.titleType = 'movie'
+                      AND TRY_CAST(b.startYear AS INTEGER) < ?
+                      AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
+                    GROUP BY pi.requested_name, pi.nconst
+                ),
+                ranked AS (
+                    SELECT
+                        requested_name,
+                        nconst,
+                        avg_rating,
+                        works_count,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY LOWER(requested_name)
+                            ORDER BY
+                                works_count DESC,
+                                avg_rating DESC NULLS LAST,
+                                nconst
+                        ) AS rn
+                    FROM person_stats
+                )
                 SELECT
-                    pi.requested_name,
-                    pi.nconst,
-                    AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating,
-                    COUNT(DISTINCT tp.tconst) AS works_count
-                FROM person_ids pi
-                LEFT JOIN title_principals tp
-                  ON tp.nconst = pi.nconst
-                 AND tp.category IN ({placeholders})
-                LEFT JOIN title_basics b
-                  ON b.tconst = tp.tconst
-                LEFT JOIN title_ratings r
-                  ON r.tconst = b.tconst
-                WHERE pi.nconst IS NOT NULL
-                  AND b.titleType = 'movie'
-                  AND TRY_CAST(b.startYear AS INTEGER) < ?
-                  AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
-                GROUP BY pi.requested_name, pi.nconst
-            ),
-            ranked AS (
-                SELECT
-                    requested_name,
-                    nconst,
-                    avg_rating,
-                    works_count,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY LOWER(requested_name)
-                        ORDER BY
-                            works_count DESC,
-                            avg_rating DESC NULLS LAST,
-                            nconst
-                    ) AS rn
-                FROM person_stats
-            )
-            SELECT
-                pn.name,
-                r.nconst,
-                COALESCE(r.avg_rating, 6.5)
-            FROM person_names pn
-            LEFT JOIN ranked r
-              ON LOWER(r.requested_name) = LOWER(pn.name)
-             AND r.rn = 1
-        """
-
-        rows = self.conn.execute(
-            query,
-            [missing, *categories, int(before_year)],
-        ).fetchall()
+                    pn.name,
+                    r.nconst,
+                    COALESCE(r.avg_rating, 6.5)
+                FROM person_names pn
+                LEFT JOIN ranked r
+                  ON LOWER(r.requested_name) = LOWER(pn.name)
+                 AND r.rn = 1
+            """
+            rows = self.conn.execute(
+                query,
+                [missing, *categories, int(before_year)],
+            ).fetchall()
         for name, nconst, avg_rating in rows:
             info = {
                 "nconst": nconst,
@@ -288,6 +349,7 @@ class KinoVanga:
         runtime: int,
         genres: Union[str, List[str]],
         director: Optional[str] = None,
+        writer: Optional[str] = None,
         actors: Optional[List[str]] = None,
         num_votes: Optional[int] = None,
         title: Optional[str] = None,
@@ -319,6 +381,15 @@ class KinoVanga:
             if director
             else {}
         )
+        writer_people = (
+            self._get_people_info(
+                [writer],
+                before_year=int(year),
+                role="writer",
+            )
+            if writer
+            else {}
+        )
         actor_people = (
             self._get_people_info(
                 actors[:3],
@@ -332,6 +403,10 @@ class KinoVanga:
         director_info = director_people.get(director, {}) if director else {}
         director_id = director_info.get("nconst") or "Unknown"
         director_avg_rating = float(director_info.get("avg_rating", 6.5))
+
+        writer_info = writer_people.get(writer, {}) if writer else {}
+        writer_id = writer_info.get("nconst") or "Unknown"
+        writer_avg_rating = float(writer_info.get("avg_rating", 6.5))
 
         actor_infos: list[dict] = []
         for actor in actors[:3]:
@@ -349,11 +424,13 @@ class KinoVanga:
             "startYear": (int(year) - 1900) / 100.0,
             "runtimeMinutes": int(runtime) / 100.0,
             "director_avg_rating": director_avg_rating,
+            "writer_avg_rating": writer_avg_rating,
             "actor_1_avg_rating": actor_infos[0]["avg_rating"],
             "actor_2_avg_rating": actor_infos[1]["avg_rating"],
             "actor_3_avg_rating": actor_infos[2]["avg_rating"],
             "genres_combined": genres_combined,
             "director_id": director_id,
+            "writer_id": writer_id,
             "actor_1_id": actor_infos[0]["nconst"],
             "actor_2_id": actor_infos[1]["nconst"],
             "actor_3_id": actor_infos[2]["nconst"],
@@ -377,7 +454,7 @@ class KinoVanga:
         return X
 
 
-    def predict(self, year, runtime, genres, director=None,
+    def predict(self, year, runtime, genres, director=None, writer=None,
             actors=None, num_votes=None, title=None, explain=False) -> float:
         """
         Предсказывает рейтинг фильма.
@@ -388,6 +465,7 @@ class KinoVanga:
             runtime: Длительность в минутах
             genres: Жанр (строка через запятую или список)
             director: Имя режиссёра
+            writer: Имя сценариста
             actors: Список имён актёров (до 5)
             num_votes: Количество голосов (для новых фильмов можно не указывать)
 
@@ -400,11 +478,13 @@ class KinoVanga:
         resolved_input = self.input_resolver.resolve_inputs(
             title=title,
             director=director,
+            writer=writer,
             actors=actors or [],
             year=int(year),
         )
         resolved_title = resolved_input["title"]
         resolved_director = resolved_input["director"]
+        resolved_writer = resolved_input["writer"]
         resolved_actors = resolved_input["actors"]
 
         # Подготовка признаков. Русские названия/имена при найденном
@@ -414,6 +494,7 @@ class KinoVanga:
             runtime,
             genres,
             resolved_director,
+            resolved_writer,
             resolved_actors,
             num_votes,
             title=resolved_title,
@@ -490,6 +571,7 @@ class KinoVanga:
         runtime,
         genres,
         director=None,
+        writer=None,
         actors=None,
         num_votes=None,
         title=None,
@@ -499,6 +581,7 @@ class KinoVanga:
             runtime,
             genres,
             director,
+            writer,
             actors,
             num_votes,
             title=title,
@@ -553,6 +636,7 @@ def predict_movie_rating(
     runtime: int,
     genres: Union[str, List[str]],
     director: str,
+    writer: Optional[str] = None,
     actors: List[str] = None,
     model_path: Optional[str] = None
 ) -> float:
@@ -565,6 +649,7 @@ def predict_movie_rating(
         runtime: Длительность в минутах
         genres: Жанр (строка через запятую или список)
         director: Имя режиссёра
+        writer: Имя сценариста
         actors: Список имён актёров (до 5)
         model_path: Путь к модели (опционально)
 
@@ -580,6 +665,7 @@ def predict_movie_rating(
         runtime=runtime,
         genres=genres,
         director=director,
+        writer=writer,
         actors=actors,
         title=title
     )
