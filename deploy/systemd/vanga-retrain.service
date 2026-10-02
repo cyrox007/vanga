@@ -13,8 +13,8 @@ Environment=MALLOC_ARENA_MAX=2
 ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/ds_update.py
 ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/traning.py
 Nice=15
-CPUQuota=100%
-MemoryHigh=900M
+CPUQuota=50%
+MemoryHigh=1G
 MemoryMax=1200M
 MemorySwapMax=2G
 OOMPolicy=stop
