@@ -132,6 +132,17 @@ class DiskFirstTrainingTests(unittest.TestCase):
         self.assertGreater(test_release, test_create)
         self.assertGreaterEqual(source.count("gc.collect()"), 2)
 
+    def test_publication_does_not_load_second_catboost_model(self):
+        source = (
+            Path(__file__).parents[1] / "src" / "train_model.py"
+        ).read_text(encoding="utf-8")
+
+        save_section = source[source.index("def save_trained_model"):]
+        self.assertNotIn("check_model = CatBoostRegressor()", save_section)
+        self.assertIn("TRAIN_MAX_MODEL_SIZE_MB", save_section)
+        self.assertIn("model_size_reg=5.0", source)
+        self.assertIn("ctr_leaf_count_limit=50_000", source)
+
 
 if __name__ == "__main__":
     unittest.main()
