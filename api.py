@@ -166,6 +166,7 @@ def predict():
             "base": result.get("base"),
             "explanation": result["explanation"],
             "contributions": result["contributions"],
+            "input_resolution": result.get("input_resolution", {}),
         }
     )
 
