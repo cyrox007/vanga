@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from typing import Iterable
 
@@ -52,11 +53,27 @@ class RussianInputResolver:
             min_interval_seconds=0.2,
             timeout_seconds=4,
         )
-        self._cache: dict[tuple[str, str, int | None], AliasMatch | None] = {}
+        self._cache: OrderedDict[
+            tuple[str, str, int | None],
+            AliasMatch | None,
+        ] = OrderedDict()
+        self._cache_limit = 2048
 
     @staticmethod
     def needs_resolution(value: str | None) -> bool:
         return bool(value and _CYRILLIC_RE.search(value))
+
+    def _remember(
+        self,
+        key: tuple[str, str, int | None],
+        match: AliasMatch | None,
+    ) -> None:
+        """Ограничивает alias-cache, чтобы публичный поиск не раздувал RAM."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        self._cache[key] = match
+        while len(self._cache) > self._cache_limit:
+            self._cache.popitem(last=False)
 
     @staticmethod
     def _literal(value: str) -> str:
@@ -269,7 +286,7 @@ SELECT DISTINCT ?query ?imdb WHERE {{
                     match = self._resolve_title_candidates(raw, ids, item_year)
                 else:
                     match = self._resolve_person_candidates(raw, ids, role)
-                self._cache[key] = match
+                self._remember(key, match)
 
         title_match = (
             self._cache.get(("title", str(title).casefold(), year))
