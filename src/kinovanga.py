@@ -43,16 +43,35 @@ class KinoVanga:
         self._people_cache = {}  # общий кэш для всех персон
         # Открываем соединение один раз
         self.conn = duckdb.connect(str(self.db_path), read_only=True)
-        # Настройки памяти (опционально)
+        # Inference держит собственное соединение: catalog search не должен
+        # блокировать запрос модели во время внешнего alias lookup.
         self.conn.execute("SET memory_limit = '400MB'")
         self.conn.execute("SET threads = 2")
+
+        self.catalog_conn = duckdb.connect(str(self.db_path), read_only=True)
+        self.catalog_conn.execute("SET memory_limit = '200MB'")
+        self.catalog_conn.execute("SET threads = 1")
+
         self.input_resolver = RussianInputResolver(self.conn)
-        self.catalog = CatalogSearch(self.conn, self.input_resolver)
+        self.catalog_resolver = RussianInputResolver(self.catalog_conn)
+        self.catalog = CatalogSearch(self.catalog_conn, self.catalog_resolver)
         self._load_model()
 
+    def close(self) -> None:
+        """Закрывает read-only соединения модели и каталога."""
+        for attr in ("conn", "catalog_conn"):
+            connection = getattr(self, attr, None)
+            if connection is None:
+                continue
+            try:
+                connection.close()
+            except Exception:
+                logger.exception("Не удалось закрыть DuckDB connection %s", attr)
+            finally:
+                setattr(self, attr, None)
+
     def __del__(self):
-        if hasattr(self, 'conn') and self.conn:
-            self.conn.close()
+        self.close()
 
     def _get_people_info(self, names: List[str], before_year: int) -> dict:
         """Возвращает ID и средний рейтинг персон только по прошлым фильмам."""
