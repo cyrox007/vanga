@@ -167,9 +167,27 @@ class CatalogSearch:
                     year=year,
                 )
                 match = resolved.get("matches", {}).get("title")
-                imdb_id = str(match.get("imdb_id") or "") if isinstance(match, dict) else ""
+                imdb_id = (
+                    str(match.get("imdb_id") or "")
+                    if isinstance(match, dict)
+                    else ""
+                )
                 if imdb_id and imdb_id not in ids:
                     ids.insert(0, imdb_id)
+
+                # Если пользователь ошибся в русском названии или использовал
+                # нестандартный алиас, autocomplete дополнительно показывает
+                # Wikidata search-кандидатов, но каждый IMDb ID проверяется
+                # по локальной базе.
+                fuzzy = self.resolver.search_aliases(
+                    clean,
+                    role="title",
+                    year=year,
+                    limit=limit,
+                )
+                for item in reversed(fuzzy):
+                    if item.imdb_id not in ids:
+                        ids.insert(0, item.imdb_id)
             except Exception:
                 # Русский alias — дополнительный слой. Локальный поиск должен
                 # оставаться рабочим даже при проблеме внешнего источника.
@@ -249,22 +267,44 @@ class CatalogSearch:
                     actor_matches = resolved.get("matches", {}).get("actors") or []
                     match = actor_matches[0] if actor_matches else None
 
+                aliases = self.resolver.search_aliases(
+                    clean,
+                    role=role,
+                    limit=limit,
+                )
+                candidates: list[dict] = []
                 if isinstance(match, dict):
                     imdb_id = str(match.get("imdb_id") or "")
                     canonical = str(match.get("canonical") or "")
-                    if imdb_id and canonical and not any(
-                        item["imdb_id"] == imdb_id for item in items
-                    ):
-                        items.insert(
-                            0,
+                    if imdb_id and canonical:
+                        candidates.append(
                             {
                                 "imdb_id": imdb_id,
                                 "name": canonical,
                                 "known_for_count": 0,
                                 "role": role,
                                 "matched_from": clean,
-                            },
+                                "match_source": str(match.get("source") or "wikidata"),
+                            }
                         )
+
+                for alias in aliases:
+                    candidates.append(
+                        {
+                            "imdb_id": alias.imdb_id,
+                            "name": alias.canonical,
+                            "known_for_count": 0,
+                            "role": role,
+                            "matched_from": clean,
+                            "match_source": alias.source,
+                        }
+                    )
+
+                for candidate in reversed(candidates):
+                    if not any(
+                        item["imdb_id"] == candidate["imdb_id"] for item in items
+                    ):
+                        items.insert(0, candidate)
             except Exception:
                 pass
 
