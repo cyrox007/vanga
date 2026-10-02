@@ -281,6 +281,25 @@ def prepare_training_dataset(
     )
 
 
+def calibrate_absolute_error_quantiles(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+) -> dict[str, float]:
+    """Считает квантили абсолютной ошибки temporal holdout."""
+    true_values = np.asarray(y_true, dtype=np.float32)
+    predicted_values = np.asarray(y_pred, dtype=np.float32)
+    if true_values.shape != predicted_values.shape or true_values.size == 0:
+        raise ValueError("Нужны непустые массивы одинаковой формы")
+
+    abs_errors = np.abs(true_values - predicted_values)
+    return {
+        "q50": float(np.quantile(abs_errors, 0.50)),
+        "q80": float(np.quantile(abs_errors, 0.80)),
+        "q90": float(np.quantile(abs_errors, 0.90)),
+        "q95": float(np.quantile(abs_errors, 0.95)),
+    }
+
+
 def _pool_from_file(dataset_path: Path, cd_path: Path) -> Pool:
     return Pool(
         data=f"dsv://{dataset_path}",
@@ -376,13 +395,10 @@ def train_catboost_model(
         # Эмпирическая калибровка неопределённости на временном holdout.
         # Мы не выдаём её за вероятность конкретного прогноза: это распределение
         # абсолютной ошибки модели на последних двух календарных годах выборки.
-        abs_errors = np.abs(y_test - y_pred)
-        error_quantiles = {
-            "q50": float(np.quantile(abs_errors, 0.50)),
-            "q80": float(np.quantile(abs_errors, 0.80)),
-            "q90": float(np.quantile(abs_errors, 0.90)),
-            "q95": float(np.quantile(abs_errors, 0.95)),
-        }
+        error_quantiles = calibrate_absolute_error_quantiles(
+            y_test,
+            y_pred,
+        )
 
         logger.info("=" * 60)
         logger.info("МЕТРИКИ НА ВРЕМЕННОЙ ТЕСТОВОЙ ВЫБОРКЕ:")
@@ -401,7 +417,7 @@ def train_catboost_model(
 
         # После расчёта метрик test Pool и массивы прогнозов больше не нужны.
         # Освобождаем их до интерпретации и публикации модели.
-        del test_pool, y_test, y_pred, abs_errors
+        del test_pool, y_test, y_pred
         gc.collect()
         logger.info("Тестовый Pool освобождён после оценки")
 
