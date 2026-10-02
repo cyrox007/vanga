@@ -23,6 +23,13 @@ class Config:
         64,
         int(os.getenv("VANGA_TRAIN_MAX_MODEL_SIZE_MB", "512")),
     )
+    # Допустимое ухудшение MAE на сопоставимом temporal holdout.
+    # Если текущая и candidate-модель проверялись на одном периоде, более
+    # сильная регрессия блокирует атомарную публикацию candidate.
+    TRAIN_MAX_MAE_REGRESSION = max(
+        0.0,
+        float(os.getenv("VANGA_TRAIN_MAX_MAE_REGRESSION", "0.03")),
+    )
     WIKIMEDIA_USER_AGENT = os.getenv(
         "VANGA_WIKIMEDIA_USER_AGENT",
         "KinoVanga/0.1 (https://github.com/cyrox007/vanga)",
