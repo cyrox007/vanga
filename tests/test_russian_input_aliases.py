@@ -126,6 +126,109 @@ class RussianInputAliasTests(unittest.TestCase):
         self.assertEqual(resolved["director"], "Кристофер Нолан")
         self.assertEqual(resolved["actors"], ["Леонардо Ди Каприо"])
 
+    def test_fuzzy_search_maps_russian_typo_to_local_imdb_title(self):
+        responses = [
+            {
+                "search": [
+                    {"id": "Q13417189", "label": "Интерстеллар"},
+                ]
+            },
+            {
+                "entities": {
+                    "Q13417189": {
+                        "claims": {
+                            "P345": [
+                                {
+                                    "mainsnak": {
+                                        "datavalue": {
+                                            "value": "tt0816692"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        ]
+
+        with patch.object(
+            self.resolver,
+            "_wikidata_action_get",
+            side_effect=responses,
+        ):
+            matches = self.resolver.search_aliases(
+                "Интерстелар",
+                role="title",
+                year=2014,
+            )
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].canonical, "Interstellar")
+        self.assertEqual(matches[0].imdb_id, "tt0816692")
+        self.assertEqual(matches[0].source, "wikidata-search")
+
+    def test_fuzzy_person_search_respects_requested_role(self):
+        responses = [
+            {
+                "search": [
+                    {"id": "Q25191", "label": "Кристофер Нолан"},
+                    {"id": "Q999999", "label": "Другой человек"},
+                ]
+            },
+            {
+                "entities": {
+                    "Q25191": {
+                        "claims": {
+                            "P345": [
+                                {
+                                    "mainsnak": {
+                                        "datavalue": {
+                                            "value": "nm0634240"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "Q999999": {
+                        "claims": {
+                            "P345": [
+                                {
+                                    "mainsnak": {
+                                        "datavalue": {
+                                            "value": "nm0000138"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                }
+            },
+        ]
+
+        with patch.object(
+            self.resolver,
+            "_wikidata_action_get",
+            side_effect=responses,
+        ):
+            matches = self.resolver.search_aliases(
+                "Кристофер Ноллан",
+                role="director",
+            )
+
+        self.assertEqual([item.imdb_id for item in matches], ["nm0634240"])
+
+    def test_fuzzy_search_cache_is_bounded(self):
+        self.resolver._search_cache_limit = 2
+        self.resolver._remember_search(("actor", "один", None), [])
+        self.resolver._remember_search(("actor", "два", None), [])
+        self.resolver._remember_search(("actor", "три", None), [])
+
+        self.assertEqual(len(self.resolver._search_cache), 2)
+        self.assertNotIn(("actor", "один", None), self.resolver._search_cache)
+
     def test_alias_cache_is_bounded(self):
         self.resolver._cache_limit = 2
         self.resolver._remember(("actor", "один", None), None)
