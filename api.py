@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from pathlib import Path
@@ -22,9 +23,13 @@ _last_reload_error: str | None = None
 
 
 def _generation_key(model_path: Path) -> str:
+    """Возвращает компактный идентификатор активного поколения модели."""
     pointer = Path(config.ABSPATH) / "models" / "current.json"
     if pointer.exists():
-        return pointer.read_text(encoding="utf-8").strip()
+        payload = json.loads(pointer.read_text(encoding="utf-8"))
+        generation = str(payload.get("generation") or "").strip()
+        if generation:
+            return generation
     return f"legacy:{model_path.stat().st_mtime_ns}"
 
 
