@@ -295,6 +295,7 @@ def train_catboost_model(
     all_genres: list,
     batch_size: int = 2500,
     max_batches: Optional[int] = None,
+    iterations: int = 1500,
 ) -> Tuple[CatBoostRegressor, dict]:
     """
     Обучает CatBoost из файлового Pool.
@@ -306,10 +307,14 @@ def train_catboost_model(
     """
     logger.info("=" * 60)
     logger.info("НАЧАЛО DISK-FIRST ОБУЧЕНИЯ CATBOOST")
+    if iterations < 1:
+        raise ValueError("iterations должно быть положительным числом")
+
     logger.info(
-        "Параметры: batch_size=%s, max_batches=%s",
+        "Параметры: batch_size=%s, max_batches=%s, iterations=%s",
         batch_size,
         max_batches,
+        iterations,
     )
     logger.info("=" * 60)
 
@@ -327,7 +332,7 @@ def train_catboost_model(
         )
 
         model = CatBoostRegressor(
-            iterations=1500,
+            iterations=iterations,
             depth=8,
             learning_rate=0.03,
             loss_function="RMSE",
