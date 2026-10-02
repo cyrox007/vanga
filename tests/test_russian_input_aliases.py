@@ -126,6 +126,15 @@ class RussianInputAliasTests(unittest.TestCase):
         self.assertEqual(resolved["director"], "Кристофер Нолан")
         self.assertEqual(resolved["actors"], ["Леонардо Ди Каприо"])
 
+    def test_alias_cache_is_bounded(self):
+        self.resolver._cache_limit = 2
+        self.resolver._remember(("actor", "один", None), None)
+        self.resolver._remember(("actor", "два", None), None)
+        self.resolver._remember(("actor", "три", None), None)
+
+        self.assertEqual(len(self.resolver._cache), 2)
+        self.assertNotIn(("actor", "один", None), self.resolver._cache)
+
     def test_russian_genres_are_normalized_to_imdb_values(self):
         self.assertEqual(
             normalize_genre_str("фантастика, драма, приключения"),
