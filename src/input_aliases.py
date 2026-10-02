@@ -142,7 +142,7 @@ class RussianInputResolver:
         if (
             not self.needs_resolution(clean)
             or len(clean) < 4
-            or role not in {"title", "director", "actor"}
+            or role not in {"title", "director", "writer", "actor"}
         ):
             return []
 
@@ -387,6 +387,18 @@ SELECT DISTINCT ?query ?imdb WHERE {{
         return AliasMatch(input=raw, canonical=canonical, imdb_id=imdb_id)
 
     def _person_supports_role(self, imdb_id: str, role: str) -> bool:
+        if role == "writer":
+            row = self.conn.execute(
+                """
+                SELECT 1
+                FROM title_writers
+                WHERE nconst = ?
+                LIMIT 1
+                """,
+                [imdb_id],
+            ).fetchone()
+            return row is not None
+
         categories = (
             ("director",)
             if role == "director"
@@ -443,8 +455,9 @@ SELECT DISTINCT ?query ?imdb WHERE {{
         *,
         title: str | None,
         director: str | None,
-        actors: list[str] | None,
-        year: int | None,
+        writer: str | None = None,
+        actors: list[str] | None = None,
+        year: int | None = None,
     ) -> dict:
         actors = actors or []
         requested: list[tuple[str, str, int | None]] = []
@@ -453,6 +466,8 @@ SELECT DISTINCT ?query ?imdb WHERE {{
             requested.append(("title", str(title), year))
         if self.needs_resolution(director):
             requested.append(("director", str(director), None))
+        if self.needs_resolution(writer):
+            requested.append(("writer", str(writer), None))
         for actor in actors[:3]:
             if self.needs_resolution(actor):
                 requested.append(("actor", str(actor), None))
@@ -494,6 +509,11 @@ SELECT DISTINCT ?query ?imdb WHERE {{
             if self.needs_resolution(director)
             else None
         )
+        writer_match = (
+            self._cache.get(("writer", str(writer).casefold(), None))
+            if self.needs_resolution(writer)
+            else None
+        )
 
         actor_matches: list[AliasMatch | None] = []
         for actor in actors:
@@ -512,10 +532,12 @@ SELECT DISTINCT ?query ?imdb WHERE {{
         return {
             "title": title_match.canonical if title_match else title,
             "director": director_match.canonical if director_match else director,
+            "writer": writer_match.canonical if writer_match else writer,
             "actors": resolved_actors,
             "matches": {
                 "title": title_match.to_dict() if title_match else None,
                 "director": director_match.to_dict() if director_match else None,
+                "writer": writer_match.to_dict() if writer_match else None,
                 "actors": [
                     match.to_dict() if match else None
                     for match in actor_matches
