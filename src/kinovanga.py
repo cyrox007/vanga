@@ -73,17 +73,37 @@ class KinoVanga:
     def __del__(self):
         self.close()
 
-    def _get_people_info(self, names: List[str], before_year: int) -> dict:
-        """Возвращает ID и средний рейтинг персон только по прошлым фильмам."""
+    def _get_people_info(
+        self,
+        names: List[str],
+        before_year: int,
+        *,
+        role: str,
+    ) -> dict:
+        """Возвращает ID и history-рейтинг персоны в той же роли, что training.
+
+        training считает director_avg_rating только по работам director, а
+        actor_N_avg_rating — только по actor/actress. Inference обязан делать
+        то же самое, иначе один и тот же feature означает разные вещи.
+        """
         clean_names = [name.strip() for name in names if name and name.strip()]
         if not clean_names:
             return {}
+        if role not in {"director", "actor"}:
+            raise ValueError("role должен быть director или actor")
+
+        categories = (
+            ("director",)
+            if role == "director"
+            else ("actor", "actress")
+        )
+        placeholders = ",".join("?" for _ in categories)
 
         cached: dict[str, dict] = {}
         missing: list[str] = []
 
         for name in clean_names:
-            cache_key = (name.casefold(), int(before_year))
+            cache_key = (role, name.casefold(), int(before_year))
             if cache_key in self._people_cache:
                 cached[name] = self._people_cache[cache_key]
             else:
@@ -92,7 +112,7 @@ class KinoVanga:
         if not missing:
             return cached
 
-        query = """
+        query = f"""
             WITH person_names AS (
                 SELECT unnest(?) AS name
             ),
@@ -109,10 +129,12 @@ class KinoVanga:
                 SELECT
                     pi.requested_name,
                     pi.nconst,
-                    AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating
+                    AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating,
+                    COUNT(DISTINCT tp.tconst) AS works_count
                 FROM person_ids pi
                 LEFT JOIN title_principals tp
                   ON tp.nconst = pi.nconst
+                 AND tp.category IN ({placeholders})
                 LEFT JOIN title_basics b
                   ON b.tconst = tp.tconst
                 LEFT JOIN title_ratings r
@@ -128,9 +150,13 @@ class KinoVanga:
                     requested_name,
                     nconst,
                     avg_rating,
+                    works_count,
                     ROW_NUMBER() OVER (
                         PARTITION BY LOWER(requested_name)
-                        ORDER BY avg_rating DESC NULLS LAST, nconst
+                        ORDER BY
+                            works_count DESC,
+                            avg_rating DESC NULLS LAST,
+                            nconst
                     ) AS rn
                 FROM person_stats
             )
@@ -144,13 +170,20 @@ class KinoVanga:
              AND r.rn = 1
         """
 
-        rows = self.conn.execute(query, [missing, int(before_year)]).fetchall()
+        rows = self.conn.execute(
+            query,
+            [missing, *categories, int(before_year)],
+        ).fetchall()
         for name, nconst, avg_rating in rows:
             info = {
                 "nconst": nconst,
-                "avg_rating": float(avg_rating) if avg_rating is not None else 6.5,
+                "avg_rating": (
+                    float(avg_rating)
+                    if avg_rating is not None
+                    else 6.5
+                ),
             }
-            cache_key = (str(name).casefold(), int(before_year))
+            cache_key = (role, str(name).casefold(), int(before_year))
             self._people_cache[cache_key] = info
             cached[str(name)] = info
 
@@ -277,23 +310,32 @@ class KinoVanga:
                 if key in feature_names_set:
                     title_features_dict[key] = value
 
-        person_names: list[str] = []
-        if director:
-            person_names.append(director)
-        person_names.extend(actors[:3])
-        people_info = (
-            self._get_people_info(person_names, before_year=int(year))
-            if person_names
+        director_people = (
+            self._get_people_info(
+                [director],
+                before_year=int(year),
+                role="director",
+            )
+            if director
+            else {}
+        )
+        actor_people = (
+            self._get_people_info(
+                actors[:3],
+                before_year=int(year),
+                role="actor",
+            )
+            if actors
             else {}
         )
 
-        director_info = people_info.get(director, {}) if director else {}
+        director_info = director_people.get(director, {}) if director else {}
         director_id = director_info.get("nconst") or "Unknown"
         director_avg_rating = float(director_info.get("avg_rating", 6.5))
 
         actor_infos: list[dict] = []
         for actor in actors[:3]:
-            info = people_info.get(actor, {})
+            info = actor_people.get(actor, {})
             actor_infos.append(
                 {
                     "nconst": info.get("nconst") or "Unknown",
