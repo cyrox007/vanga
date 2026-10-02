@@ -13,6 +13,17 @@ class _FakeCatalog:
     def search_people(self, query, *, role, limit=8):
         return [{"imdb_id": "nm0634240", "name": "Christopher Nolan", "role": role}]
 
+    def current_ratings(self, imdb_ids):
+        return [
+            {
+                "imdb_id": "tt0816692",
+                "title": "Interstellar",
+                "year": 2014,
+                "rating": 8.7,
+                "num_votes": 2200000,
+            }
+        ]
+
 
 class _FakeEngine:
     catalog = _FakeCatalog()
@@ -73,6 +84,22 @@ class ApiPredictionOutputTests(unittest.TestCase):
         self.assertEqual(body["uncertainty"]["coverage"], 0.8)
         self.assertEqual(body["quality"]["mae"], 1.02)
         self.assertIn("director_avg_rating", body["contributions"])
+
+    def test_catalog_ratings_endpoint_returns_current_values(self):
+        with (
+            patch.object(api, "_ensure_engine", return_value=_FakeEngine()),
+            patch.object(api, "_generation", "generation-test"),
+        ):
+            response = self.client.post(
+                "/catalog/ratings",
+                json={"imdb_ids": ["tt0816692"]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["items"][0]["rating"], 8.7)
+        self.assertEqual(body["items"][0]["num_votes"], 2200000)
 
     def test_search_endpoints_proxy_catalog(self):
         with (
