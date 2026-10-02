@@ -423,7 +423,6 @@ SELECT DISTINCT ?query ?imdb WHERE {{
         imdb_ids: Iterable[str],
         role: str,
     ) -> AliasMatch | None:
-        fallback: AliasMatch | None = None
         for imdb_id in imdb_ids:
             if not _IMDB_PERSON_RE.fullmatch(imdb_id):
                 continue
@@ -438,17 +437,15 @@ SELECT DISTINCT ?query ?imdb WHERE {{
             ).fetchone()
             if not row or not row[0]:
                 continue
+            if not self._person_supports_role(imdb_id, role):
+                continue
 
-            match = AliasMatch(
+            return AliasMatch(
                 input=raw,
                 canonical=str(row[0]).strip(),
                 imdb_id=imdb_id,
             )
-            if self._person_supports_role(imdb_id, role):
-                return match
-            if fallback is None:
-                fallback = match
-        return fallback
+        return None
 
     def resolve_inputs(
         self,
