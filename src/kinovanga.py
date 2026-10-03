@@ -80,11 +80,12 @@ class KinoVanga:
         *,
         role: str,
     ) -> dict:
-        """Возвращает ID и history-рейтинг персоны в той же роли, что training.
+        """Возвращает ID и role-specific history персоны до года прогноза.
 
-        training считает director_avg_rating только по работам director, а
-        actor_N_avg_rating — только по actor/actress. Inference обязан делать
-        то же самое, иначе один и тот же feature означает разные вещи.
+        ID найденной персоны сохраняется даже при нулевой prior history. Числовой
+        fallback 6.5 остаётся только для совместимости старых моделей; schema v6
+        отдельно получает ``known`` и ``prior_count`` и больше не смешивает
+        отсутствие данных с реальным средним рейтингом.
         """
         clean_names = [name.strip() for name in names if name and name.strip()]
         if not clean_names:
@@ -131,18 +132,19 @@ class KinoVanga:
                         pi.requested_name,
                         pi.nconst,
                         AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating,
-                        COUNT(DISTINCT tw.tconst) AS works_count
+                        COUNT(DISTINCT CASE
+                            WHEN r.tconst IS NOT NULL THEN tw.tconst
+                        END) AS works_count
                     FROM person_ids pi
                     LEFT JOIN title_writers tw
                       ON tw.nconst = pi.nconst
                     LEFT JOIN title_basics b
                       ON b.tconst = tw.tconst
+                     AND b.titleType = 'movie'
+                     AND TRY_CAST(b.startYear AS INTEGER) < ?
                     LEFT JOIN title_ratings r
                       ON r.tconst = b.tconst
-                    WHERE pi.nconst IS NOT NULL
-                      AND b.titleType = 'movie'
-                      AND TRY_CAST(b.startYear AS INTEGER) < ?
-                      AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
+                     AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
                     GROUP BY pi.requested_name, pi.nconst
                 ),
                 ranked AS (
@@ -163,7 +165,8 @@ class KinoVanga:
                 SELECT
                     pn.name,
                     r.nconst,
-                    COALESCE(r.avg_rating, 6.5)
+                    COALESCE(r.avg_rating, 6.5),
+                    COALESCE(r.works_count, 0)
                 FROM person_names pn
                 LEFT JOIN ranked r
                   ON LOWER(r.requested_name) = LOWER(pn.name)
@@ -192,19 +195,20 @@ class KinoVanga:
                         pi.requested_name,
                         pi.nconst,
                         AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating,
-                        COUNT(DISTINCT tp.tconst) AS works_count
+                        COUNT(DISTINCT CASE
+                            WHEN r.tconst IS NOT NULL THEN tp.tconst
+                        END) AS works_count
                     FROM person_ids pi
                     LEFT JOIN title_principals tp
                       ON tp.nconst = pi.nconst
                      AND tp.category IN ({placeholders})
                     LEFT JOIN title_basics b
                       ON b.tconst = tp.tconst
+                     AND b.titleType = 'movie'
+                     AND TRY_CAST(b.startYear AS INTEGER) < ?
                     LEFT JOIN title_ratings r
                       ON r.tconst = b.tconst
-                    WHERE pi.nconst IS NOT NULL
-                      AND b.titleType = 'movie'
-                      AND TRY_CAST(b.startYear AS INTEGER) < ?
-                      AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
+                     AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
                     GROUP BY pi.requested_name, pi.nconst
                 ),
                 ranked AS (
@@ -225,7 +229,8 @@ class KinoVanga:
                 SELECT
                     pn.name,
                     r.nconst,
-                    COALESCE(r.avg_rating, 6.5)
+                    COALESCE(r.avg_rating, 6.5),
+                    COALESCE(r.works_count, 0)
                 FROM person_names pn
                 LEFT JOIN ranked r
                   ON LOWER(r.requested_name) = LOWER(pn.name)
@@ -235,7 +240,8 @@ class KinoVanga:
                 query,
                 [missing, *categories, int(before_year)],
             ).fetchall()
-        for name, nconst, avg_rating in rows:
+        for name, nconst, avg_rating, works_count in rows:
+            prior_count = int(works_count or 0)
             info = {
                 "nconst": nconst,
                 "avg_rating": (
@@ -243,13 +249,15 @@ class KinoVanga:
                     if avg_rating is not None
                     else 6.5
                 ),
+                "works_count": prior_count,
+                "prior_count": prior_count,
+                "known": prior_count > 0,
             }
             cache_key = (role, str(name).casefold(), int(before_year))
             self._people_cache[cache_key] = info
             cached[str(name)] = info
 
         return cached
-
 
     def _load_model(self):
         logger.info(f"Загрузка модели из {self.model_path}")
@@ -342,7 +350,6 @@ class KinoVanga:
             "test_rows": metadata.get("test_rows"),
         }
 
-
     def _prepare_features(
         self,
         year: int,
@@ -407,31 +414,55 @@ class KinoVanga:
         director_info = director_people.get(director, {}) if director else {}
         director_id = director_info.get("nconst") or "Unknown"
         director_avg_rating = float(director_info.get("avg_rating", 6.5))
+        director_prior_count = int(director_info.get("prior_count", 0) or 0)
+        director_known = 1.0 if director_prior_count > 0 else 0.0
 
         writer_info = writer_people.get(writer, {}) if writer else {}
         writer_id = writer_info.get("nconst") or "Unknown"
         writer_avg_rating = float(writer_info.get("avg_rating", 6.5))
+        writer_prior_count = int(writer_info.get("prior_count", 0) or 0)
+        writer_known = 1.0 if writer_prior_count > 0 else 0.0
 
         actor_infos: list[dict] = []
         for actor in actors[:3]:
             info = actor_people.get(actor, {})
+            prior_count = int(info.get("prior_count", 0) or 0)
             actor_infos.append(
                 {
                     "nconst": info.get("nconst") or "Unknown",
                     "avg_rating": float(info.get("avg_rating", 6.5)),
+                    "prior_count": prior_count,
+                    "known": 1.0 if prior_count > 0 else 0.0,
                 }
             )
         while len(actor_infos) < 3:
-            actor_infos.append({"nconst": "Unknown", "avg_rating": 6.5})
+            actor_infos.append(
+                {
+                    "nconst": "Unknown",
+                    "avg_rating": 6.5,
+                    "prior_count": 0,
+                    "known": 0.0,
+                }
+            )
 
         features = {
             "startYear": (int(year) - 1900) / 100.0,
             "runtimeMinutes": int(runtime) / 100.0,
             "director_avg_rating": director_avg_rating,
+            "director_prior_count": float(director_prior_count),
+            "director_known": director_known,
             "writer_avg_rating": writer_avg_rating,
+            "writer_prior_count": float(writer_prior_count),
+            "writer_known": writer_known,
             "actor_1_avg_rating": actor_infos[0]["avg_rating"],
+            "actor_1_prior_count": float(actor_infos[0]["prior_count"]),
+            "actor_1_known": actor_infos[0]["known"],
             "actor_2_avg_rating": actor_infos[1]["avg_rating"],
+            "actor_2_prior_count": float(actor_infos[1]["prior_count"]),
+            "actor_2_known": actor_infos[1]["known"],
             "actor_3_avg_rating": actor_infos[2]["avg_rating"],
+            "actor_3_prior_count": float(actor_infos[2]["prior_count"]),
+            "actor_3_known": actor_infos[2]["known"],
             "genres_combined": genres_combined,
             "director_id": director_id,
             "writer_id": writer_id,
@@ -456,7 +487,6 @@ class KinoVanga:
             f"_prepare_features завершён за {time.perf_counter() - t0:.3f} сек"
         )
         return X
-
 
     def predict(self, year, runtime, genres, director=None, writer=None,
             actors=None, num_votes=None, title=None, explain=False) -> float:
@@ -520,10 +550,10 @@ class KinoVanga:
         rating = float(self.model.predict(X)[0])
         rating = max(0, min(10, rating))
         rounded_rating = round(rating, 2)
-        
+
         if not explain:
             return rounded_rating
-        
+
         # --- Объяснение через SHAP ---
         test_pool = Pool(
             data=X,
@@ -533,7 +563,7 @@ class KinoVanga:
         shap_values = self.model.get_feature_importance(data=test_pool, type='ShapValues')[0]
         base_value = shap_values[-1]
         contributions = dict(zip(self.metadata['feature_names'], shap_values[:-1]))
-        
+
         return {
             'rating': rounded_rating,
             'base': base_value,
@@ -571,7 +601,6 @@ class KinoVanga:
                 reverse=True,
             )
         )
-
 
     def explain_prediction(
         self,
@@ -621,7 +650,6 @@ class KinoVanga:
             "uncertainty": self.uncertainty_for_rating(rounded),
             "quality": self.quality_summary(),
         }
-
 
     def _format_explanation(self, contributions):
         parts = []
