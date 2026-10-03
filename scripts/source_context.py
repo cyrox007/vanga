@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.source_context import SourceContextStore, SourceContextValidationError
+from src.source_team_history import SourceTeamHistory
 
 
 def _dump(payload: Any) -> None:
@@ -56,6 +57,12 @@ def _apply_bundle(store: SourceContextStore, payload: dict[str, Any]) -> dict[st
     return counters
 
 
+def _split_ids(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    return [value.strip() for value in raw.split(",") if value.strip()]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Pre-release Source Context registry Vanga"
@@ -72,13 +79,36 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser = sub.add_parser("import", help="импортировать JSON bundle")
     import_parser.add_argument("bundle", type=Path)
 
-    snapshot = sub.add_parser("snapshot", help="показать pre-release features as-of cutoff")
+    snapshot = sub.add_parser("snapshot", help="показать pre-release source features as-of cutoff")
     snapshot.add_argument("project_id")
     snapshot.add_argument("cutoff", help="ISO datetime")
 
     links = sub.add_parser("links", help="показать source links, известные на cutoff")
     links.add_argument("project_id")
     links.add_argument("cutoff", help="ISO datetime")
+
+    team = sub.add_parser(
+        "team-history",
+        help="показать adaptation-specific history режиссёров/сценариста",
+    )
+    team.add_argument("project_id")
+    team.add_argument("cutoff", help="ISO datetime")
+    team.add_argument(
+        "--imdb-db",
+        type=Path,
+        default=None,
+        help="путь к imdb.duckdb (по умолчанию settings.py)",
+    )
+    team.add_argument(
+        "--directors",
+        default=None,
+        help="опциональный список resolved nconst через запятую; без него берётся IMDb target",
+    )
+    team.add_argument(
+        "--writer",
+        default=None,
+        help="опциональный resolved writer nconst; без него берётся первый writer target",
+    )
     return parser
 
 
@@ -110,6 +140,22 @@ def main(argv: list[str] | None = None) -> int:
                     "project_id": args.project_id,
                     "cutoff": args.cutoff,
                     "links": store.links_as_of(args.project_id, args.cutoff),
+                }
+            )
+            return 0
+        if args.command == "team-history":
+            history = SourceTeamHistory(store, args.imdb_db)
+            _dump(
+                {
+                    "ok": True,
+                    "project_id": args.project_id,
+                    "cutoff": args.cutoff,
+                    "features": history.features_as_of(
+                        args.project_id,
+                        args.cutoff,
+                        director_nconsts=_split_ids(args.directors),
+                        writer_nconst=args.writer,
+                    ),
                 }
             )
             return 0
