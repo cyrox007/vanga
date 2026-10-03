@@ -184,6 +184,10 @@ class ExpertBlindValidationTests(unittest.TestCase):
         self.assertEqual(result["overall"]["f1"], 1.0)
         self.assertEqual(result["per_expert"]["red-cynic"]["metrics"]["f1"], 1.0)
         self.assertEqual(result["per_expert"]["badcomedian"]["metrics"]["f1"], 1.0)
+        self.assertFalse(result["scoring_policy"]["silence_is_negative"])
+        self.assertTrue(
+            result["scoring_policy"]["score_only_dimensions_annotated_by_expert_for_case"]
+        )
         self.assertTrue(result["expert_profiles_kept_separate"])
         self.assertFalse(result["expert_interpretation_exposed_to_predictor"])
         self.assertIsNone(result["preference_score"])
@@ -193,12 +197,12 @@ class ExpertBlindValidationTests(unittest.TestCase):
         self.assertNotIn("SECRET_BAD_INTERPRETATION", serialized)
         self.assertNotIn("ANOTHER_SECRET_INTERPRETATION", serialized)
 
-    def test_false_positive_for_one_expert_does_not_change_other_gold(self):
+    def test_false_positive_inside_annotated_dimension_penalizes_only_that_expert(self):
         manifest = self.validator.export_manifest(split="blind")
         payload = self._prediction_payload(manifest)
         payload["cases"][1]["findings"].append(
             {
-                "dimension": "worldbuilding",
+                "dimension": "motivation",
                 "change_type": "added",
                 "reference_id": "storydiff:false-positive",
                 "confidence": 0.9,
@@ -208,6 +212,25 @@ class ExpertBlindValidationTests(unittest.TestCase):
 
         self.assertLess(result["per_expert"]["badcomedian"]["metrics"]["precision"], 1.0)
         self.assertEqual(result["per_expert"]["red-cynic"]["metrics"]["f1"], 1.0)
+
+    def test_prediction_in_dimension_not_annotated_by_expert_is_unscored_not_false_positive(self):
+        manifest = self.validator.export_manifest(split="blind")
+        payload = self._prediction_payload(manifest)
+        payload["cases"][1]["findings"].append(
+            {
+                "dimension": "worldbuilding",
+                "change_type": "added",
+                "reference_id": "storydiff:unscored-worldbuilding",
+                "confidence": 0.9,
+            }
+        )
+        result = self.validator.evaluate(payload, split="blind")
+
+        bad = result["per_expert"]["badcomedian"]
+        self.assertEqual(bad["metrics"]["f1"], 1.0)
+        self.assertEqual(bad["metrics"]["fp"], 0)
+        self.assertEqual(bad["unscored_prediction_count"], 1)
+        self.assertGreaterEqual(result["unscored_prediction_count"], 1)
 
     def test_manifest_fingerprint_mismatch_is_rejected(self):
         manifest = self.validator.export_manifest(split="blind")
