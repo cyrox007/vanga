@@ -9,6 +9,7 @@ from pathlib import Path
 from settings import config
 import src.train_model as train_model_module
 from src.creative_training import get_batches as creative_get_batches
+from src.data_freshness import require_fresh_imdb_data
 from src.train_model import (
     interpret_model,
     save_trained_model,
@@ -152,6 +153,18 @@ def main(argv: list[str] | None = None) -> None:
             "Используйте --evaluation-only или --smoke."
         )
 
+    freshness_report = None
+    if not args.smoke and not args.evaluation_only:
+        try:
+            freshness_report = require_fresh_imdb_data()
+        except RuntimeError as exc:
+            raise SystemExit(str(exc)) from exc
+        logger.info(
+            "IMDb Data Freshness пройден: stable_history_through=%s; fingerprint=%s",
+            freshness_report.get("stable_history_through_year"),
+            freshness_report.get("logical_fingerprint_sha256"),
+        )
+
     env = {
         "VANGA_TRAIN_COVERAGE_FEATURES": coverage_enabled,
         "VANGA_TRAIN_CREATIVE_TEAM_FEATURES": creative_enabled,
@@ -251,6 +264,20 @@ def main(argv: list[str] | None = None) -> None:
     metadata["cast_pair_features_version"] = 1 if cast_pair_enabled else 0
     metadata["dual_role_features_version"] = 1 if dual_role_enabled else 0
     metadata["team_collaboration_features_version"] = 1 if team_collaboration_enabled else 0
+    if freshness_report is not None:
+        metadata["imdb_data_freshness"] = {
+            "as_of": freshness_report.get("as_of"),
+            "stable_history_through_year": freshness_report.get(
+                "stable_history_through_year"
+            ),
+            "recommended_training_target_max_year": freshness_report.get(
+                "recommended_training_target_max_year"
+            ),
+            "current_year_status": freshness_report.get("current_year_status"),
+            "logical_fingerprint_sha256": freshness_report.get(
+                "logical_fingerprint_sha256"
+            ),
+        }
 
     interpret_model(model, metadata)
 

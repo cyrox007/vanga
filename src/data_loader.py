@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -136,6 +137,7 @@ def download_imdb_dataset(dataset_name: str, *, force: bool = False) -> bool:
                 **remote_signature,
                 "url": url,
                 "size": local_path.stat().st_size,
+                "downloaded_at": datetime.now(timezone.utc).isoformat(),
             },
         )
         logger.info(
