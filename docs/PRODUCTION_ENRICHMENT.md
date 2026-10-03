@@ -52,7 +52,9 @@ python production_enrich.py --retry-errors --max-items 100
 python production_enrich.py --refresh-known --max-items 100 --batch-size 10
 ```
 
-`--refresh-known` использует отдельный cursor. Он нужен, потому что Wikidata production relations могут дополняться позже. Новый relation получает время нового fetch; уже известный relation при materialization сохраняет своё более раннее `known_at`.
+`--refresh-known` использует отдельный циклический cursor. Он нужен, потому что Wikidata production relations могут дополняться позже. Когда refresh доходит до конца набора, cursor сбрасывается; следующий плановый запуск начинает новый полный цикл.
+
+Новый relation получает время нового fetch. Уже известный relation при materialization сохраняет своё первое `known_at` и первое provenance-наблюдение.
 
 `--retry-errors` и `--refresh-known` одновременно запрещены.
 
@@ -68,7 +70,11 @@ python production_enrich.py --refresh-known --max-items 100 --batch-size 10
 
 Это консервативно, но исключает скрытую post-release leakage.
 
-Повторный fetch не сдвигает уже известный exact relation вперёд: materializer сохраняет минимальный ранее зафиксированный `known_at` для того же deterministic link/alias.
+Каждый materialized fetch получает отдельный source snapshot:
+
+`wikidata:<film_qid>:<UTC-fetch-timestamp>`
+
+Если exact link/alias уже существует, materializer его не перепривязывает к новому snapshot. Поэтому раннее `known_at` и исходный `source_id` сохраняются. Если при refresh появляется новая relation, она получает source текущего fetch и новое `known_at`.
 
 ## Offline materialization
 
@@ -78,10 +84,18 @@ python production_enrich.py --refresh-known --max-items 100 --batch-size 10
 python materialize_production_context.py --max-items 500 --batch-size 100
 ```
 
+После `production_enrich.py --refresh-known` требуется соответствующий refresh materializer:
+
+```bash
+python materialize_production_context.py --refresh-known --max-items 500 --batch-size 100
+```
+
+У materializer отдельный циклический refresh cursor. Он нужен потому, что обычный IMDb cursor уже не вернётся к ранее обработанному фильму, metadata которого обновилась. После полного refresh-pass cursor сбрасывается для следующего цикла.
+
 Materializer создаёт или обновляет:
 
 - production project по IMDb ID;
-- source `wikidata:<film_qid>`;
+- отдельный provenance source snapshot каждого fetch;
 - canonical production company entities;
 - canonical producer entities;
 - canonical franchise groups из `P179`;
@@ -93,9 +107,9 @@ Canonical IDs имеют вид:
 
 - entity: `wikidata:Q...`;
 - group: `wikidata:Q...`;
-- source: `wikidata:<film-qid>`.
+- source snapshot: `wikidata:<film-qid>:<UTC-fetch-timestamp>`.
 
-Link IDs детерминированы, поэтому повторная materialization идемпотентна.
+Link IDs детерминированы, поэтому повторная materialization идемпотентна для уже наблюдавшихся exact relations.
 
 ## Release time
 
@@ -128,7 +142,7 @@ Historical `as-of` aggregates используют проект только е�
 
 Если Wikidata позже удаляет ошибочную relation, существующая factual запись не должна молча исчезать из исторической timeline: мы действительно наблюдали такой источник в конкретный момент.
 
-Для исправлений нужен отдельный provenance-aware correction/supersession механизм. Он является следующим расширением registry; до его появления автоматический materializer только добавляет/обновляет наблюдаемые canonical relations и не стирает исторические факты.
+Для исправлений нужен отдельный provenance-aware correction/supersession механизм. До его появления автоматический materializer добавляет новые наблюдаемые canonical relations и не стирает уже материализованные исторические факты.
 
 ## Связь с ML
 
