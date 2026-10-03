@@ -24,6 +24,10 @@ from src.pair_features import (
     DIRECTOR_WRITER_PAIR_FEATURE_NAMES,
     fetch_director_writer_pair_context,
 )
+from src.team_collaboration_features import (
+    TEAM_COLLABORATION_FEATURE_NAMES,
+    fetch_team_collaboration_context,
+)
 from src.trend_features import (
     CREATIVE_TREND_FEATURE_NAMES,
     fetch_person_recent_trend,
@@ -32,7 +36,7 @@ from src.kinovanga import KinoVanga as BaseKinoVanga
 
 
 class KinoVanga(BaseKinoVanga):
-    """KinoVanga с P2 Creative Team-признаками schema v7-v14."""
+    """KinoVanga с P2 Creative Team-признаками schema v7-v15."""
 
     @staticmethod
     def _clean_director_names(
@@ -95,6 +99,7 @@ class KinoVanga(BaseKinoVanga):
             .union(FULL_CAST_FEATURE_NAMES)
             .union(CAST_PAIR_FEATURE_NAMES)
             .union(DUAL_ROLE_FEATURE_NAMES)
+            .union(TEAM_COLLABORATION_FEATURE_NAMES)
         )
         if not feature_set.intersection(extended_features):
             return X
@@ -130,6 +135,7 @@ class KinoVanga(BaseKinoVanga):
         actor_feature_set = set(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES).union(
             FULL_CAST_FEATURE_NAMES,
             CAST_PAIR_FEATURE_NAMES,
+            TEAM_COLLABORATION_FEATURE_NAMES,
         )
         actor_people_all = (
             self._get_people_info(
@@ -265,6 +271,17 @@ class KinoVanga(BaseKinoVanga):
                     self.conn,
                     director_nconsts=director_ids,
                     writer_nconst=writer_id,
+                    before_year=int(year),
+                )
+            )
+
+        if feature_set.intersection(TEAM_COLLABORATION_FEATURE_NAMES):
+            values.update(
+                fetch_team_collaboration_context(
+                    self.conn,
+                    director_nconsts=director_ids,
+                    writer_nconst=writer_id,
+                    actor_nconsts=actor_ids,
                     before_year=int(year),
                 )
             )
