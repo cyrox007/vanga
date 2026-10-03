@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.production_changes import ProductionChangeContext
 from src.production_context import (
     ProductionContextStore,
     ProductionContextValidationError,
@@ -98,7 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser = sub.add_parser("import", help="импортировать воспроизводимый JSON bundle")
     import_parser.add_argument("bundle", type=Path)
 
-    snapshot = sub.add_parser("snapshot", help="показать factual + historical + continuity features as-of")
+    snapshot = sub.add_parser(
+        "snapshot",
+        help="показать factual + historical + continuity + change features as-of",
+    )
     snapshot.add_argument("project_id")
     snapshot.add_argument("cutoff", help="ISO datetime, например 2026-01-15T00:00:00Z")
 
@@ -112,6 +116,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     continuity_parser.add_argument("project_id")
     continuity_parser.add_argument("cutoff", help="ISO datetime")
+
+    changes_parser = sub.add_parser(
+        "changes",
+        help="показать production-change events и derived delay/rework proxies as-of",
+    )
+    changes_parser.add_argument("project_id")
+    changes_parser.add_argument("cutoff", help="ISO datetime")
 
     outcomes = sub.add_parser(
         "outcomes",
@@ -150,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     store = ProductionContextStore(args.db)
     identity = ProductionIdentityHistory(store)
     continuity = ProductionContinuityContext(store)
+    changes = ProductionChangeContext(store)
     try:
         if args.command == "init":
             _json_dump({"ok": True, "database": str(store.path)})
@@ -167,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
             features = store.features_as_of(args.project_id, args.cutoff)
             features.update(identity.history_features_as_of(args.project_id, args.cutoff))
             features.update(continuity.features_as_of(args.project_id, args.cutoff))
+            features.update(changes.features_as_of(args.project_id, args.cutoff))
             _json_dump(
                 {
                     "ok": True,
@@ -194,6 +207,17 @@ def main(argv: list[str] | None = None) -> int:
                     "cutoff": args.cutoff,
                     "features": continuity.features_as_of(args.project_id, args.cutoff),
                     "dependencies": continuity.dependencies_as_of(args.project_id, args.cutoff),
+                }
+            )
+            return 0
+        if args.command == "changes":
+            _json_dump(
+                {
+                    "ok": True,
+                    "project_id": args.project_id,
+                    "cutoff": args.cutoff,
+                    "features": changes.features_as_of(args.project_id, args.cutoff),
+                    "events": changes.changes_as_of(args.project_id, args.cutoff),
                 }
             )
             return 0
