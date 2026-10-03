@@ -20,6 +20,13 @@ class Config:
         "VANGA_ADAPTATION_DB",
         str(Path(ABSPATH) / "adaptation.duckdb"),
     )
+    # Структурированный экспертный корпус хранится отдельно от Adaptation Analyzer
+    # и prediction model. Здесь нет полных транскриптов/обзоров: только ссылки,
+    # таймкоды/разделы, наши аннотации и provenance к StoryMap/StoryDiff.
+    EXPERT_CORPUS_DB_PATH = os.getenv(
+        "VANGA_EXPERT_CORPUS_DB",
+        str(Path(ABSPATH) / "expert_corpus.duckdb"),
+    )
     # Pre-release facts о первоисточнике хранятся отдельно от retrospective
     # Adaptation Analyzer. Здесь допустимы только facts/provenance, доступные
     # наблюдателю на соответствующий cutoff.
