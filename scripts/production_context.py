@@ -15,6 +15,7 @@ from src.production_context import (
     ProductionContextStore,
     ProductionContextValidationError,
 )
+from src.production_continuity import ProductionContinuityContext
 from src.production_identity import (
     GROUP_KINDS,
     ProductionIdentityHistory,
@@ -36,6 +37,7 @@ def _load_bundle(path: Path) -> dict[str, Any]:
 def _apply_bundle(
     store: ProductionContextStore,
     identity: ProductionIdentityHistory,
+    continuity: ProductionContinuityContext,
     payload: dict[str, Any],
 ) -> dict[str, int]:
     counters = {
@@ -49,8 +51,9 @@ def _apply_bundle(
         "links": 0,
         "events": 0,
         "consultancies": 0,
+        "dependencies": 0,
     }
-    # Порядок важен: provenance и canonical identity должны существовать до links.
+    # Порядок важен: projects/provenance должны существовать до links/dependencies.
     operations = (
         ("sources", store.upsert_source),
         ("groups", identity.upsert_group),
@@ -62,6 +65,7 @@ def _apply_bundle(
         ("links", store.link_entity),
         ("events", store.add_event),
         ("consultancies", store.add_consultancy),
+        ("dependencies", continuity.add_dependency),
     )
     for key, handler in operations:
         rows = payload.get(key) or []
@@ -89,18 +93,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("init", help="создать/проверить схему registry и identity")
+    sub.add_parser("init", help="создать/проверить схему registry/identity/continuity")
 
     import_parser = sub.add_parser("import", help="импортировать воспроизводимый JSON bundle")
     import_parser.add_argument("bundle", type=Path)
 
-    snapshot = sub.add_parser("snapshot", help="показать factual + historical features as-of cutoff")
+    snapshot = sub.add_parser("snapshot", help="показать factual + historical + continuity features as-of")
     snapshot.add_argument("project_id")
     snapshot.add_argument("cutoff", help="ISO datetime, например 2026-01-15T00:00:00Z")
 
     history = sub.add_parser("history", help="показать только neutral historical aggregates as-of")
     history.add_argument("project_id")
     history.add_argument("cutoff", help="ISO datetime")
+
+    continuity_parser = sub.add_parser(
+        "continuity",
+        help="показать cross-project dependency facts и continuity-load proxy as-of",
+    )
+    continuity_parser.add_argument("project_id")
+    continuity_parser.add_argument("cutoff", help="ISO datetime")
 
     outcomes = sub.add_parser(
         "outcomes",
@@ -138,17 +149,24 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     store = ProductionContextStore(args.db)
     identity = ProductionIdentityHistory(store)
+    continuity = ProductionContinuityContext(store)
     try:
         if args.command == "init":
             _json_dump({"ok": True, "database": str(store.path)})
             return 0
         if args.command == "import":
-            counters = _apply_bundle(store, identity, _load_bundle(args.bundle))
+            counters = _apply_bundle(
+                store,
+                identity,
+                continuity,
+                _load_bundle(args.bundle),
+            )
             _json_dump({"ok": True, "database": str(store.path), "imported": counters})
             return 0
         if args.command == "snapshot":
             features = store.features_as_of(args.project_id, args.cutoff)
             features.update(identity.history_features_as_of(args.project_id, args.cutoff))
+            features.update(continuity.features_as_of(args.project_id, args.cutoff))
             _json_dump(
                 {
                     "ok": True,
@@ -165,6 +183,17 @@ def main(argv: list[str] | None = None) -> int:
                     "project_id": args.project_id,
                     "cutoff": args.cutoff,
                     "features": identity.history_features_as_of(args.project_id, args.cutoff),
+                }
+            )
+            return 0
+        if args.command == "continuity":
+            _json_dump(
+                {
+                    "ok": True,
+                    "project_id": args.project_id,
+                    "cutoff": args.cutoff,
+                    "features": continuity.features_as_of(args.project_id, args.cutoff),
+                    "dependencies": continuity.dependencies_as_of(args.project_id, args.cutoff),
                 }
             )
             return 0

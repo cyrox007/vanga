@@ -7,13 +7,14 @@ Production Context отделён от IMDb training pipeline и CatBoost:
 - `src/production_context.py` — factual registry и temporal snapshots;
 - `src/production_identity.py` — canonical identity/aliases и count-based historical `as-of` aggregates;
 - `src/production_outcomes.py` — research-only outcome history;
-- `scripts/production_context.py` — `init/import/snapshot/history/outcomes/timeline/resolve-*`;
+- `src/production_continuity.py` — factual cross-project continuity/dependency registry;
+- `scripts/production_context.py` — `init/import/snapshot/history/continuity/outcomes/timeline/resolve-*`;
 - отдельная `production_context.duckdb`;
 - ML-интеграции outcome ratings пока нет.
 
 ## Базовый принцип
 
-Студия, продюсер, creative lead, франшиза, shared universe или consultancy не являются автоматическим плюсом/минусом. Система хранит наблюдаемые факты и только после temporal ablation может использовать проверенный proxy.
+Студия, продюсер, creative lead, франшиза, shared universe, cross-project dependency или consultancy не являются автоматическим плюсом/минусом. Система хранит наблюдаемые факты и только после temporal ablation может использовать проверенный proxy.
 
 ## Temporal/provenance контракт
 
@@ -72,9 +73,62 @@ Event хранит stage, `event_at`, `known_at`, source и structured details �
 
 Consultancy scope: story/script/character/worldbuilding/authenticity/sensitivity/other. Название consultancy само по себе не является quality feature.
 
+## Cross-project continuity / dependency
+
+`ProductionContinuityContext` хранит документированные связи между проектами в `production_project_dependencies`.
+
+Направление link:
+
+- `project_id` — текущий/зависимый проект;
+- `related_project_id` — связанный проект.
+
+Для symmetric `crossover_with` направление техническое и не означает причинность.
+
+Поддерживаемые relation types:
+
+- `sequel_of`;
+- `prequel_of`;
+- `spin_off_of`;
+- `continues_story_from`;
+- `crossover_with`;
+- `requires_context_from`;
+- `other`.
+
+Scopes:
+
+- story;
+- character;
+- world;
+- continuity;
+- other.
+
+Каждая связь требует `known_at` и `source_id`. Повторное подтверждение того же relation/scope другим source не увеличивает feature-count.
+
+### Continuity features
+
+`ProductionContinuityContext.features_as_of(project_id, cutoff)` возвращает прозрачные raw proxies:
+
+- `production_continuity_dependency_count`;
+- `production_continuity_prior_released_count`;
+- `production_continuity_future_announced_count`;
+- `production_continuity_unknown_release_count`;
+- `production_continuity_downstream_known_count`;
+- `production_continuity_downstream_future_count`;
+- `production_continuity_cross_project_count`;
+- relation-type counts;
+- scope counts;
+- `production_continuity_prior_release_span_years`;
+- `production_continuity_known`.
+
+Это описание объёма cross-project coordination/continuity, а не quality sign. Большое значение нельзя заранее трактовать как ухудшение или улучшение фильма.
+
+Continuity features входят в factual `snapshot`, поскольку используют только датированные registry facts и release dates; ML всё равно требует отдельного ablation.
+
 ## Factual snapshot
 
 `ProductionContextStore.features_as_of(project_id, cutoff)` возвращает только факты, известные на cutoff: franchise/shared-universe identity, installment, entity counts, production changes и consultancy counts/scopes.
+
+CLI `snapshot` объединяет factual registry + count-based historical identity + continuity proxies. Research outcome ratings намеренно туда не входят.
 
 ## Historical identity
 
@@ -136,14 +190,17 @@ python scripts/production_context.py init
 python scripts/production_context.py import data/production-context/example.json
 python scripts/production_context.py snapshot PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/production_context.py history PROJECT_ID 2026-01-15T00:00:00Z
+python scripts/production_context.py continuity PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/production_context.py outcomes PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/production_context.py outcomes PROJECT_ID 2026-01-15T00:00:00Z --imdb-db /path/to/imdb.duckdb
 python scripts/production_context.py timeline PROJECT_ID 2026-01-15T00:00:00Z
 ```
 
+JSON bundle теперь может содержать `dependencies` после `projects`/provenance. Каждый элемент dependency обязан ссылаться на существующие project IDs и source ID.
+
 ## Связь с Creative Team
 
-Schema v11-v15 моделируют режиссёров/сценариста/актёров и их прошлые связи. Production Context не дублирует их, а добавляет studio/producer/franchise/shared-universe/events/consultancies.
+Schema v11-v15 моделируют режиссёров/сценариста/актёров и их прошлые связи. Production Context не дублирует их, а добавляет studio/producer/franchise/shared-universe/events/consultancies/cross-project dependencies.
 
 ## Экспертные утверждения
 
