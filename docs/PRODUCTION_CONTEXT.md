@@ -6,12 +6,14 @@ Production Context отделён от IMDb training pipeline и CatBoost:
 
 - `src/production_context.py` — factual registry и temporal snapshots;
 - `src/production_identity.py` — canonical identity/aliases и count-based historical `as-of` aggregates;
-- `src/production_outcomes.py` — research-only outcome history;
-- `src/production_continuity.py` — factual cross-project continuity/dependency registry;
+- `src/production_continuity.py` — factual cross-project dependency/continuity;
 - `src/production_changes.py` — derived factual production-change proxies;
-- `scripts/production_context.py` — `init/import/snapshot/history/continuity/changes/outcomes/timeline/resolve-*`;
-- отдельная `production_context.duckdb`;
-- ML-интеграции outcome ratings пока нет.
+- `src/production_consultancies.py` — neutral consultancy scope/stage/history context;
+- `src/production_outcomes.py` — research-only outcome history;
+- `scripts/production_context.py` — единый CLI;
+- данные живут в отдельной `production_context.duckdb`.
+
+Outcome ratings пока не подключены к CatBoost.
 
 ## Базовый принцип
 
@@ -27,159 +29,127 @@ Production Context отделён от IMDb training pipeline и CatBoost:
 
 Pre-release snapshot использует только `known_at <= cutoff`.
 
-Для historical identity дополнительно требуется:
+Для historical context дополнительно требуется:
 
 - prior project выпущен к cutoff;
 - prior project выпущен раньше target release limit;
 - target project исключён;
-- future project исключён даже при заранее известной production identity.
+- future project исключён даже при заранее известной production identity/engagement.
 
 ## Registry
 
-### Projects
+### Projects и identity
 
-`production_projects` хранит `project_id`, optional IMDb ID, title, release date и identity timing. Legacy franchise/shared-universe поля остаются fallback для старых bundle.
-
-### Production entities
-
-Canonical entity kinds: `studio`, `production_company`, `production_label`, `producer`, `creative_lead`, `consultancy`, `other`.
+`production_projects` хранит project ID, optional IMDb ID, title, release date и identity timing. Canonical production entities: `studio`, `production_company`, `production_label`, `producer`, `creative_lead`, `consultancy`, `other`.
 
 `project_entity_links` связывает entity с фильмом, role, stage, `known_at` и provenance.
 
-### Franchise / shared universe
+Canonical groups поддерживают `franchise` и `shared_universe`; `project_group_links` хранит `known_at`, source, optional installment index.
 
-`production_groups` поддерживает `franchise` и `shared_universe`.
-
-`project_group_links` хранит canonical group, `known_at`, `source_id`, optional `installment_index` и note.
-
-### Aliases
-
-Entity/group alias регистрируется явно с provenance. Техническая нормализация делает Unicode NFKC/casefold и нормализует пунктуацию, но не выполняет fuzzy merge. Неоднозначный alias обязан завершаться ошибкой.
+Alias регистрируется явно с provenance. Техническая нормализация не выполняет fuzzy merge; неоднозначность требует canonical ID/kind.
 
 ### Production events
 
 Поддерживаются `director_change`, `writer_change`, `creative_lead_change`, `release_date_change`, `rewrite`, `reshoot`, `recut`, `format_change`, `scope_change`, `production_label_change`, `other`.
 
-Event хранит stage, `event_at`, `known_at`, source и structured details без оценочного ярлыка.
+Event хранит stage, `event_at`, `known_at`, source и structured details без quality label.
 
-Для `release_date_change` derived слой понимает `details.old_release_at` и `details.new_release_at`.
+Для `release_date_change` derived слой использует `details.old_release_at/new_release_at`. Для `reshoot` additional photography может быть явно отмечена в `details.activity/subtype/shoot_type`.
 
-Для `reshoot` дополнительная съёмка может быть явно отмечена в `details.activity/subtype/shoot_type = additional_photography`.
+## Cross-project continuity
 
-### Consultancies
-
-Consultancy scope: story/script/character/worldbuilding/authenticity/sensitivity/other. Название consultancy само по себе не является quality feature.
-
-## Cross-project continuity / dependency
-
-`ProductionContinuityContext` хранит документированные связи между проектами в `production_project_dependencies`.
-
-Направление link: `project_id` — текущий/зависимый проект, `related_project_id` — связанный проект. Для symmetric `crossover_with` направление техническое и не означает причинность.
-
-Relation types: `sequel_of`, `prequel_of`, `spin_off_of`, `continues_story_from`, `crossover_with`, `requires_context_from`, `other`.
+`ProductionContinuityContext` хранит factual links между проектами: `sequel_of`, `prequel_of`, `spin_off_of`, `continues_story_from`, `crossover_with`, `requires_context_from`, `other`.
 
 Scopes: story/character/world/continuity/other.
 
-Каждая связь требует `known_at` и `source_id`. Повторное подтверждение того же relation/scope другим source не увеличивает feature-count.
+Прозрачные proxies:
 
-### Continuity features
-
-- `production_continuity_dependency_count`;
-- `production_continuity_prior_released_count`;
-- `production_continuity_future_announced_count`;
-- `production_continuity_unknown_release_count`;
-- `production_continuity_downstream_known_count`;
-- `production_continuity_downstream_future_count`;
-- `production_continuity_cross_project_count`;
+- dependency count;
+- prior released/future announced/unknown-release counts;
+- downstream known/future counts;
+- cross-project count;
 - relation/scope counts;
-- `production_continuity_prior_release_span_years`;
-- `production_continuity_known`.
+- prior release span;
+- known flag.
 
-Это описание coordination/continuity load, а не quality sign.
+Это coordination/continuity load, а не quality sign.
 
-## Derived production-change proxies
+## Derived production changes
 
-`ProductionChangeContext` строит прозрачные агрегаты поверх timestamped events и не дублирует raw event counts.
+`ProductionChangeContext` не дублирует raw event counts, а добавляет:
 
-### Team/rework
+- `production_team_change_count`;
+- `production_rework_count`;
+- `production_additional_photography_count`;
+- release delay count + total/max/mean days;
+- release advance count + total/max days;
+- release-shift coverage;
+- event-date coverage;
+- stage counts.
 
-- `production_team_change_count` = director/writer/creative-lead/production-label changes;
-- `production_rework_count` = rewrite + reshoot + recut;
-- `production_additional_photography_count` — только явно размеченные additional-photography events.
+Generic release change без обеих дат не превращается в выдуманный delay/advance. Rewrite/reshoot/delay не получают автоматический отрицательный знак.
 
-### Release date shifts
+## Consultancy context
 
-Для событий `release_date_change`, где известны обе даты:
+`ProductionConsultancyContext` описывает внешний consultancy context без оценки конкретной компании.
 
-- `production_release_delay_count`;
-- `production_release_delay_days_total/max/mean`;
-- `production_release_advance_count`;
-- `production_release_advance_days_total/max`;
-- `production_release_shift_known_ratio`.
+Текущий проект:
 
-Generic release-date change без обеих дат остаётся raw fact, но не превращается в выдуманный delay/advance.
+- distinct consultancy entity count;
+- distinct `(entity, scope, stage)` context count;
+- scope diversity;
+- stage diversity;
+- multi-scope consultancy count;
+- per-scope/per-stage distinct entity counts.
 
-### Coverage/stages
+История тех же canonical consultancies:
 
-- `production_change_event_date_known_ratio`;
-- `production_change_stage_<stage>_count`.
+- `production_consultancy_history_known_ratio`;
+- prior-project count mean/max;
+- unique prior-project pool;
+- отдельная same-scope history и coverage.
 
-Все derived proxies используют только events с `known_at <= cutoff`. Большое число rewrite/reshoot/delay не получает автоматический отрицательный знак.
+Consultancy без истории остаётся в denominator и в mean как ноль. Future projects и поздно раскрытые engagements не протекают в ранний cutoff.
+
+Feature names не содержат названия consultancy, rating или quality signal. Подробности: `docs/PRODUCTION_CONSULTANCY_CONTEXT.md`.
 
 ## Factual snapshot
 
-`ProductionContextStore.features_as_of(project_id, cutoff)` возвращает raw facts: franchise/shared-universe identity, installment, entity counts, event-type counts и consultancy counts/scopes.
-
 CLI `snapshot` объединяет:
 
-- factual registry;
+- raw factual registry;
 - count-based historical identity;
 - continuity proxies;
-- derived production-change proxies.
+- derived production changes;
+- neutral consultancy context/history.
 
 Research outcome ratings намеренно туда не входят.
 
 ## Historical identity
 
-`ProductionIdentityHistory.history_features_as_of(project_id, cutoff)` считает только ранее выпущенные и известные production links.
+`ProductionIdentityHistory.history_features_as_of` считает только ранее выпущенные и известные production links:
 
-Основные признаки:
-
-- `production_franchise_prior_project_count`;
-- `production_shared_universe_prior_project_count`;
-- `production_<role>_history_known_ratio`;
-- `production_<role>_prior_project_count_mean/max`;
-- `production_prior_shared_entity_project_count`;
-- `production_key_team_repeat_project_count`;
-- `production_prior_shared_entity_max`.
+- franchise/shared-universe prior project counts;
+- role history coverage and prior-count mean/max;
+- prior shared entity projects;
+- repeated key-team projects;
+- max shared entities.
 
 Единый непрозрачный `production cohesion score` не вводится.
 
 ## Research outcome history
 
-`ProductionOutcomeHistory.features_as_of(project_id, cutoff)` считает rating-агрегаты прошлых canonical production identity.
+`ProductionOutcomeHistory.features_as_of` считает rating-агрегаты прошлых franchise/shared-universe/studio/producer/creative-lead identity.
 
-Для franchise/shared-universe и ролей studio/production_company/production_label/producer/creative_lead доступны prior project count, rated count, coverage, avg/median/std. Для entity roles дополнительно есть `production_<role>_rating_history_known_ratio`.
-
-`production_key_team_repeat_*` использует только прошлые фильмы, где повторялись минимум две текущие production entities.
-
-### Ограничение rating-time
-
-Текущая IMDb `averageRating` — актуальный snapshot, а не значение рейтинга на историческом cutoff.
-
-Поэтому:
+Текущая IMDb `averageRating` — актуальный snapshot, а не значение рейтинга на историческом cutoff. Поэтому:
 
 - `production_outcome_rating_point_in_time = 0`;
-- CLI возвращает `research_only=true` и `rating_point_in_time=false`;
-- outcome features не входят в обычный `snapshot`;
+- CLI возвращает `research_only=true`;
+- outcome features не входят в обычный snapshot;
 - outcome features не подключаются к CatBoost;
-- production ML ждёт P7 rating history либо отдельный доказанный temporal target protocol.
+- ML ждёт P7 rating history либо доказанный temporal target protocol.
 
 Подробности: `docs/PRODUCTION_OUTCOME_HISTORY.md`.
-
-## Missing-контракт
-
-Prior project без IMDb rating остаётся в `prior_project_count`, но не входит в `prior_rated_project_count`, поэтому coverage уменьшается. При полном отсутствии rated history numeric fallback `6.5` сопровождается coverage=0/rated_count=0 и не трактуется как реальная репутация.
 
 ## CLI
 
@@ -190,16 +160,14 @@ python scripts/production_context.py snapshot PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/production_context.py history PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/production_context.py continuity PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/production_context.py changes PROJECT_ID 2026-01-15T00:00:00Z
+python scripts/production_context.py consultancies PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/production_context.py outcomes PROJECT_ID 2026-01-15T00:00:00Z
-python scripts/production_context.py outcomes PROJECT_ID 2026-01-15T00:00:00Z --imdb-db /path/to/imdb.duckdb
 python scripts/production_context.py timeline PROJECT_ID 2026-01-15T00:00:00Z
 ```
 
-JSON bundle может содержать `dependencies`; каждый dependency обязан ссылаться на существующие project IDs и source ID.
-
 ## Связь с Creative Team
 
-Schema v11-v15 моделируют режиссёров/сценариста/актёров и их прошлые связи. Production Context добавляет studio/producer/franchise/shared-universe/events/consultancies/cross-project dependencies.
+Schema v11-v15 моделируют режиссёров, сценариста, актёров и их прошлые связи. Production Context добавляет слой студий/продюсеров/franchise/shared universe/events/consultancies/cross-project dependencies.
 
 ## Экспертные утверждения
 
