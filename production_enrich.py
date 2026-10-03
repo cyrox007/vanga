@@ -39,12 +39,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reset-cursor",
         action="store_true",
-        help="Сбросить production enrichment cursor.",
+        help="Сбросить cursor выбранного режима.",
     )
     parser.add_argument(
         "--retry-errors",
         action="store_true",
         help="Повторить production metadata records со status=error.",
+    )
+    parser.add_argument(
+        "--refresh-known",
+        action="store_true",
+        help=(
+            "Переопросить уже cached фильмы, чтобы обнаружить новые Wikidata relations. "
+            "Использует отдельный refresh cursor."
+        ),
     )
     return parser
 
@@ -59,14 +67,20 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--max-items не может быть отрицательным")
     if not 1 <= args.batch_size <= 50:
         raise SystemExit("--batch-size должен быть от 1 до 50")
+    if args.retry_errors and args.refresh_known:
+        raise SystemExit("--retry-errors и --refresh-known нельзя использовать одновременно")
 
     cache = ProductionWikidataCache(args.enrichment_db)
     client = ProductionWikidataClient(WikimediaClient())
-    state_key = "production_wikidata_cursor"
+    state_key = (
+        "production_wikidata_refresh_cursor"
+        if args.refresh_known
+        else "production_wikidata_cursor"
+    )
     try:
         if args.reset_cursor:
             cache.reset_state(state_key)
-            logging.info("Production Wikidata cursor сброшен.")
+            logging.info("Production Wikidata cursor %s сброшен.", state_key)
 
         total_processed = 0
         total_ok = 0
@@ -83,9 +97,15 @@ def main(argv: list[str] | None = None) -> int:
                 after_imdb=cursor,
                 limit=remaining,
                 retry_errors=args.retry_errors,
+                refresh_known=args.refresh_known,
             )
             if not candidates:
-                logging.info("Новых production metadata кандидатов нет.")
+                logging.info(
+                    "Production metadata кандидатов нет (режим=%s).",
+                    "refresh" if args.refresh_known else (
+                        "retry" if args.retry_errors else "new"
+                    ),
+                )
                 break
 
             ok, failed = enrich_production_batch(candidates, client=client, cache=cache)
@@ -98,7 +118,10 @@ def main(argv: list[str] | None = None) -> int:
                 cache.set_state(state_key, cursor)
 
             logging.info(
-                "Production enrichment: обработано=%s, успешно=%s, ошибки=%s, cursor=%s.",
+                "Production enrichment: режим=%s, обработано=%s, успешно=%s, ошибки=%s, cursor=%s.",
+                "refresh" if args.refresh_known else (
+                    "retry" if args.retry_errors else "new"
+                ),
                 total_processed,
                 total_ok,
                 total_failed,
