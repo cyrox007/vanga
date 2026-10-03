@@ -51,12 +51,30 @@ class PersonHistory:
         }
 
 
+def _table_exists(conn, table_name: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'main'
+          AND table_name = ?
+        LIMIT 1
+        """,
+        [table_name],
+    ).fetchone()
+    return row is not None
+
+
 def _person_history(conn, name: str | None, role: str, before_year: int) -> PersonHistory:
     clean = " ".join(str(name or "").strip().split())
     if not clean:
         return PersonHistory("", role, None, 0, None)
 
     if role == "writer":
+        # Профиль должен пережить rolling deployment: старое imdb.duckdb может
+        # ещё не содержать title_writers до первого ds_update новой версии.
+        if not _table_exists(conn, "title_writers"):
+            return PersonHistory(clean, role, None, 0, None)
         row = conn.execute(
             """
             WITH candidates AS (
