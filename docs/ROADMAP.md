@@ -84,14 +84,14 @@
 
 ## P2. Creative Team Model
 
-Цель — моделировать не «известные фамилии», а роли, контекст и совместимость творческой команды. Нумерация ML schema независима от номера roadmap-фазы: P1 дал schema v6, контекст роли/жанра — v7, director↔writer pair — v8, director↔actor pair — v9, recent trend — v10, multi-director context — v11, Full Cast Context — v12, actor↔actor ensemble familiarity — v13, director+writer dual-role history — candidate v14.
+Цель — моделировать не «известные фамилии», а роли, контекст и совместимость творческой команды. Нумерация ML schema независима от номера roadmap-фазы: P1 дал schema v6, контекст роли/жанра — v7, director↔writer pair — v8, director↔actor pair — v9, recent trend — v10, multi-director context — v11, Full Cast Context — v12, actor↔actor ensemble familiarity — v13, director+writer dual-role history — v14, team-wide collaboration — candidate v15.
 
 - [~] `director_genre_avg_rating` и `writer_genre_avg_rating` — реализованы в schema v7, требуется полный ablation.
 - [~] `director_genre_prior_count` и `writer_genre_prior_count` — явное состояние отсутствия жанровой истории.
 - [~] `director_recent_avg_rating` и `writer_recent_avg_rating` по последним 5 прошлым работам — реализованы в schema v7, требуется полный ablation.
 - [~] `director_recent_trend`, `writer_recent_trend` и `*_trend_known` — реализованы в schema v10 как разница среднего последних 3 и предыдущих 3 прошлых работ; нужен temporal v9→v10 ablation.
 - [~] `director_is_writer` — реализован в schema v7, требуется полный ablation.
-- [~] История человека как director+writer реализуется отдельным candidate v14, а не смешивается с обычной role history.
+- [~] История человека как director+writer реализована отдельным candidate v14, а не смешивается с обычной role history.
 - [~] `director_writer_pair_avg_rating`, `director_writer_pair_count`, `director_writer_pair_known` — реализованы в schema v8; нужен полный temporal v7→v8 ablation перед публикацией.
 - [~] `director_actor_N_pair_avg_rating`, `director_actor_N_pair_count`, `director_actor_N_pair_known` для первых трёх актёров — реализованы в schema v9; нужен полный temporal v8→v9 ablation.
 - [~] API `directors: [...]` + backward-compatible `director` — реализован в schema v11.
@@ -104,11 +104,13 @@
 - [~] Actor Pair schema v13 считает все unordered actor↔actor пары текущего principal cast и их предыдущие совместные фильмы.
 - [~] V13 признаки: `cast_pair_total`, `cast_pair_known_ratio`, `cast_pair_prior_collaboration_mean/median/max`, `cast_pair_prior_rating_avg/median/std`.
 - [~] Пары без истории и пары с unresolved actor остаются в знаменателе familiarity как нулевые, но не получают фиктивные совместные рейтинги.
-- [~] Candidate v14 использует весь director team для `director_team_dual_role_*`, отдельный `writer_dual_role_*` и факт `writer_is_in_director_team`.
+- [~] V14 использует весь director team для `director_team_dual_role_*`, отдельный `writer_dual_role_*` и факт `writer_is_in_director_team`.
 - [~] В v14 dual-role film засчитывается только если один и тот же человек имеет и director-credit, и writer-credit на prior title; same-year/future исключаются.
-- [R] Исследовать team-wide director↔writer и director↔actor aggregation, не смешивая с primary-director baseline.
-- [ ] Число предыдущих совместных работ ключевой команды как отдельный агрегат.
-- [R] Ensemble/team cohesion признаки без утечки из будущего — только после отдельной проверки raw histories v13-v14.
+- [~] Candidate v15 агрегирует director↔writer history по каждому режиссёру текущей команды: `team_writer_pair_total`, coverage, collaboration count и historical rating.
+- [~] Candidate v15 агрегирует director↔actor history по всем парам **director team × principal cast**: `team_actor_pair_total`, coverage, collaboration mean/median/max и pair-rating avg/median/std.
+- [~] Unknown/unresolved участники v15 остаются в знаменателе pair coverage, но не получают фиктивных совместных работ или рейтингов.
+- [ ] Число предыдущих совместных работ ключевой команды как более общий агрегат — только после проверки v15.
+- [R] Ensemble/team cohesion признаки без утечки из будущего — только после отдельной проверки raw histories v13-v15.
 - [R] Проверить, какие pair/cohesion features реально улучшают temporal MAE.
 - [~] Для первого P2-блока добавлен отдельный ablation `baseline v6 → candidate v7`, более поздние P2-блоки исключены.
 - [~] Для director↔writer pair добавлен отдельный ablation `baseline v7 → candidate v8`, последующие блоки принудительно исключены.
@@ -116,8 +118,9 @@
 - [~] Для recent trend добавлен отдельный ablation `baseline v9 → candidate v10`.
 - [~] Для multi-director context добавлен отдельный ablation `baseline v10 → candidate v11`.
 - [~] Для Full Cast добавлен отдельный непубликуемый ablation `baseline v11 → candidate v12`.
-- [~] Для Actor Pair History добавлен отдельный непубликуемый ablation `baseline v12 → candidate v13`; v14 принудительно выключен.
-- [~] Для Dual Role History добавлен отдельный непубликуемый ablation `baseline v13 → candidate v14`.
+- [~] Для Actor Pair History добавлен отдельный непубликуемый ablation `baseline v12 → candidate v13`.
+- [~] Для Dual Role History добавлен отдельный непубликуемый ablation `baseline v13 → candidate v14`; v15 принудительно выключен.
+- [~] Для Team-wide Collaboration добавлен отдельный непубликуемый ablation `baseline v14 → candidate v15`.
 - [ ] Для каждого следующего блока проводить отдельный ablation и не публиковать ухудшающие признаки.
 
 ## P2.5. Production Context
@@ -260,7 +263,7 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 - [x] Показ `data_coverage` и причин низкой обеспеченности данными.
 - [ ] UI для нескольких режиссёров с autocomplete/chips и сохранением порядка.
 - [ ] UI для расширенного актёрского состава: top-3 персональные признаки + Full Cast coverage/genre summary без визуальной перегрузки.
-- [ ] Понятный grouped SHAP: сценарий/режиссура/режиссёрская команда/актёры/full cast/actor-pair familiarity/dual-role/жанр/командная совместимость/production context/нехватка данных.
+- [ ] Понятный grouped SHAP: сценарий/режиссура/режиссёрская команда/актёры/full cast/actor-pair familiarity/dual-role/team-wide collaboration/жанр/командная совместимость/production context/нехватка данных.
 - [ ] Страница накопленной точности: число сверенных snapshots, MAE по поколениям/периодам/coverage bins.
 - [ ] Каталог будущих релизов и последние прогнозы.
 - [ ] Share/OG-картинка для конкретного snapshot.
@@ -270,7 +273,7 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 
 1. **Production rollout текущего Vanga + jsint-site и retrain с актуальной схемой.**
 2. **Завершить серверную валидацию P1 schema v6.**
-3. **Creative Team: полный v6→v7→v8→v9→v10→v11→v12→v13→v14 ablation; затем team-wide director↔writer/director↔actor aggregation и cohesion только отдельными инкрементами.**
+3. **Creative Team: полный v6→v7→v8→v9→v10→v11→v12→v13→v14→v15 ablation; затем key-team aggregate/cohesion только отдельными инкрементами после проверки raw histories.**
 4. **Production Context: studio/producer/franchise registry и timestamped production-change facts.**
 5. **Text → StoryMap extractor для RU/EN summaries.**
 6. **Пилот Expert Analysis Corpus: Красный Циник + BadComedian + blind validation.**
@@ -298,7 +301,7 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 - `README.md` — текущее состояние Vanga и эксплуатация.
 - `docs/ADAPTATION_ANALYZER.md` — архитектура ретроспективного анализа адаптаций.
 - `docs/DATA_COVERAGE.md` и `docs/P1_STATUS.md` — контракт и статус P1.
-- `docs/P2_STATUS.md` — Creative Team schema v7-v14 и безопасные поэтапные ablation.
+- `docs/P2_STATUS.md` — Creative Team schema v7-v15 и безопасные поэтапные ablation.
 - `docs/PRODUCTION_CONTEXT.md` — multi-director, studio/franchise/producer context и внешний creative influence.
 - `docs/EXPERT_ANALYSIS_CORPUS.md` — многопрофильный экспертный корпус, blind validation и переносимые методы анализа.
 - Этот `docs/ROADMAP.md` — источник истины по согласованным планам дальнейшего развития.
