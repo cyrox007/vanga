@@ -31,6 +31,7 @@ DIRECTOR_TEAM_SCHEMA_VERSION = 11
 FULL_CAST_SCHEMA_VERSION = 12
 CAST_PAIR_SCHEMA_VERSION = 13
 DUAL_ROLE_SCHEMA_VERSION = 14
+TEAM_COLLABORATION_SCHEMA_VERSION = 15
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,10 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--without-director-team-features", action="store_true")
     parser.add_argument("--without-full-cast-features", action="store_true")
     parser.add_argument("--without-cast-pair-features", action="store_true")
+    parser.add_argument("--without-dual-role-features", action="store_true")
     parser.add_argument(
-        "--without-dual-role-features",
+        "--without-team-collaboration-features",
         action="store_true",
-        help="отключить director+writer history и воспроизвести schema v13",
+        help="отключить team-wide director↔writer/director↔actor и воспроизвести schema v14",
     )
     parser.add_argument("--iterations", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=10000)
@@ -86,6 +88,7 @@ def _log_evaluation_summary(metadata: dict, size_bytes: int) -> None:
         "full_cast_features_version",
         "cast_pair_features_version",
         "dual_role_features_version",
+        "team_collaboration_features_version",
     ):
         logger.info("%s=%s", name, metadata.get(name))
     logger.info("MAE=%s", _metric_text(metadata, "test_mae"))
@@ -121,8 +124,9 @@ def main(argv: list[str] | None = None) -> None:
     full_cast_enabled = director_team_enabled and not args.without_full_cast_features
     cast_pair_enabled = full_cast_enabled and not args.without_cast_pair_features
     dual_role_enabled = cast_pair_enabled and not args.without_dual_role_features
+    team_collaboration_enabled = dual_role_enabled and not args.without_team_collaboration_features
 
-    if not dual_role_enabled and not args.smoke and not args.evaluation_only:
+    if not team_collaboration_enabled and not args.smoke and not args.evaluation_only:
         if not coverage_enabled:
             baseline_name = "Baseline schema v5"
         elif not creative_enabled:
@@ -139,8 +143,10 @@ def main(argv: list[str] | None = None) -> None:
             baseline_name = "Baseline schema v11"
         elif not cast_pair_enabled:
             baseline_name = "Baseline schema v12"
+        elif not dual_role_enabled:
+            baseline_name = "Baseline schema v13"
         else:
-            baseline_name = "Baseline schema v13 без dual-role history"
+            baseline_name = "Baseline schema v14 без team-wide collaboration"
         raise SystemExit(
             f"{baseline_name} нельзя публиковать через этот entrypoint. "
             "Используйте --evaluation-only или --smoke."
@@ -156,6 +162,7 @@ def main(argv: list[str] | None = None) -> None:
         "VANGA_TRAIN_FULL_CAST_FEATURES": full_cast_enabled,
         "VANGA_TRAIN_CAST_PAIR_FEATURES": cast_pair_enabled,
         "VANGA_TRAIN_DUAL_ROLE_FEATURES": dual_role_enabled,
+        "VANGA_TRAIN_TEAM_COLLABORATION_FEATURES": team_collaboration_enabled,
     }
     for name, enabled in env.items():
         os.environ[name] = "1" if enabled else "0"
@@ -163,8 +170,10 @@ def main(argv: list[str] | None = None) -> None:
     mode = "SMOKE (без публикации)" if args.smoke else (
         "FULL EVALUATION (без публикации)" if args.evaluation_only else "FULL"
     )
-    if dual_role_enabled:
-        schema_label = "candidate v14"
+    if team_collaboration_enabled:
+        schema_label = "candidate v15"
+    elif dual_role_enabled:
+        schema_label = "baseline v14"
     elif cast_pair_enabled:
         schema_label = "baseline v13"
     elif full_cast_enabled:
@@ -187,12 +196,13 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("=" * 60)
     logger.info("ЗАПУСК ОБУЧЕНИЯ CATBOOST")
     logger.info(
-        "Режим: %s; schema=%s; full_cast=%s; cast_pair=%s; dual_role=%s; iterations=%s; batch_size=%s; max_batches=%s",
+        "Режим: %s; schema=%s; full_cast=%s; cast_pair=%s; dual_role=%s; team_collaboration=%s; iterations=%s; batch_size=%s; max_batches=%s",
         mode,
         schema_label,
         "on" if full_cast_enabled else "off",
         "on" if cast_pair_enabled else "off",
         "on" if dual_role_enabled else "off",
+        "on" if team_collaboration_enabled else "off",
         iterations,
         args.batch_size,
         args.max_batches,
@@ -207,7 +217,9 @@ def main(argv: list[str] | None = None) -> None:
         iterations=iterations,
     )
 
-    if dual_role_enabled:
+    if team_collaboration_enabled:
+        schema_version = TEAM_COLLABORATION_SCHEMA_VERSION
+    elif dual_role_enabled:
         schema_version = DUAL_ROLE_SCHEMA_VERSION
     elif cast_pair_enabled:
         schema_version = CAST_PAIR_SCHEMA_VERSION
@@ -238,6 +250,7 @@ def main(argv: list[str] | None = None) -> None:
     metadata["full_cast_features_version"] = 1 if full_cast_enabled else 0
     metadata["cast_pair_features_version"] = 1 if cast_pair_enabled else 0
     metadata["dual_role_features_version"] = 1 if dual_role_enabled else 0
+    metadata["team_collaboration_features_version"] = 1 if team_collaboration_enabled else 0
 
     interpret_model(model, metadata)
 
@@ -262,6 +275,7 @@ def main(argv: list[str] | None = None) -> None:
         full_cast_enabled,
         cast_pair_enabled,
         dual_role_enabled,
+        team_collaboration_enabled,
     )):
         raise SystemExit("Неполную baseline-схему нельзя публиковать через этот entrypoint.")
 
