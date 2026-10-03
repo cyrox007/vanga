@@ -296,7 +296,31 @@ class KinoVanga(BaseKinoVanga):
         )
         resolved_title = resolved_input["title"]
         resolved_writer = resolved_input["writer"]
-        resolved_actors = resolved_input["actors"]
+        resolved_actors = list(resolved_input["actors"])
+        actor_matches = list((resolved_input.get("matches") or {}).get("actors") or [])
+        while len(actor_matches) < len(requested_actors):
+            actor_matches.append(None)
+
+        # Legacy resolver исторически обрабатывал только первые 3 актёрских alias.
+        # Для v12 каждый дополнительный актёр разрешается тем же resolver отдельно,
+        # чтобы русский ввод полного ансамбля не превращался в Unknown.
+        for index in range(3, len(requested_actors)):
+            raw_actor = requested_actors[index]
+            if not self.input_resolver.needs_resolution(raw_actor):
+                continue
+            one = self.input_resolver.resolve_inputs(
+                title=None,
+                director=None,
+                writer=None,
+                actors=[raw_actor],
+                year=int(year),
+            )
+            one_actors = one.get("actors") or []
+            one_matches = (one.get("matches") or {}).get("actors") or []
+            if one_actors:
+                resolved_actors[index] = one_actors[0]
+            if one_matches:
+                actor_matches[index] = one_matches[0]
 
         resolved_directors: list[str] = []
         director_matches: list[dict | None] = []
@@ -361,6 +385,8 @@ class KinoVanga(BaseKinoVanga):
         matches["director"] = director_matches[0] if director_matches else None
         matches["directors"] = director_matches
         matches["resolved_directors"] = resolved_directors
+        matches["actors"] = actor_matches
+        matches["resolved_actors"] = resolved_actors
         matches["resolved_cast_size"] = len(resolved_actors)
 
         return {
