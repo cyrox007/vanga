@@ -27,6 +27,14 @@ class Config:
         "VANGA_EXPERT_CORPUS_DB",
         str(Path(ABSPATH) / "expert_corpus.duckdb"),
     )
+    # P6 registry хранит не production-features, а preregistered гипотезы:
+    # retrospective evidence -> только заранее доступные candidate proxies ->
+    # обязательный temporal ablation. Физическое отделение не позволяет
+    # StoryDiff/expert findings случайно стать входом production-модели.
+    PROXY_HYPOTHESES_DB_PATH = os.getenv(
+        "VANGA_PROXY_HYPOTHESES_DB",
+        str(Path(ABSPATH) / "proxy_hypotheses.duckdb"),
+    )
     # Pre-release facts о первоисточнике хранятся отдельно от retrospective
     # Adaptation Analyzer. Здесь допустимы только facts/provenance, доступные
     # наблюдателю на соответствующий cutoff.
