@@ -19,6 +19,7 @@ from src.production_identity import (
     GROUP_KINDS,
     ProductionIdentityHistory,
 )
+from src.production_outcomes import ProductionOutcomeHistory
 
 
 def _json_dump(payload: Any) -> None:
@@ -101,6 +102,22 @@ def build_parser() -> argparse.ArgumentParser:
     history.add_argument("project_id")
     history.add_argument("cutoff", help="ISO datetime")
 
+    outcomes = sub.add_parser(
+        "outcomes",
+        help=(
+            "показать research outcome aggregates по прошлым production identity; "
+            "текущий IMDb rating не является point-in-time snapshot"
+        ),
+    )
+    outcomes.add_argument("project_id")
+    outcomes.add_argument("cutoff", help="ISO datetime")
+    outcomes.add_argument(
+        "--imdb-db",
+        type=Path,
+        default=None,
+        help="путь к imdb.duckdb (по умолчанию settings.py)",
+    )
+
     timeline = sub.add_parser("timeline", help="показать известную к cutoff timeline событий")
     timeline.add_argument("project_id")
     timeline.add_argument("cutoff", help="ISO datetime")
@@ -148,6 +165,19 @@ def main(argv: list[str] | None = None) -> int:
                     "project_id": args.project_id,
                     "cutoff": args.cutoff,
                     "features": identity.history_features_as_of(args.project_id, args.cutoff),
+                }
+            )
+            return 0
+        if args.command == "outcomes":
+            outcome_history = ProductionOutcomeHistory(identity, args.imdb_db)
+            _json_dump(
+                {
+                    "ok": True,
+                    "project_id": args.project_id,
+                    "cutoff": args.cutoff,
+                    "research_only": True,
+                    "rating_point_in_time": False,
+                    "features": outcome_history.features_as_of(args.project_id, args.cutoff),
                 }
             )
             return 0
