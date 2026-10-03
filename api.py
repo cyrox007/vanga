@@ -274,7 +274,9 @@ def predict():
         return _json_error("Укажите жанр", 400)
     if not isinstance(actors, list) or any(not isinstance(item, str) for item in actors):
         return _json_error("actors должен быть массивом строк", 400)
-    actors = [item.strip() for item in actors if item.strip()][:5]
+    actors = [item.strip() for item in actors if item.strip()][:32]
+    if any(len(item) > 240 for item in actors):
+        return _json_error("Слишком длинное имя актёра", 400)
 
     try:
         with _lock:
@@ -306,6 +308,11 @@ def predict():
             profile["director_team"] = {
                 "requested": directors,
                 "count": len(directors),
+            }
+            profile["cast"] = {
+                "requested": actors,
+                "count": len(actors),
+                "legacy_personal_slots": min(3, len(actors)),
             }
     except Exception:
         logger.exception("Ошибка предсказания Vanga")
