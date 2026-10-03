@@ -120,6 +120,15 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--batch-size должно быть положительным числом")
     if args.max_batches is not None and args.max_batches < 1:
         raise SystemExit("--max-batches должно быть положительным числом")
+    if (
+        args.without_coverage_features
+        and not args.smoke
+        and not args.evaluation_only
+    ):
+        raise SystemExit(
+            "Baseline schema v5 нельзя публиковать через этот entrypoint. "
+            "Используйте --evaluation-only или --smoke."
+        )
 
     coverage_enabled = not args.without_coverage_features
     os.environ["VANGA_TRAIN_COVERAGE_FEATURES"] = "1" if coverage_enabled else "0"
@@ -180,10 +189,11 @@ def main(argv: list[str] | None = None) -> None:
             logger.info("НЕПУБЛИКУЕМАЯ ОЦЕНКА ЗАВЕРШЕНА УСПЕШНО")
         return
 
+    # Defense in depth: baseline не должен попасть в save_trained_model даже если
+    # в будущем раннюю валидацию аргументов случайно изменят.
     if not coverage_enabled:
         raise SystemExit(
-            "Baseline schema v5 нельзя публиковать через этот entrypoint. "
-            "Используйте --evaluation-only или включите coverage-признаки."
+            "Baseline schema v5 нельзя публиковать через этот entrypoint."
         )
 
     save_trained_model(model, metadata)
