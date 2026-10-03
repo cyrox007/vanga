@@ -37,8 +37,8 @@ train_model_module.get_batches = creative_get_batches
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Непубликуемый temporal ablation: Full Cast baseline v12 "
-            "против actor-pair candidate v13 на одной IMDb БД."
+            "Непубликуемый temporal ablation: actor-pair baseline v13 "
+            "против dual-role candidate v14 на одной IMDb БД."
         )
     )
     parser.add_argument("--iterations", type=int, default=1500)
@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _train_variant(
     *,
     label: str,
-    cast_pair_enabled: bool,
+    dual_role_enabled: bool,
     genres: list[str],
     iterations: int,
     batch_size: int,
@@ -68,17 +68,16 @@ def _train_variant(
         "VANGA_TRAIN_CREATIVE_TREND_FEATURES",
         "VANGA_TRAIN_DIRECTOR_TEAM_FEATURES",
         "VANGA_TRAIN_FULL_CAST_FEATURES",
+        "VANGA_TRAIN_CAST_PAIR_FEATURES",
     ):
         os.environ[name] = "1"
-    os.environ["VANGA_TRAIN_CAST_PAIR_FEATURES"] = "1" if cast_pair_enabled else "0"
-    # Исторический v12→v13 эксперимент не должен незаметно включить schema v14.
-    os.environ["VANGA_TRAIN_DUAL_ROLE_FEATURES"] = "0"
+    os.environ["VANGA_TRAIN_DUAL_ROLE_FEATURES"] = "1" if dual_role_enabled else "0"
 
     logger.info("=" * 60)
     logger.info(
-        "CAST PAIR ABLATION: старт %s; cast_pair=%s; dual_role=off",
+        "DUAL ROLE ABLATION: старт %s; dual_role=%s",
         label,
-        "on" if cast_pair_enabled else "off",
+        "on" if dual_role_enabled else "off",
     )
     model, metadata = train_catboost_model(
         genres,
@@ -92,7 +91,7 @@ def _train_variant(
         result = _result_from_metadata(
             metadata,
             label=label,
-            schema_version=13 if cast_pair_enabled else 12,
+            schema_version=14 if dual_role_enabled else 13,
             coverage_features_version=1,
             model_size_bytes=size_bytes,
         )
@@ -102,8 +101,8 @@ def _train_variant(
         result["creative_trend_features_version"] = 1
         result["director_team_features_version"] = 1
         result["full_cast_features_version"] = 1
-        result["cast_pair_features_version"] = 1 if cast_pair_enabled else 0
-        result["dual_role_features_version"] = 0
+        result["cast_pair_features_version"] = 1
+        result["dual_role_features_version"] = 1 if dual_role_enabled else 0
         return result
     finally:
         del model
@@ -126,11 +125,11 @@ def main(argv: list[str] | None = None) -> int:
     signature = database_signature(db_path)
     genres = get_all_genres()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    work_root = Path(config.ABSPATH) / "temp" / "cast-pair-ablation" / stamp
+    work_root = Path(config.ABSPATH) / "temp" / "dual-role-ablation" / stamp
 
     baseline = _train_variant(
-        label="baseline-v12",
-        cast_pair_enabled=False,
+        label="baseline-v13",
+        dual_role_enabled=False,
         genres=genres,
         iterations=args.iterations,
         batch_size=args.batch_size,
@@ -141,8 +140,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     _assert_database_unchanged(db_path, signature)
     candidate = _train_variant(
-        label="candidate-v13",
-        cast_pair_enabled=True,
+        label="candidate-v14",
+        dual_role_enabled=True,
         genres=genres,
         iterations=args.iterations,
         batch_size=args.batch_size,
@@ -170,16 +169,16 @@ def main(argv: list[str] | None = None) -> int:
         "published": False,
     }
     output = args.output or (
-        Path(config.ABSPATH) / "temp" / "ablation-reports" / f"cast-pair-{stamp}.json"
+        Path(config.ABSPATH) / "temp" / "ablation-reports" / f"dual-role-{stamp}.json"
     )
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     logger.info("=" * 60)
-    logger.info("CAST PAIR ABLATION ЗАВЕРШЁН")
-    logger.info("Baseline v12 MAE: %.6f", baseline["test_mae"])
-    logger.info("Candidate v13 MAE: %.6f", candidate["test_mae"])
+    logger.info("DUAL ROLE ABLATION ЗАВЕРШЁН")
+    logger.info("Baseline v13 MAE: %.6f", baseline["test_mae"])
+    logger.info("Candidate v14 MAE: %.6f", candidate["test_mae"])
     logger.info("Δ MAE: %+.6f", comparison["delta_mae"])
     logger.info("Активная модель НЕ ИЗМЕНЕНА")
     logger.info("=" * 60)

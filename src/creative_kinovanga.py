@@ -18,10 +18,8 @@ from src.director_team_features import (
     DIRECTOR_TEAM_FEATURE_NAMES,
     fetch_director_team_context,
 )
-from src.full_cast_features import (
-    FULL_CAST_FEATURE_NAMES,
-    fetch_full_cast_context,
-)
+from src.dual_role_features import DUAL_ROLE_FEATURE_NAMES, fetch_dual_role_context
+from src.full_cast_features import FULL_CAST_FEATURE_NAMES, fetch_full_cast_context
 from src.pair_features import (
     DIRECTOR_WRITER_PAIR_FEATURE_NAMES,
     fetch_director_writer_pair_context,
@@ -34,7 +32,7 @@ from src.kinovanga import KinoVanga as BaseKinoVanga
 
 
 class KinoVanga(BaseKinoVanga):
-    """KinoVanga с P2 Creative Team-признаками schema v7-v13."""
+    """KinoVanga с P2 Creative Team-признаками schema v7-v14."""
 
     @staticmethod
     def _clean_director_names(
@@ -96,6 +94,7 @@ class KinoVanga(BaseKinoVanga):
             .union(DIRECTOR_TEAM_FEATURE_NAMES)
             .union(FULL_CAST_FEATURE_NAMES)
             .union(CAST_PAIR_FEATURE_NAMES)
+            .union(DUAL_ROLE_FEATURE_NAMES)
         )
         if not feature_set.intersection(extended_features):
             return X
@@ -260,6 +259,16 @@ class KinoVanga(BaseKinoVanga):
                 )
             )
 
+        if feature_set.intersection(DUAL_ROLE_FEATURE_NAMES):
+            values.update(
+                fetch_dual_role_context(
+                    self.conn,
+                    director_nconsts=director_ids,
+                    writer_nconst=writer_id,
+                    before_year=int(year),
+                )
+            )
+
         for name, value in values.items():
             if name in feature_set:
                 X[0, feature_names.index(name)] = float(value)
@@ -278,7 +287,7 @@ class KinoVanga(BaseKinoVanga):
         explain=False,
         directors=None,
     ) -> float | dict:
-        """Предсказывает рейтинг с несколькими режиссёрами и полным principal cast."""
+        """Предсказывает рейтинг с multi-director, Full Cast и P2 history."""
         if title:
             from src.logger import setup_logger
             setup_logger(__name__).info(f"Предсказание для фильма: {title} ({year})")
