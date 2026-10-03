@@ -215,6 +215,7 @@ class ExpertBlindValidationTests(unittest.TestCase):
 
     def test_prediction_in_dimension_not_annotated_by_expert_is_unscored_not_false_positive(self):
         manifest = self.validator.export_manifest(split="blind")
+        baseline = self.validator.evaluate(self._prediction_payload(manifest), split="blind")
         payload = self._prediction_payload(manifest)
         payload["cases"][1]["findings"].append(
             {
@@ -227,10 +228,17 @@ class ExpertBlindValidationTests(unittest.TestCase):
         result = self.validator.evaluate(payload, split="blind")
 
         bad = result["per_expert"]["badcomedian"]
+        baseline_bad = baseline["per_expert"]["badcomedian"]
         self.assertEqual(bad["metrics"]["f1"], 1.0)
         self.assertEqual(bad["metrics"]["fp"], 0)
-        self.assertEqual(bad["unscored_prediction_count"], 1)
-        self.assertGreaterEqual(result["unscored_prediction_count"], 1)
+        self.assertEqual(
+            bad["unscored_prediction_count"],
+            baseline_bad["unscored_prediction_count"] + 1,
+        )
+        self.assertEqual(
+            result["unscored_prediction_count"],
+            baseline["unscored_prediction_count"] + 1,
+        )
 
     def test_manifest_fingerprint_mismatch_is_rejected(self):
         manifest = self.validator.export_manifest(split="blind")
@@ -276,7 +284,7 @@ class ExpertBlindValidationTests(unittest.TestCase):
             expert_id="red-cynic",
             case_id="blind-2",
             claim_id="red-without-evidence",
-            dimension="theme",
+            dimension="themes",
             change_type="removed",
             interpretation="SECRET_UNSUPPORTED",
             add_supporting_evidence=False,
