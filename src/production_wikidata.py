@@ -173,8 +173,6 @@ class ProductionWikidataCache:
             )
             """
         )
-        # enrichment_state уже создаётся основным EnrichmentStore, но sidecar
-        # обязан работать и при отдельном запуске на существующей БД.
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS enrichment_state (
@@ -213,7 +211,10 @@ class ProductionWikidataCache:
         after_imdb: str,
         limit: int,
         retry_errors: bool = False,
+        refresh_known: bool = False,
     ) -> list[ProductionCandidate]:
+        if retry_errors and refresh_known:
+            raise ValueError("retry_errors и refresh_known нельзя включать одновременно")
         if retry_errors:
             rows = self.conn.execute(
                 """
@@ -224,6 +225,19 @@ class ProductionWikidataCache:
                 LIMIT ?
                 """,
                 [limit],
+            ).fetchall()
+        elif refresh_known:
+            rows = self.conn.execute(
+                """
+                SELECT f.imdb_id, f.wikidata_id
+                FROM film_enrichment f
+                WHERE f.status = 'ok'
+                  AND f.wikidata_id IS NOT NULL
+                  AND f.imdb_id > ?
+                ORDER BY f.imdb_id
+                LIMIT ?
+                """,
+                [after_imdb, limit],
             ).fetchall()
         else:
             rows = self.conn.execute(
