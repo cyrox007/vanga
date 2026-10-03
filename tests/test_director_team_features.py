@@ -57,6 +57,7 @@ class DirectorTeamFeatureTests(unittest.TestCase):
             [
                 ("nm_a", "Director A"),
                 ("nm_b", "Director B"),
+                ("nm_c", "Director C"),
                 ("nm_writer", "Writer"),
                 ("nm_actor", "Actor"),
             ],
@@ -67,6 +68,7 @@ class DirectorTeamFeatureTests(unittest.TestCase):
         self._movie("tt2022", 2022, 6.0, ["nm_a", "nm_b"])
         self._movie("tt2023", 2023, 10.0, ["nm_b"])
         self._movie("tt2024", 2024, 2.0, ["nm_a", "nm_b"])
+        self._movie("tt2024c", 2024, 3.0, ["nm_a", "nm_c"])
         self._movie("tt2025", 2025, 1.0, ["nm_a", "nm_b"])
 
     def _movie(self, tconst: str, year: int, rating: float, directors: list[str]):
@@ -108,9 +110,7 @@ class DirectorTeamFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(ctx["director_team_avg_rating"], 7.0, places=5)
         self.assertAlmostEqual(ctx["director_team_prior_count_mean"], 3.0, places=5)
         self.assertEqual(ctx["director_team_prior_collaboration_count"], 2.0)
-        self.assertAlmostEqual(
-            ctx["director_team_prior_collaboration_avg_rating"], 7.0, places=5
-        )
+        self.assertAlmostEqual(ctx["director_team_prior_collaboration_avg_rating"], 7.0, places=5)
         self.assertEqual(ctx["director_team_collaboration_known"], 1.0)
 
     def test_inference_matches_batch_team_semantics(self):
@@ -120,11 +120,26 @@ class DirectorTeamFeatureTests(unittest.TestCase):
             before_year=2024,
         )
         self.assertEqual(ctx["director_team_size"], 2.0)
+        self.assertEqual(ctx["director_team_known_ratio"], 1.0)
         self.assertAlmostEqual(ctx["director_team_avg_rating"], 7.0, places=5)
+        self.assertAlmostEqual(ctx["director_team_prior_count_mean"], 3.0, places=5)
         self.assertEqual(ctx["director_team_prior_collaboration_count"], 2.0)
-        self.assertAlmostEqual(
-            ctx["director_team_prior_collaboration_avg_rating"], 7.0, places=5
+        self.assertAlmostEqual(ctx["director_team_prior_collaboration_avg_rating"], 7.0, places=5)
+
+    def test_unknown_team_member_is_counted_as_zero_history_in_both_paths(self):
+        batch = fetch_batch_director_team_context(self.conn, ["tt2024c"])["tt2024c"]
+        inference = fetch_director_team_context(
+            self.conn,
+            director_nconsts=["nm_a", "nm_c"],
+            before_year=2024,
         )
+        for ctx in (batch, inference):
+            self.assertEqual(ctx["director_team_size"], 2.0)
+            self.assertEqual(ctx["director_team_known_ratio"], 0.5)
+            self.assertAlmostEqual(ctx["director_team_avg_rating"], 6.0, places=5)
+            self.assertAlmostEqual(ctx["director_team_prior_count_mean"], 1.5, places=5)
+            self.assertEqual(ctx["director_team_prior_collaboration_count"], 0.0)
+            self.assertEqual(ctx["director_team_collaboration_known"], 0.0)
 
     def test_training_wrapper_emits_schema_v11_team_features(self):
         target = None
