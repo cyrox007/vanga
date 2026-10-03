@@ -6,6 +6,11 @@ from src.creative_team_features import (
     CREATIVE_TEAM_FEATURE_NAMES,
     fetch_person_creative_context,
 )
+from src.director_actor_features import (
+    ACTOR_SLOTS,
+    DIRECTOR_ACTOR_PAIR_FEATURE_NAMES,
+    fetch_director_actor_pair_context,
+)
 from src.pair_features import (
     DIRECTOR_WRITER_PAIR_FEATURE_NAMES,
     fetch_director_writer_pair_context,
@@ -14,7 +19,7 @@ from src.kinovanga import KinoVanga as BaseKinoVanga
 
 
 class KinoVanga(BaseKinoVanga):
-    """KinoVanga с P2 Creative Team-признаками schema v7/v8.
+    """KinoVanga с P2 Creative Team-признаками schema v7/v8/v9.
 
     Старые модели остаются совместимыми: дополнительные запросы выполняются
     только для feature names, которые реально присутствуют в metadata активной
@@ -45,8 +50,10 @@ class KinoVanga(BaseKinoVanga):
 
         feature_names = list(self.metadata.get("feature_names") or [])
         feature_set = set(feature_names)
-        extended_features = set(CREATIVE_TEAM_FEATURE_NAMES).union(
-            DIRECTOR_WRITER_PAIR_FEATURE_NAMES
+        extended_features = (
+            set(CREATIVE_TEAM_FEATURE_NAMES)
+            .union(DIRECTOR_WRITER_PAIR_FEATURE_NAMES)
+            .union(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES)
         )
         if not feature_set.intersection(extended_features):
             return X
@@ -118,6 +125,46 @@ class KinoVanga(BaseKinoVanga):
                     before_year=int(year),
                 )
             )
+
+        if feature_set.intersection(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES):
+            actor_names = [
+                str(name).strip()
+                for name in (actors or [])[: len(ACTOR_SLOTS)]
+                if str(name).strip()
+            ]
+            actor_people = (
+                self._get_people_info(
+                    actor_names,
+                    before_year=int(year),
+                    role="actor",
+                )
+                if actor_names
+                else {}
+            )
+
+            for slot in ACTOR_SLOTS:
+                actor_name = (
+                    actor_names[slot - 1]
+                    if slot - 1 < len(actor_names)
+                    else None
+                )
+                actor_info = actor_people.get(actor_name, {}) if actor_name else {}
+                actor_id = actor_info.get("nconst") or "Unknown"
+                pair_context = fetch_director_actor_pair_context(
+                    self.conn,
+                    director_nconst=director_id,
+                    actor_nconst=actor_id,
+                    before_year=int(year),
+                )
+                values.update(
+                    {
+                        f"director_actor_{slot}_pair_avg_rating": pair_context[
+                            "avg_rating"
+                        ],
+                        f"director_actor_{slot}_pair_count": pair_context["count"],
+                        f"director_actor_{slot}_pair_known": pair_context["known"],
+                    }
+                )
 
         for name, value in values.items():
             if name in feature_set:
