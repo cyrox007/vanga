@@ -18,11 +18,9 @@ from src.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-# Schema v6 вводит явные *_known и *_prior_count для исторических person-сигналов.
-# Это отдельная версия контракта train/inference; публикация всё равно проходит
-# temporal holdout и существующий quality gate.
-COVERAGE_SCHEMA_VERSION = 6
 BASELINE_SCHEMA_VERSION = 5
+COVERAGE_SCHEMA_VERSION = 6
+CREATIVE_TEAM_SCHEMA_VERSION = 7
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "отключить *_known и *_prior_count и воспроизвести baseline feature "
             "set schema v5 на том же актуальном IMDb dataset"
+        ),
+    )
+    parser.add_argument(
+        "--creative-team-features",
+        action="store_true",
+        help=(
+            "включить candidate Creative Team schema v7: genre-specific history, "
+            "recent form и director_is_writer; пока только для smoke/evaluation"
         ),
     )
     parser.add_argument(
@@ -102,6 +108,10 @@ def _log_evaluation_summary(metadata: dict, size_bytes: int) -> None:
         "coverage_features_version=%s",
         metadata.get("coverage_features_version"),
     )
+    logger.info(
+        "creative_team_features_version=%s",
+        metadata.get("creative_team_features_version"),
+    )
     logger.info("MAE=%s", _metric_text(metadata, "test_mae"))
     logger.info("RMSE=%s", _metric_text(metadata, "test_rmse"))
     logger.info("R²=%s", _metric_text(metadata, "test_r2"))
@@ -128,6 +138,11 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--batch-size должно быть положительным числом")
     if args.max_batches is not None and args.max_batches < 1:
         raise SystemExit("--max-batches должно быть положительным числом")
+    if args.creative_team_features and args.without_coverage_features:
+        raise SystemExit(
+            "Creative Team v7 строится поверх coverage schema v6; "
+            "нельзя одновременно использовать --without-coverage-features."
+        )
     if (
         args.without_coverage_features
         and not args.smoke
@@ -137,9 +152,22 @@ def main(argv: list[str] | None = None) -> None:
             "Baseline schema v5 нельзя публиковать через этот entrypoint. "
             "Используйте --evaluation-only или --smoke."
         )
+    if (
+        args.creative_team_features
+        and not args.smoke
+        and not args.evaluation_only
+    ):
+        raise SystemExit(
+            "Candidate Creative Team schema v7 пока нельзя публиковать. "
+            "Используйте --evaluation-only или --smoke до отдельного ablation."
+        )
 
     coverage_enabled = not args.without_coverage_features
+    creative_team_enabled = bool(args.creative_team_features)
     os.environ["VANGA_TRAIN_COVERAGE_FEATURES"] = "1" if coverage_enabled else "0"
+    os.environ["VANGA_TRAIN_CREATIVE_TEAM_FEATURES"] = (
+        "1" if creative_team_enabled else "0"
+    )
 
     if args.smoke:
         mode = "SMOKE (без публикации)"
@@ -148,12 +176,19 @@ def main(argv: list[str] | None = None) -> None:
     else:
         mode = "FULL"
 
+    if creative_team_enabled:
+        schema_label = "candidate v7"
+    elif coverage_enabled:
+        schema_label = "v6"
+    else:
+        schema_label = "baseline v5"
+
     logger.info("=" * 60)
     logger.info("ЗАПУСК ОБУЧЕНИЯ CATBOOST")
     logger.info(
-        "Режим: %s; coverage=%s; iterations=%s; batch_size=%s; max_batches=%s",
+        "Режим: %s; schema=%s; iterations=%s; batch_size=%s; max_batches=%s",
         mode,
-        "v6" if coverage_enabled else "baseline v5",
+        schema_label,
         iterations,
         args.batch_size,
         args.max_batches,
@@ -161,7 +196,7 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("=" * 60)
 
     genres = get_all_genres()
-    logger.info(f"Найдено жанров: {len(genres)}")
+    logger.info("Найдено жанров: %s", len(genres))
 
     model, metadata = train_catboost_model(
         genres,
@@ -169,10 +204,14 @@ def main(argv: list[str] | None = None) -> None:
         max_batches=args.max_batches,
         iterations=iterations,
     )
-    metadata["schema_version"] = (
-        COVERAGE_SCHEMA_VERSION if coverage_enabled else BASELINE_SCHEMA_VERSION
-    )
+    if creative_team_enabled:
+        metadata["schema_version"] = CREATIVE_TEAM_SCHEMA_VERSION
+    elif coverage_enabled:
+        metadata["schema_version"] = COVERAGE_SCHEMA_VERSION
+    else:
+        metadata["schema_version"] = BASELINE_SCHEMA_VERSION
     metadata["coverage_features_version"] = 1 if coverage_enabled else 0
+    metadata["creative_team_features_version"] = 1 if creative_team_enabled else 0
 
     interpret_model(model, metadata)
 
@@ -197,11 +236,13 @@ def main(argv: list[str] | None = None) -> None:
             logger.info("НЕПУБЛИКУЕМАЯ ОЦЕНКА ЗАВЕРШЕНА УСПЕШНО")
         return
 
-    # Defense in depth: baseline не должен попасть в save_trained_model даже если
-    # в будущем раннюю валидацию аргументов случайно изменят.
     if not coverage_enabled:
         raise SystemExit(
             "Baseline schema v5 нельзя публиковать через этот entrypoint."
+        )
+    if creative_team_enabled:
+        raise SystemExit(
+            "Candidate Creative Team schema v7 нельзя публиковать без ablation."
         )
 
     save_trained_model(model, metadata)
