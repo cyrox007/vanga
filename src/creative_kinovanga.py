@@ -15,11 +15,15 @@ from src.pair_features import (
     DIRECTOR_WRITER_PAIR_FEATURE_NAMES,
     fetch_director_writer_pair_context,
 )
+from src.trend_features import (
+    CREATIVE_TREND_FEATURE_NAMES,
+    fetch_person_recent_trend,
+)
 from src.kinovanga import KinoVanga as BaseKinoVanga
 
 
 class KinoVanga(BaseKinoVanga):
-    """KinoVanga с P2 Creative Team-признаками schema v7/v8/v9.
+    """KinoVanga с P2 Creative Team-признаками schema v7-v10.
 
     Старые модели остаются совместимыми: дополнительные запросы выполняются
     только для feature names, которые реально присутствуют в metadata активной
@@ -54,6 +58,7 @@ class KinoVanga(BaseKinoVanga):
             set(CREATIVE_TEAM_FEATURE_NAMES)
             .union(DIRECTOR_WRITER_PAIR_FEATURE_NAMES)
             .union(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES)
+            .union(CREATIVE_TREND_FEATURE_NAMES)
         )
         if not feature_set.intersection(extended_features):
             return X
@@ -165,6 +170,28 @@ class KinoVanga(BaseKinoVanga):
                         f"director_actor_{slot}_pair_known": pair_context["known"],
                     }
                 )
+
+        if feature_set.intersection(CREATIVE_TREND_FEATURE_NAMES):
+            director_trend = fetch_person_recent_trend(
+                self.conn,
+                nconst=director_id,
+                before_year=int(year),
+                role="director",
+            )
+            writer_trend = fetch_person_recent_trend(
+                self.conn,
+                nconst=writer_id,
+                before_year=int(year),
+                role="writer",
+            )
+            values.update(
+                {
+                    "director_recent_trend": director_trend["trend"],
+                    "director_recent_trend_known": director_trend["known"],
+                    "writer_recent_trend": writer_trend["trend"],
+                    "writer_recent_trend_known": writer_trend["known"],
+                }
+            )
 
         for name, value in values.items():
             if name in feature_set:

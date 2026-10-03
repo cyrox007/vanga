@@ -21,7 +21,7 @@ from src.logger import setup_logger
 logger = setup_logger(__name__)
 
 # Production training использует расширенный P2 generator. Сам train_model остаётся
-# общим disk-first engine, поэтому baseline v5-v8 и candidate v9 проходят один и
+# общим disk-first engine, поэтому baseline v5-v9 и candidate v10 проходят один и
 # тот же temporal split, CatBoost-конфигурацию и quality gate.
 train_model_module.get_batches = creative_get_batches
 
@@ -30,12 +30,14 @@ train_model_module.get_batches = creative_get_batches
 # v6 — coverage known/prior_count;
 # v7 — genre/recent/director_is_writer;
 # v8 — история совместной работы director↔writer;
-# v9 — история director↔actor для первых трёх актёров target-фильма.
+# v9 — история director↔actor для первых трёх актёров target-фильма;
+# v10 — recent trend режиссёра/сценариста: последние 3 против предыдущих 3.
 BASELINE_SCHEMA_VERSION = 5
 COVERAGE_SCHEMA_VERSION = 6
 CREATIVE_TEAM_SCHEMA_VERSION = 7
 DIRECTOR_WRITER_PAIR_SCHEMA_VERSION = 8
 DIRECTOR_ACTOR_PAIR_SCHEMA_VERSION = 9
+CREATIVE_TREND_SCHEMA_VERSION = 10
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -87,6 +89,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "отключить историю режиссёр-актёр для первых трёх актёров и "
             "воспроизвести schema v8"
+        ),
+    )
+    parser.add_argument(
+        "--without-creative-trend-features",
+        action="store_true",
+        help=(
+            "отключить recent trend режиссёра/сценариста и воспроизвести schema v9"
         ),
     )
     parser.add_argument(
@@ -150,6 +159,10 @@ def _log_evaluation_summary(metadata: dict, size_bytes: int) -> None:
         "director_actor_pair_features_version=%s",
         metadata.get("director_actor_pair_features_version"),
     )
+    logger.info(
+        "creative_trend_features_version=%s",
+        metadata.get("creative_trend_features_version"),
+    )
     logger.info("MAE=%s", _metric_text(metadata, "test_mae"))
     logger.info("RMSE=%s", _metric_text(metadata, "test_rmse"))
     logger.info("R²=%s", _metric_text(metadata, "test_r2"))
@@ -185,18 +198,23 @@ def main(argv: list[str] | None = None) -> None:
     actor_pair_enabled = (
         writer_pair_enabled and not args.without_director_actor_pair_features
     )
+    trend_enabled = (
+        actor_pair_enabled and not args.without_creative_trend_features
+    )
 
     # Любая неполная схема теперь является только baseline для smoke/evaluation.
-    # Обычный production retrain должен идти через полный candidate v9.
-    if not actor_pair_enabled and not args.smoke and not args.evaluation_only:
+    # Обычный production retrain должен идти через полный candidate v10.
+    if not trend_enabled and not args.smoke and not args.evaluation_only:
         if not coverage_enabled:
             baseline_name = "Baseline schema v5"
         elif not creative_enabled:
             baseline_name = "Baseline schema v6 без Creative Team"
         elif not writer_pair_enabled:
             baseline_name = "Baseline schema v7 без director-writer pair"
-        else:
+        elif not actor_pair_enabled:
             baseline_name = "Baseline schema v8 без director-actor pair"
+        else:
+            baseline_name = "Baseline schema v9 без creative trend"
         raise SystemExit(
             f"{baseline_name} нельзя публиковать через этот entrypoint. "
             "Используйте --evaluation-only или --smoke."
@@ -212,6 +230,9 @@ def main(argv: list[str] | None = None) -> None:
     os.environ["VANGA_TRAIN_DIRECTOR_ACTOR_PAIR_FEATURES"] = (
         "1" if actor_pair_enabled else "0"
     )
+    os.environ["VANGA_TRAIN_CREATIVE_TREND_FEATURES"] = (
+        "1" if trend_enabled else "0"
+    )
 
     if args.smoke:
         mode = "SMOKE (без публикации)"
@@ -220,8 +241,10 @@ def main(argv: list[str] | None = None) -> None:
     else:
         mode = "FULL"
 
-    if actor_pair_enabled:
-        schema_label = "candidate v9"
+    if trend_enabled:
+        schema_label = "candidate v10"
+    elif actor_pair_enabled:
+        schema_label = "baseline v9"
     elif writer_pair_enabled:
         schema_label = "baseline v8"
     elif creative_enabled:
@@ -235,7 +258,7 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("ЗАПУСК ОБУЧЕНИЯ CATBOOST")
     logger.info(
         "Режим: %s; schema=%s; coverage=%s; creative_team=%s; "
-        "director_writer_pair=%s; director_actor_pair=%s; "
+        "director_writer_pair=%s; director_actor_pair=%s; trend=%s; "
         "iterations=%s; batch_size=%s; max_batches=%s",
         mode,
         schema_label,
@@ -243,6 +266,7 @@ def main(argv: list[str] | None = None) -> None:
         "on" if creative_enabled else "off",
         "on" if writer_pair_enabled else "off",
         "on" if actor_pair_enabled else "off",
+        "on" if trend_enabled else "off",
         iterations,
         args.batch_size,
         args.max_batches,
@@ -258,7 +282,9 @@ def main(argv: list[str] | None = None) -> None:
         max_batches=args.max_batches,
         iterations=iterations,
     )
-    if actor_pair_enabled:
+    if trend_enabled:
+        metadata["schema_version"] = CREATIVE_TREND_SCHEMA_VERSION
+    elif actor_pair_enabled:
         metadata["schema_version"] = DIRECTOR_ACTOR_PAIR_SCHEMA_VERSION
     elif writer_pair_enabled:
         metadata["schema_version"] = DIRECTOR_WRITER_PAIR_SCHEMA_VERSION
@@ -274,6 +300,7 @@ def main(argv: list[str] | None = None) -> None:
         1 if writer_pair_enabled else 0
     )
     metadata["director_actor_pair_features_version"] = 1 if actor_pair_enabled else 0
+    metadata["creative_trend_features_version"] = 1 if trend_enabled else 0
 
     interpret_model(model, metadata)
 
@@ -298,13 +325,14 @@ def main(argv: list[str] | None = None) -> None:
             logger.info("НЕПУБЛИКУЕМАЯ ОЦЕНКА ЗАВЕРШЕНА УСПЕШНО")
         return
 
-    # Defense in depth: baseline v5-v8 не должен попасть в публикацию даже если
+    # Defense in depth: baseline v5-v9 не должен попасть в публикацию даже если
     # раннюю валидацию аргументов в будущем случайно изменят.
     if (
         not coverage_enabled
         or not creative_enabled
         or not writer_pair_enabled
         or not actor_pair_enabled
+        or not trend_enabled
     ):
         raise SystemExit(
             "Неполную baseline-схему нельзя публиковать через этот entrypoint."
