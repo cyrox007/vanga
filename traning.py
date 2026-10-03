@@ -21,112 +21,43 @@ from src.logger import setup_logger
 logger = setup_logger(__name__)
 
 # Production training использует расширенный P2 generator. Сам train_model остаётся
-# общим disk-first engine, поэтому baseline v5-v9 и candidate v10 проходят один и
+# общим disk-first engine, поэтому baseline v5-v10 и candidate v11 проходят один и
 # тот же temporal split, CatBoost-конфигурацию и quality gate.
 train_model_module.get_batches = creative_get_batches
 
-# Нумерация схем описывает фактический feature contract:
-# v5 — baseline без coverage;
-# v6 — coverage known/prior_count;
-# v7 — genre/recent/director_is_writer;
-# v8 — история совместной работы director↔writer;
-# v9 — история director↔actor для первых трёх актёров target-фильма;
-# v10 — recent trend режиссёра/сценариста: последние 3 против предыдущих 3.
 BASELINE_SCHEMA_VERSION = 5
 COVERAGE_SCHEMA_VERSION = 6
 CREATIVE_TEAM_SCHEMA_VERSION = 7
 DIRECTOR_WRITER_PAIR_SCHEMA_VERSION = 8
 DIRECTOR_ACTOR_PAIR_SCHEMA_VERSION = 9
 CREATIVE_TREND_SCHEMA_VERSION = 10
+DIRECTOR_TEAM_SCHEMA_VERSION = 11
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Обучение CatBoost-модели Vanga",
-    )
+    parser = argparse.ArgumentParser(description="Обучение CatBoost-модели Vanga")
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--evaluation-only", action="store_true")
+    parser.add_argument("--without-coverage-features", action="store_true")
+    parser.add_argument("--without-creative-team-features", action="store_true")
+    parser.add_argument("--without-director-writer-pair-features", action="store_true")
+    parser.add_argument("--without-director-actor-pair-features", action="store_true")
+    parser.add_argument("--without-creative-trend-features", action="store_true")
     parser.add_argument(
-        "--smoke",
+        "--without-director-team-features",
         action="store_true",
-        help=(
-            "короткий полный проход по данным с 50 итерациями без публикации "
-            "models/current.json"
-        ),
+        help="отключить multi-director block и воспроизвести schema v10",
     )
-    parser.add_argument(
-        "--evaluation-only",
-        action="store_true",
-        help=(
-            "выполнить полноценное обучение и оценку, но не публиковать "
-            "новое поколение в models/current.json"
-        ),
-    )
-    parser.add_argument(
-        "--without-coverage-features",
-        action="store_true",
-        help=(
-            "отключить *_known и *_prior_count и воспроизвести baseline feature "
-            "set schema v5 на том же актуальном IMDb dataset"
-        ),
-    )
-    parser.add_argument(
-        "--without-creative-team-features",
-        action="store_true",
-        help=(
-            "отключить P2 Creative Team block и воспроизвести schema v6: "
-            "coverage включён, genre/recent/director_is_writer отсутствуют"
-        ),
-    )
-    parser.add_argument(
-        "--without-director-writer-pair-features",
-        action="store_true",
-        help=(
-            "отключить историю пары режиссёр-сценарист и воспроизвести schema v7"
-        ),
-    )
-    parser.add_argument(
-        "--without-director-actor-pair-features",
-        action="store_true",
-        help=(
-            "отключить историю режиссёр-актёр для первых трёх актёров и "
-            "воспроизвести schema v8"
-        ),
-    )
-    parser.add_argument(
-        "--without-creative-trend-features",
-        action="store_true",
-        help=(
-            "отключить recent trend режиссёра/сценариста и воспроизвести schema v9"
-        ),
-    )
-    parser.add_argument(
-        "--iterations",
-        type=int,
-        default=None,
-        help="число итераций CatBoost; по умолчанию 1500, в smoke-режиме 50",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=10000,
-        help="размер батча подготовки признаков",
-    )
-    parser.add_argument(
-        "--max-batches",
-        type=int,
-        default=None,
-        help="ограничить число батчей только для отладки",
-    )
+    parser.add_argument("--iterations", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=10000)
+    parser.add_argument("--max-batches", type=int, default=None)
     return parser
 
 
 def _save_temporary_artifact(model, kind: str) -> tuple[Path, int]:
-    """Сериализует непубликуемую модель и возвращает путь и размер."""
     root = Path(config.ABSPATH) / "temp" / kind
     root.mkdir(parents=True, exist_ok=True)
-    path = root / (
-        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        + "-model.cbm"
-    )
+    path = root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-model.cbm")
     model.save_model(str(path), format="cbm")
     return path, path.stat().st_size
 
@@ -143,26 +74,15 @@ def _log_evaluation_summary(metadata: dict, size_bytes: int) -> None:
     logger.info("=" * 60)
     logger.info("РЕЗУЛЬТАТ НЕПУБЛИКУЕМОЙ ОЦЕНКИ")
     logger.info("schema_version=%s", metadata.get("schema_version"))
-    logger.info(
-        "coverage_features_version=%s",
-        metadata.get("coverage_features_version"),
-    )
-    logger.info(
-        "creative_team_features_version=%s",
-        metadata.get("creative_team_features_version"),
-    )
-    logger.info(
-        "director_writer_pair_features_version=%s",
-        metadata.get("director_writer_pair_features_version"),
-    )
-    logger.info(
-        "director_actor_pair_features_version=%s",
-        metadata.get("director_actor_pair_features_version"),
-    )
-    logger.info(
-        "creative_trend_features_version=%s",
-        metadata.get("creative_trend_features_version"),
-    )
+    for name in (
+        "coverage_features_version",
+        "creative_team_features_version",
+        "director_writer_pair_features_version",
+        "director_actor_pair_features_version",
+        "creative_trend_features_version",
+        "director_team_features_version",
+    ):
+        logger.info("%s=%s", name, metadata.get(name))
     logger.info("MAE=%s", _metric_text(metadata, "test_mae"))
     logger.info("RMSE=%s", _metric_text(metadata, "test_rmse"))
     logger.info("R²=%s", _metric_text(metadata, "test_r2"))
@@ -179,10 +99,7 @@ def _log_evaluation_summary(metadata: dict, size_bytes: int) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-
-    iterations = args.iterations
-    if iterations is None:
-        iterations = 50 if args.smoke else 1500
+    iterations = args.iterations if args.iterations is not None else (50 if args.smoke else 1500)
     if iterations < 1:
         raise SystemExit("--iterations должно быть положительным числом")
     if args.batch_size < 1:
@@ -192,47 +109,39 @@ def main(argv: list[str] | None = None) -> None:
 
     coverage_enabled = not args.without_coverage_features
     creative_enabled = coverage_enabled and not args.without_creative_team_features
-    writer_pair_enabled = (
-        creative_enabled and not args.without_director_writer_pair_features
-    )
-    actor_pair_enabled = (
-        writer_pair_enabled and not args.without_director_actor_pair_features
-    )
-    trend_enabled = (
-        actor_pair_enabled and not args.without_creative_trend_features
-    )
+    writer_pair_enabled = creative_enabled and not args.without_director_writer_pair_features
+    actor_pair_enabled = writer_pair_enabled and not args.without_director_actor_pair_features
+    trend_enabled = actor_pair_enabled and not args.without_creative_trend_features
+    director_team_enabled = trend_enabled and not args.without_director_team_features
 
-    # Любая неполная схема теперь является только baseline для smoke/evaluation.
-    # Обычный production retrain должен идти через полный candidate v10.
-    if not trend_enabled and not args.smoke and not args.evaluation_only:
-        if not coverage_enabled:
-            baseline_name = "Baseline schema v5"
-        elif not creative_enabled:
-            baseline_name = "Baseline schema v6 без Creative Team"
-        elif not writer_pair_enabled:
-            baseline_name = "Baseline schema v7 без director-writer pair"
-        elif not actor_pair_enabled:
-            baseline_name = "Baseline schema v8 без director-actor pair"
-        else:
-            baseline_name = "Baseline schema v9 без creative trend"
+    if not director_team_enabled and not args.smoke and not args.evaluation_only:
+        labels = [
+            (coverage_enabled, "Baseline schema v5"),
+            (creative_enabled, "Baseline schema v6"),
+            (writer_pair_enabled, "Baseline schema v7"),
+            (actor_pair_enabled, "Baseline schema v8"),
+            (trend_enabled, "Baseline schema v9"),
+        ]
+        baseline_name = "Baseline schema v10 без director-team"
+        for enabled, label in labels:
+            if not enabled:
+                baseline_name = label
+                break
         raise SystemExit(
             f"{baseline_name} нельзя публиковать через этот entrypoint. "
             "Используйте --evaluation-only или --smoke."
         )
 
-    os.environ["VANGA_TRAIN_COVERAGE_FEATURES"] = "1" if coverage_enabled else "0"
-    os.environ["VANGA_TRAIN_CREATIVE_TEAM_FEATURES"] = (
-        "1" if creative_enabled else "0"
-    )
-    os.environ["VANGA_TRAIN_DIRECTOR_WRITER_PAIR_FEATURES"] = (
-        "1" if writer_pair_enabled else "0"
-    )
-    os.environ["VANGA_TRAIN_DIRECTOR_ACTOR_PAIR_FEATURES"] = (
-        "1" if actor_pair_enabled else "0"
-    )
-    os.environ["VANGA_TRAIN_CREATIVE_TREND_FEATURES"] = (
-        "1" if trend_enabled else "0"
-    )
+    env = {
+        "VANGA_TRAIN_COVERAGE_FEATURES": coverage_enabled,
+        "VANGA_TRAIN_CREATIVE_TEAM_FEATURES": creative_enabled,
+        "VANGA_TRAIN_DIRECTOR_WRITER_PAIR_FEATURES": writer_pair_enabled,
+        "VANGA_TRAIN_DIRECTOR_ACTOR_PAIR_FEATURES": actor_pair_enabled,
+        "VANGA_TRAIN_CREATIVE_TREND_FEATURES": trend_enabled,
+        "VANGA_TRAIN_DIRECTOR_TEAM_FEATURES": director_team_enabled,
+    }
+    for name, enabled in env.items():
+        os.environ[name] = "1" if enabled else "0"
 
     if args.smoke:
         mode = "SMOKE (без публикации)"
@@ -241,8 +150,10 @@ def main(argv: list[str] | None = None) -> None:
     else:
         mode = "FULL"
 
-    if trend_enabled:
-        schema_label = "candidate v10"
+    if director_team_enabled:
+        schema_label = "candidate v11"
+    elif trend_enabled:
+        schema_label = "baseline v10"
     elif actor_pair_enabled:
         schema_label = "baseline v9"
     elif writer_pair_enabled:
@@ -257,16 +168,10 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("=" * 60)
     logger.info("ЗАПУСК ОБУЧЕНИЯ CATBOOST")
     logger.info(
-        "Режим: %s; schema=%s; coverage=%s; creative_team=%s; "
-        "director_writer_pair=%s; director_actor_pair=%s; trend=%s; "
-        "iterations=%s; batch_size=%s; max_batches=%s",
+        "Режим: %s; schema=%s; director_team=%s; iterations=%s; batch_size=%s; max_batches=%s",
         mode,
         schema_label,
-        "on" if coverage_enabled else "off",
-        "on" if creative_enabled else "off",
-        "on" if writer_pair_enabled else "off",
-        "on" if actor_pair_enabled else "off",
-        "on" if trend_enabled else "off",
+        "on" if director_team_enabled else "off",
         iterations,
         args.batch_size,
         args.max_batches,
@@ -274,33 +179,35 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("=" * 60)
 
     genres = get_all_genres()
-    logger.info(f"Найдено жанров: {len(genres)}")
-
     model, metadata = train_catboost_model(
         genres,
         batch_size=args.batch_size,
         max_batches=args.max_batches,
         iterations=iterations,
     )
-    if trend_enabled:
-        metadata["schema_version"] = CREATIVE_TREND_SCHEMA_VERSION
+
+    if director_team_enabled:
+        schema_version = DIRECTOR_TEAM_SCHEMA_VERSION
+    elif trend_enabled:
+        schema_version = CREATIVE_TREND_SCHEMA_VERSION
     elif actor_pair_enabled:
-        metadata["schema_version"] = DIRECTOR_ACTOR_PAIR_SCHEMA_VERSION
+        schema_version = DIRECTOR_ACTOR_PAIR_SCHEMA_VERSION
     elif writer_pair_enabled:
-        metadata["schema_version"] = DIRECTOR_WRITER_PAIR_SCHEMA_VERSION
+        schema_version = DIRECTOR_WRITER_PAIR_SCHEMA_VERSION
     elif creative_enabled:
-        metadata["schema_version"] = CREATIVE_TEAM_SCHEMA_VERSION
+        schema_version = CREATIVE_TEAM_SCHEMA_VERSION
     elif coverage_enabled:
-        metadata["schema_version"] = COVERAGE_SCHEMA_VERSION
+        schema_version = COVERAGE_SCHEMA_VERSION
     else:
-        metadata["schema_version"] = BASELINE_SCHEMA_VERSION
+        schema_version = BASELINE_SCHEMA_VERSION
+
+    metadata["schema_version"] = schema_version
     metadata["coverage_features_version"] = 1 if coverage_enabled else 0
     metadata["creative_team_features_version"] = 1 if creative_enabled else 0
-    metadata["director_writer_pair_features_version"] = (
-        1 if writer_pair_enabled else 0
-    )
+    metadata["director_writer_pair_features_version"] = 1 if writer_pair_enabled else 0
     metadata["director_actor_pair_features_version"] = 1 if actor_pair_enabled else 0
     metadata["creative_trend_features_version"] = 1 if trend_enabled else 0
+    metadata["director_team_features_version"] = 1 if director_team_enabled else 0
 
     interpret_model(model, metadata)
 
@@ -309,34 +216,14 @@ def main(argv: list[str] | None = None) -> None:
         kind = "smoke" if args.smoke else "evaluation"
         try:
             artifact_path, size_bytes = _save_temporary_artifact(model, kind)
-            logger.info(
-                "%s: модель сериализована, размер=%.1f МБ, путь=%s",
-                kind.upper(),
-                size_bytes / 1024 / 1024,
-                artifact_path,
-            )
             _log_evaluation_summary(metadata, size_bytes)
         finally:
             if artifact_path is not None:
                 shutil.rmtree(artifact_path.parent, ignore_errors=True)
-        if args.smoke:
-            logger.info("SMOKE-ПРОВЕРКА ЗАВЕРШЕНА УСПЕШНО")
-        else:
-            logger.info("НЕПУБЛИКУЕМАЯ ОЦЕНКА ЗАВЕРШЕНА УСПЕШНО")
         return
 
-    # Defense in depth: baseline v5-v9 не должен попасть в публикацию даже если
-    # раннюю валидацию аргументов в будущем случайно изменят.
-    if (
-        not coverage_enabled
-        or not creative_enabled
-        or not writer_pair_enabled
-        or not actor_pair_enabled
-        or not trend_enabled
-    ):
-        raise SystemExit(
-            "Неполную baseline-схему нельзя публиковать через этот entrypoint."
-        )
+    if not all((coverage_enabled, creative_enabled, writer_pair_enabled, actor_pair_enabled, trend_enabled, director_team_enabled)):
+        raise SystemExit("Неполную baseline-схему нельзя публиковать через этот entrypoint.")
 
     save_trained_model(model, metadata)
     logger.info("ОБУЧЕНИЕ ЗАВЕРШЕНО УСПЕШНО")
