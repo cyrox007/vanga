@@ -20,6 +20,13 @@ class Config:
         "VANGA_ADAPTATION_DB",
         str(Path(ABSPATH) / "adaptation.duckdb"),
     )
+    # Pre-release facts о первоисточнике хранятся отдельно от retrospective
+    # Adaptation Analyzer. Здесь допустимы только facts/provenance, доступные
+    # наблюдателю на соответствующий cutoff.
+    SOURCE_CONTEXT_DB_PATH = os.getenv(
+        "VANGA_SOURCE_CONTEXT_DB",
+        str(Path(ABSPATH) / "source_context.duckdb"),
+    )
     # Production Context хранит только датированные факты с provenance. Он
     # отделён от IMDb и от модели: в training попадут только признаки,
     # рассчитанные as-of конкретной даты и прошедшие отдельный temporal ablation.
