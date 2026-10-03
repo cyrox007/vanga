@@ -70,6 +70,8 @@ def _train_variant(
     ):
         os.environ[name] = "1"
     os.environ["VANGA_TRAIN_FULL_CAST_FEATURES"] = "1" if full_cast_enabled else "0"
+    # v13 принудительно выключен, чтобы исторический v11→v12 ablation был чистым.
+    os.environ["VANGA_TRAIN_CAST_PAIR_FEATURES"] = "0"
 
     logger.info("=" * 60)
     logger.info(
@@ -99,6 +101,7 @@ def _train_variant(
         result["creative_trend_features_version"] = 1
         result["director_team_features_version"] = 1
         result["full_cast_features_version"] = 1 if full_cast_enabled else 0
+        result["cast_pair_features_version"] = 0
         return result
     finally:
         del model
@@ -170,13 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    logger.info("=" * 60)
-    logger.info("FULL CAST ABLATION ЗАВЕРШЁН")
-    logger.info("Baseline v11 MAE: %.6f", baseline["test_mae"])
-    logger.info("Candidate v12 MAE: %.6f", candidate["test_mae"])
-    logger.info("Δ MAE: %+.6f", comparison["delta_mae"])
-    logger.info("Активная модель НЕ ИЗМЕНЕНА")
-    logger.info("=" * 60)
+    logger.info("FULL CAST ABLATION ЗАВЕРШЁН; активная модель НЕ ИЗМЕНЕНА")
     return 0 if comparison["non_regression_passed"] else 2
 
 
