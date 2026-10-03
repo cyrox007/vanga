@@ -18,10 +18,11 @@ from src.production_identity import (
 class ProductionContextMaterializer:
     """Материализует cached Wikidata production metadata в factual registry.
 
-    Важный temporal контракт: ``known_at`` равен фактическому ``fetched_at``.
-    Materializer никогда не backdate-ит текущий Wikidata факт к дате релиза.
-    При повторном наблюдении сохраняется самое раннее уже зафиксированное
-    ``known_at``, поэтому повторный sync не делает старый факт искусственно новым.
+    Temporal-контракт:
+    - новый relation получает ``known_at = fetched_at`` текущего cache snapshot;
+    - relation не backdate-ится к release date;
+    - уже существующий exact link/alias сохраняет первое ``known_at`` и source;
+    - каждый Wikidata fetch хранится отдельным provenance source snapshot.
     """
 
     STATE_KEY = "wikidata_production_materializer_cursor"
@@ -137,50 +138,49 @@ class ProductionContextMaterializer:
             or "Unknown"
         ).strip()
 
-    def _earliest_timestamp(
+    def _earliest_project_timestamp(
         self,
         *,
-        table: str,
-        id_column: str,
-        id_value: str,
-        timestamp_column: str,
+        project_id: str,
         observed_at: datetime,
     ) -> datetime:
-        allowed = {
-            ("production_projects", "project_id", "identity_known_at"),
-            ("project_entity_links", "link_id", "known_at"),
-            ("project_group_links", "link_id", "known_at"),
-        }
-        if (table, id_column, timestamp_column) not in allowed:
-            raise ValueError("Недопустимая таблица для temporal merge")
         row = self.store.conn.execute(
-            f"SELECT {timestamp_column} FROM {table} WHERE {id_column} = ? LIMIT 1",
-            [id_value],
+            "SELECT identity_known_at FROM production_projects WHERE project_id = ? LIMIT 1",
+            [project_id],
         ).fetchone()
         existing = row[0] if row else None
         return min(existing, observed_at) if existing is not None else observed_at
 
-    def _earliest_alias_timestamp(
+    def _link_exists(self, *, table: str, id_column: str, id_value: str) -> bool:
+        allowed = {
+            ("project_entity_links", "link_id"),
+            ("project_group_links", "link_id"),
+        }
+        if (table, id_column) not in allowed:
+            raise ValueError("Недопустимая link-таблица")
+        return self.store.conn.execute(
+            f"SELECT 1 FROM {table} WHERE {id_column} = ? LIMIT 1",
+            [id_value],
+        ).fetchone() is not None
+
+    def _alias_exists(
         self,
         *,
         table: str,
         target_column: str,
         target_id: str,
         alias_key: str,
-        observed_at: datetime,
-    ) -> datetime:
+    ) -> bool:
         allowed = {
             ("production_entity_aliases", "entity_id"),
             ("production_group_aliases", "group_id"),
         }
         if (table, target_column) not in allowed:
-            raise ValueError("Недопустимая alias-таблица для temporal merge")
-        row = self.store.conn.execute(
-            f"SELECT known_at FROM {table} WHERE alias_key = ? AND {target_column} = ? LIMIT 1",
+            raise ValueError("Недопустимая alias-таблица")
+        return self.store.conn.execute(
+            f"SELECT 1 FROM {table} WHERE alias_key = ? AND {target_column} = ? LIMIT 1",
             [alias_key, target_id],
-        ).fetchone()
-        existing = row[0] if row else None
-        return min(existing, observed_at) if existing is not None else observed_at
+        ).fetchone() is not None
 
     def _upsert_aliases(
         self,
@@ -202,34 +202,34 @@ class ProductionContextMaterializer:
                 continue
             alias_key = normalize_identity_alias(alias)
             if target_kind == "entity":
-                known_at = self._earliest_alias_timestamp(
+                if self._alias_exists(
                     table="production_entity_aliases",
                     target_column="entity_id",
                     target_id=target_id,
                     alias_key=alias_key,
-                    observed_at=observed_at,
-                )
+                ):
+                    continue
                 self.identity.add_entity_alias(
                     {
                         "entity_id": target_id,
                         "alias": alias,
-                        "known_at": known_at,
+                        "known_at": observed_at,
                         "source_id": source_id,
                     }
                 )
             else:
-                known_at = self._earliest_alias_timestamp(
+                if self._alias_exists(
                     table="production_group_aliases",
                     target_column="group_id",
                     target_id=target_id,
                     alias_key=alias_key,
-                    observed_at=observed_at,
-                )
+                ):
+                    continue
                 self.identity.add_group_alias(
                     {
                         "group_id": target_id,
                         "alias": alias,
-                        "known_at": known_at,
+                        "known_at": observed_at,
                         "source_id": source_id,
                     }
                 )
@@ -264,13 +264,12 @@ class ProductionContextMaterializer:
             observed_at=observed_at,
         )
         link_id = f"wikidata:{imdb_id}:{role}:{qid}"
-        known_at = self._earliest_timestamp(
+        if self._link_exists(
             table="project_entity_links",
             id_column="link_id",
             id_value=link_id,
-            timestamp_column="known_at",
-            observed_at=observed_at,
-        )
+        ):
+            return
         self.store.link_entity(
             {
                 "link_id": link_id,
@@ -278,7 +277,7 @@ class ProductionContextMaterializer:
                 "entity_id": entity_id,
                 "role": role,
                 "stage": "unknown",
-                "known_at": known_at,
+                "known_at": observed_at,
                 "source_id": source_id,
                 "note": "Автоматически материализовано из cached Wikidata; known_at не backdate-ится.",
             }
@@ -312,19 +311,18 @@ class ProductionContextMaterializer:
             observed_at=observed_at,
         )
         link_id = f"wikidata:{imdb_id}:franchise:{qid}"
-        known_at = self._earliest_timestamp(
+        if self._link_exists(
             table="project_group_links",
             id_column="link_id",
             id_value=link_id,
-            timestamp_column="known_at",
-            observed_at=observed_at,
-        )
+        ):
+            return
         self.identity.link_group(
             {
                 "link_id": link_id,
                 "project_id": imdb_id,
                 "group_id": group_id,
-                "known_at": known_at,
+                "known_at": observed_at,
                 "source_id": source_id,
                 "note": (
                     "Wikidata P179 (part of the series) материализуется только как franchise candidate; "
@@ -340,7 +338,8 @@ class ProductionContextMaterializer:
         if observed_at.tzinfo is None:
             observed_at = observed_at.replace(tzinfo=timezone.utc)
         observed_at = observed_at.astimezone(timezone.utc)
-        source_id = f"wikidata:{qid}"
+        snapshot_key = observed_at.strftime("%Y%m%dT%H%M%SZ")
+        source_id = f"wikidata:{qid}:{snapshot_key}"
         self.store.upsert_source(
             {
                 "source_id": source_id,
@@ -357,7 +356,7 @@ class ProductionContextMaterializer:
         )
 
         existing = self.store.conn.execute(
-            "SELECT release_at, identity_known_at FROM production_projects WHERE project_id = ?",
+            "SELECT release_at FROM production_projects WHERE project_id = ?",
             [imdb_id],
         ).fetchone()
         release_at = (
@@ -365,11 +364,8 @@ class ProductionContextMaterializer:
             if existing and existing[0] is not None
             else self._parse_release_at(row["wikidata"])
         )
-        identity_known_at = self._earliest_timestamp(
-            table="production_projects",
-            id_column="project_id",
-            id_value=imdb_id,
-            timestamp_column="identity_known_at",
+        identity_known_at = self._earliest_project_timestamp(
+            project_id=imdb_id,
             observed_at=observed_at,
         )
         self.store.upsert_project(
