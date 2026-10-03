@@ -20,6 +20,13 @@ class Config:
         "VANGA_ADAPTATION_DB",
         str(Path(ABSPATH) / "adaptation.duckdb"),
     )
+    # Production Context хранит только датированные факты с provenance. Он
+    # отделён от IMDb и от модели: в training попадут только признаки,
+    # рассчитанные as-of конкретной даты и прошедшие отдельный temporal ablation.
+    PRODUCTION_CONTEXT_DB_PATH = os.getenv(
+        "VANGA_PRODUCTION_CONTEXT_DB",
+        str(Path(ABSPATH) / "production_context.duckdb"),
+    )
     TRAIN_MIN_FREE_DISK_GB = max(
         1.0,
         float(os.getenv("VANGA_TRAIN_MIN_FREE_DISK_GB", "3")),
