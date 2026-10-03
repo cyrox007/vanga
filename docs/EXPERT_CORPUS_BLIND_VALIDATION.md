@@ -100,6 +100,32 @@ Foundation сравнивает наличие класса:
 
 Следующий уровень сможет отдельно сравнивать evidence/reference и конкретные causal chains.
 
+## Молчание эксперта не является отрицательной разметкой
+
+Экспертный обзор не является исчерпывающей аннотацией всего фильма. Если эксперт не сказал ничего о `worldbuilding`, из этого нельзя делать вывод `worldbuilding_problem = false`.
+
+Поэтому для конкретной пары `expert × case` оцениваются только dimensions, которые этот эксперт действительно размечал допустимыми gold claims.
+
+Пример:
+
+- BadComedian отметил `motivation/rewritten`;
+- Analyzer дополнительно нашёл `worldbuilding/removed`;
+- если у BadComedian для этого case нет ни одного gold claim по `worldbuilding`, находка не становится FP;
+- она учитывается как `unscored_prediction`.
+
+False positive возникает только внутри dimension, которая действительно размечена этим экспертом для этого case. Например, если gold содержит `motivation/rewritten`, а Analyzer дополнительно утверждает `motivation/added`, второй класс может быть FP.
+
+Отчёт явно фиксирует:
+
+```text
+silence_is_negative = false
+score_only_dimensions_annotated_by_expert_for_case = true
+```
+
+и возвращает `unscored_prediction_count` отдельно от FP.
+
+Это особенно важно при сравнении Красного Циника и BadComedian: различие их тематического фокуса не должно искусственно превращаться в несогласие или снижать precision другого профиля.
+
 ## Метрики
 
 Считаются:
@@ -108,11 +134,12 @@ Foundation сравнивает наличие класса:
 - precision;
 - recall;
 - F1;
+- количество `unscored` predictions;
 - overall detection metrics;
 - отдельно по каждому expert profile;
 - отдельно по dimension.
 
-Системный prediction один и тот же для всех экспертов. Для конкретного эксперта он сравнивается только на тех cases, где у этого эксперта есть допустимая gold-разметка.
+Системный prediction один и тот же для всех экспертов. Для конкретного эксперта он сравнивается только на тех cases и dimensions, где у этого эксперта есть допустимая gold-разметка.
 
 Отчёт явно содержит:
 
