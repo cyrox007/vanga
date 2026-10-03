@@ -4,6 +4,7 @@ duckdb>=1.1,<2
 numpy>=2.0,<3
 pandas>=2.2,<4
 scikit-learn>=1.5,<2
+pytz>=2024.1,<2027
 
 # HTTP API
 Flask>=3.1,<4
