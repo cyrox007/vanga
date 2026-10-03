@@ -33,8 +33,9 @@ from src.train_model import train_catboost_model
 logger = setup_logger(__name__)
 
 # Весь ablation должен проходить через один и тот же disk-first training engine.
-# Меняется только P2 feature block; coverage schema v6 остаётся включённой в обеих
-# половинах сравнения.
+# Меняется только P2 Creative Team block; coverage schema v6 остаётся включённой
+# в обеих половинах сравнения. Pair block schema v8 здесь принудительно выключен,
+# чтобы исторический v6→v7 эксперимент оставался воспроизводимым.
 train_model_module.get_batches = creative_get_batches
 
 
@@ -73,9 +74,10 @@ def _train_variant(
     os.environ["VANGA_TRAIN_CREATIVE_TEAM_FEATURES"] = (
         "1" if creative_enabled else "0"
     )
+    os.environ["VANGA_TRAIN_DIRECTOR_WRITER_PAIR_FEATURES"] = "0"
     logger.info("=" * 60)
     logger.info(
-        "CREATIVE TEAM ABLATION: старт %s; creative_team=%s",
+        "CREATIVE TEAM ABLATION: старт %s; creative_team=%s; pair=off",
         label,
         "on" if creative_enabled else "off",
     )
@@ -98,6 +100,7 @@ def _train_variant(
             model_size_bytes=size_bytes,
         )
         result["creative_team_features_version"] = 1 if creative_enabled else 0
+        result["director_writer_pair_features_version"] = 0
         logger.info(
             "ABLATION %s: MAE=%.6f RMSE=%.6f R²=%.6f features=%s size=%.2f МБ",
             label,
