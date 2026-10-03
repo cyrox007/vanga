@@ -3,7 +3,7 @@
 После PR #70 и #71 в коде существовали два последовательных, но независимых контракта:
 
 - `GenericProxyAblationGate` — строгая проверка temporal audit, feature purity, dataset/holdout parity и MAE;
-- `ProxyAblationResultGate` — отдельный result contract с собственным вычислением verdict и persistence.
+- legacy `ProxyAblationResultGate.evaluate()` — отдельный result contract, который повторно вычислял verdict.
 
 Чтобы не получить два разных источника истины, канонический pipeline использует **только решение `GenericProxyAblationGate`**.
 
@@ -21,7 +21,7 @@ ProxyAblationPipeline
 proxy_ablation_results + hypothesis status
 ```
 
-`ProxyAblationResultGate.evaluate()` сохраняется для обратной совместимости со старыми исследовательскими артефактами, но новый workflow не использует его для повторного решения.
+Legacy `ProxyAblationResultGate.evaluate()` теперь fail-fast отключён. Класс сохраняет только compatibility schema/history для уже созданных research artifacts. Старый CLI `scripts/proxy_ablation_gate.py evaluate` также отключён и направляет на canonical pipeline.
 
 ## Что проверяет Generic gate
 
@@ -67,6 +67,8 @@ comparison.passed = true  -> accepted
 comparison.passed = false -> rejected
 ```
 
+`accepted` здесь означает, что preregistered research-ablation прошёл свой контракт. Это **не** означает production publication или доказанную причинность.
+
 При rejection сохраняется технический reason из Generic gate.
 
 ## Idempotency
@@ -90,7 +92,7 @@ Insert result и update hypothesis status выполняются в одной D
 - не заменяет общий production quality gate;
 - не делает retrospective evidence входным feature.
 
-В результате pipeline возвращает:
+Pipeline возвращает:
 
 ```json
 {
@@ -114,7 +116,7 @@ python scripts/proxy_ablation_pipeline.py \
 
 Exit codes:
 
-- `0` — Generic gate passed, hypothesis accepted;
+- `0` — Generic gate passed, research hypothesis accepted;
 - `3` — корректный experiment, но Generic gate rejected;
 - `2` — invalid contract / temporal leakage / feature purity / fingerprint mismatch.
 
