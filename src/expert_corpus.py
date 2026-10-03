@@ -36,8 +36,7 @@ EXPERT_CHANGE_TYPES = set(CHANGE_TYPES) | {
     "setup_without_payoff",
     "payoff_without_setup",
 }
-
-_FORBIDDEN_FULL_TEXT_FIELDS = {
+FORBIDDEN_FULL_TEXT_FIELDS = {
     "text",
     "full_text",
     "transcript",
@@ -74,34 +73,34 @@ def _clean(
 
 def _confidence(value: Any, *, field_name: str = "confidence") -> float:
     try:
-        parsed = float(value)
+        result = float(value)
     except (TypeError, ValueError) as exc:
         raise ExpertCorpusValidationError(f"{field_name} должен быть числом") from exc
-    if not 0.0 <= parsed <= 1.0:
+    if not 0.0 <= result <= 1.0:
         raise ExpertCorpusValidationError(f"{field_name} должен быть в диапазоне 0..1")
-    return parsed
+    return result
 
 
 def _parse_datetime(value: Any, *, field_name: str, required: bool = False):
-    if value in {None, ""}:
+    if value is None or value == "":
         if required:
             raise ExpertCorpusValidationError(f"{field_name} обязателен")
         return None
     if isinstance(value, datetime):
-        parsed = value
+        result = value
     else:
         text = str(value).strip()
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
         try:
-            parsed = datetime.fromisoformat(text)
+            result = datetime.fromisoformat(text)
         except ValueError as exc:
             raise ExpertCorpusValidationError(
                 f"{field_name} должен быть ISO datetime"
             ) from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=timezone.utc)
+    return result.astimezone(timezone.utc)
 
 
 def _validate_url(value: Any) -> str:
@@ -112,20 +111,20 @@ def _validate_url(value: Any) -> str:
 
 
 def _reject_full_text(payload: dict[str, Any], *, entity: str) -> None:
-    forbidden = sorted(
-        key
-        for key in _FORBIDDEN_FULL_TEXT_FIELDS
-        if key in payload and payload.get(key) not in {None, ""}
-    )
+    forbidden = []
+    for key in FORBIDDEN_FULL_TEXT_FIELDS:
+        value = payload.get(key)
+        if value is not None and value != "":
+            forbidden.append(key)
     if forbidden:
         raise ExpertCorpusValidationError(
-            f"{entity}: полные тексты/транскрипты не хранятся в corpus registry; "
-            "запрещённые поля: " + ", ".join(forbidden)
+            f"{entity}: corpus registry не хранит полные тексты/транскрипты; "
+            "запрещённые поля: " + ", ".join(sorted(forbidden))
         )
 
 
-def _json_list(value: Any, *, field_name: str, item_limit: int = 120) -> str:
-    if value in {None, ""}:
+def _json_string_list(value: Any, *, field_name: str, item_limit: int) -> str:
+    if value is None or value == "":
         rows: list[str] = []
     else:
         if not isinstance(value, (list, tuple, set)):
@@ -140,12 +139,11 @@ def _json_list(value: Any, *, field_name: str, item_limit: int = 120) -> str:
 
 
 class ExpertCorpusStore:
-    """Структурированный retrospective corpus без хранения полных обзоров.
+    """Retrospective corpus ссылок и наших структурированных аннотаций.
 
-    Corpus физически отделён от prediction model. Он хранит ссылки на публичные
-    материалы и наши структурированные аннотации, а не транскрипты. Любой
-    перенос найденной закономерности в pre-release Vanga требует отдельного
-    proxy + temporal ablation.
+    В registry намеренно нет полей для полного текста/транскрипта стороннего
+    материала. Observation, structural consequence и expert interpretation
+    хранятся раздельно; supporting/contradicting evidence — отдельными строками.
     """
 
     def __init__(self, path: Path | str | None = None) -> None:
@@ -163,7 +161,7 @@ class ExpertCorpusStore:
         self.conn.close()
 
     def _ensure_schema(self) -> None:
-        self.conn.execute(
+        statements = [
             """
             CREATE TABLE IF NOT EXISTS expert_profiles (
                 expert_id VARCHAR PRIMARY KEY,
@@ -173,9 +171,7 @@ class ExpertCorpusStore:
                 created_at TIMESTAMP WITH TIME ZONE NOT NULL,
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL
             )
-            """
-        )
-        self.conn.execute(
+            """,
             """
             CREATE TABLE IF NOT EXISTS expert_cases (
                 case_id VARCHAR PRIMARY KEY,
@@ -188,9 +184,7 @@ class ExpertCorpusStore:
                 created_at TIMESTAMP WITH TIME ZONE NOT NULL,
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL
             )
-            """
-        )
-        self.conn.execute(
+            """,
             """
             CREATE TABLE IF NOT EXISTS expert_materials (
                 material_id VARCHAR PRIMARY KEY,
@@ -204,9 +198,7 @@ class ExpertCorpusStore:
                 created_at TIMESTAMP WITH TIME ZONE NOT NULL,
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL
             )
-            """
-        )
-        self.conn.execute(
+            """,
             """
             CREATE TABLE IF NOT EXISTS expert_case_materials (
                 link_id VARCHAR PRIMARY KEY,
@@ -214,15 +206,11 @@ class ExpertCorpusStore:
                 material_id VARCHAR NOT NULL,
                 created_at TIMESTAMP WITH TIME ZONE NOT NULL
             )
-            """
-        )
-        self.conn.execute(
+            """,
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_expert_case_material_unique
             ON expert_case_materials(case_id, material_id)
-            """
-        )
-        self.conn.execute(
+            """,
             """
             CREATE TABLE IF NOT EXISTS expert_claims (
                 claim_id VARCHAR PRIMARY KEY,
@@ -242,21 +230,9 @@ class ExpertCorpusStore:
                 created_at TIMESTAMP WITH TIME ZONE NOT NULL,
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL
             )
-            """
-        )
-        self.conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_expert_claims_case
-            ON expert_claims(case_id)
-            """
-        )
-        self.conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_expert_claims_material
-            ON expert_claims(material_id)
-            """
-        )
-        self.conn.execute(
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_expert_claims_case ON expert_claims(case_id)",
+            "CREATE INDEX IF NOT EXISTS idx_expert_claims_material ON expert_claims(material_id)",
             """
             CREATE TABLE IF NOT EXISTS expert_evidence (
                 evidence_id VARCHAR PRIMARY KEY,
@@ -270,21 +246,17 @@ class ExpertCorpusStore:
                 created_at TIMESTAMP WITH TIME ZONE NOT NULL,
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL
             )
-            """
-        )
-        self.conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_expert_evidence_claim
-            ON expert_evidence(claim_id)
-            """
-        )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_expert_evidence_claim ON expert_evidence(claim_id)",
+        ]
+        for statement in statements:
+            self.conn.execute(statement)
 
     def _exists(self, table: str, column: str, value: str) -> bool:
-        row = self.conn.execute(
+        return self.conn.execute(
             f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1",
             [value],
-        ).fetchone()
-        return row is not None
+        ).fetchone() is not None
 
     def _require(self, table: str, column: str, value: str, *, entity: str) -> None:
         if not self._exists(table, column, value):
@@ -301,7 +273,9 @@ class ExpertCorpusStore:
             limit=300,
             required=True,
         )
-        focus_json = _json_list(payload.get("focus") or [], field_name="focus", item_limit=100)
+        focus_json = _json_string_list(
+            payload.get("focus"), field_name="focus", item_limit=100
+        )
         note = _clean(payload.get("note"), field_name="note", limit=2000) or None
         now = _now()
         self.conn.execute(
@@ -335,7 +309,7 @@ class ExpertCorpusStore:
             raise ExpertCorpusValidationError("imdb_id должен иметь вид tt1234567")
         raw_year = payload.get("film_year")
         film_year = None
-        if raw_year not in {None, ""}:
+        if raw_year is not None and raw_year != "":
             try:
                 film_year = int(raw_year)
             except (TypeError, ValueError) as exc:
@@ -348,9 +322,7 @@ class ExpertCorpusStore:
                 "split должен быть train, development, blind или external_transfer"
             )
         source_work_id = _clean(
-            payload.get("source_work_id"),
-            field_name="source_work_id",
-            limit=180,
+            payload.get("source_work_id"), field_name="source_work_id", limit=180
         ) or None
         note = _clean(payload.get("note"), field_name="note", limit=2000) or None
         now = _now()
@@ -369,46 +341,27 @@ class ExpertCorpusStore:
                 note=excluded.note,
                 updated_at=excluded.updated_at
             """,
-            [
-                case_id,
-                imdb_id,
-                film_title,
-                film_year,
-                source_work_id,
-                split,
-                note,
-                now,
-                now,
-            ],
+            [case_id, imdb_id, film_title, film_year, source_work_id, split, note, now, now],
         )
         return case_id
 
     def upsert_material(self, payload: dict[str, Any]) -> str:
         _reject_full_text(payload, entity="expert material")
         material_id = _clean(
-            payload.get("material_id"),
-            field_name="material_id",
-            limit=180,
-            required=True,
+            payload.get("material_id"), field_name="material_id", limit=180, required=True
         )
         expert_id = _clean(
             payload.get("expert_id"), field_name="expert_id", limit=160, required=True
         )
-        self._require(
-            "expert_profiles", "expert_id", expert_id, entity="expert profile"
-        )
+        self._require("expert_profiles", "expert_id", expert_id, entity="expert profile")
         media_type = str(payload.get("media_type") or "other").strip().casefold()
         if media_type not in MEDIA_TYPES:
-            raise ExpertCorpusValidationError(
-                "media_type должен быть video, article, podcast, post или other"
-            )
+            raise ExpertCorpusValidationError("Неизвестный media_type")
         title = _clean(
             payload.get("title"), field_name="material.title", limit=700, required=True
         )
         source_url = _validate_url(payload.get("source_url"))
-        published_at = _parse_datetime(
-            payload.get("published_at"), field_name="published_at"
-        )
+        published_at = _parse_datetime(payload.get("published_at"), field_name="published_at")
         retrieved_at = _parse_datetime(
             payload.get("retrieved_at") or _now(),
             field_name="retrieved_at",
@@ -432,18 +385,7 @@ class ExpertCorpusStore:
                 note=excluded.note,
                 updated_at=excluded.updated_at
             """,
-            [
-                material_id,
-                expert_id,
-                title,
-                source_url,
-                media_type,
-                published_at,
-                retrieved_at,
-                note,
-                now,
-                now,
-            ],
+            [material_id, expert_id, title, source_url, media_type, published_at, retrieved_at, note, now, now],
         )
         return material_id
 
@@ -452,20 +394,12 @@ class ExpertCorpusStore:
             payload.get("case_id"), field_name="case_id", limit=180, required=True
         )
         material_id = _clean(
-            payload.get("material_id"),
-            field_name="material_id",
-            limit=180,
-            required=True,
+            payload.get("material_id"), field_name="material_id", limit=180, required=True
         )
         self._require("expert_cases", "case_id", case_id, entity="expert case")
-        self._require(
-            "expert_materials", "material_id", material_id, entity="expert material"
-        )
+        self._require("expert_materials", "material_id", material_id, entity="expert material")
         existing = self.conn.execute(
-            """
-            SELECT link_id FROM expert_case_materials
-            WHERE case_id = ? AND material_id = ?
-            """,
+            "SELECT link_id FROM expert_case_materials WHERE case_id = ? AND material_id = ?",
             [case_id, material_id],
         ).fetchone()
         if existing:
@@ -477,23 +411,17 @@ class ExpertCorpusStore:
             required=True,
         )
         self.conn.execute(
-            """
-            INSERT INTO expert_case_materials(link_id, case_id, material_id, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
+            "INSERT INTO expert_case_materials(link_id, case_id, material_id, created_at) VALUES (?, ?, ?, ?)",
             [link_id, case_id, material_id, _now()],
         )
         return link_id
 
     def _require_case_material_link(self, case_id: str, material_id: str) -> None:
-        row = self.conn.execute(
-            """
-            SELECT 1 FROM expert_case_materials
-            WHERE case_id = ? AND material_id = ? LIMIT 1
-            """,
+        linked = self.conn.execute(
+            "SELECT 1 FROM expert_case_materials WHERE case_id = ? AND material_id = ? LIMIT 1",
             [case_id, material_id],
         ).fetchone()
-        if row is None:
+        if linked is None:
             raise ExpertCorpusValidationError(
                 "Материал должен быть явно связан с case до добавления claim"
             )
@@ -507,15 +435,10 @@ class ExpertCorpusStore:
             payload.get("case_id"), field_name="case_id", limit=180, required=True
         )
         material_id = _clean(
-            payload.get("material_id"),
-            field_name="material_id",
-            limit=180,
-            required=True,
+            payload.get("material_id"), field_name="material_id", limit=180, required=True
         )
         self._require("expert_cases", "case_id", case_id, entity="expert case")
-        self._require(
-            "expert_materials", "material_id", material_id, entity="expert material"
-        )
+        self._require("expert_materials", "material_id", material_id, entity="expert material")
         self._require_case_material_link(case_id, material_id)
 
         dimension = str(payload.get("dimension") or "").strip()
@@ -525,46 +448,29 @@ class ExpertCorpusStore:
         if change_type not in EXPERT_CHANGE_TYPES:
             raise ExpertCorpusValidationError(f"Неизвестный change_type: {change_type!r}")
 
-        timecode_or_section = _clean(
-            payload.get("timecode_or_section"),
-            field_name="timecode_or_section",
-            limit=500,
-            required=True,
-        )
-        claim_summary = _clean(
-            payload.get("claim_summary"),
-            field_name="claim_summary",
-            limit=2000,
-            required=True,
-        )
-        observation = _clean(
-            payload.get("observation"),
-            field_name="observation",
-            limit=3000,
-            required=True,
-        )
-        structural_consequence = _clean(
-            payload.get("structural_consequence"),
-            field_name="structural_consequence",
-            limit=3000,
-            required=True,
-        )
-        expert_interpretation = _clean(
-            payload.get("expert_interpretation"),
-            field_name="expert_interpretation",
-            limit=3000,
-            required=True,
-        )
+        values = {
+            "timecode_or_section": _clean(
+                payload.get("timecode_or_section"), field_name="timecode_or_section", limit=500, required=True
+            ),
+            "claim_summary": _clean(
+                payload.get("claim_summary"), field_name="claim_summary", limit=2000, required=True
+            ),
+            "observation": _clean(
+                payload.get("observation"), field_name="observation", limit=3000, required=True
+            ),
+            "structural_consequence": _clean(
+                payload.get("structural_consequence"), field_name="structural_consequence", limit=3000, required=True
+            ),
+            "expert_interpretation": _clean(
+                payload.get("expert_interpretation"), field_name="expert_interpretation", limit=3000, required=True
+            ),
+        }
         confidence = _confidence(payload.get("confidence", 0.5))
-        story_map_id = _clean(
-            payload.get("story_map_id"), field_name="story_map_id", limit=180
-        ) or None
+        story_map_id = _clean(payload.get("story_map_id"), field_name="story_map_id", limit=180) or None
         story_diff_annotation_id = _clean(
-            payload.get("story_diff_annotation_id"),
-            field_name="story_diff_annotation_id",
-            limit=180,
+            payload.get("story_diff_annotation_id"), field_name="story_diff_annotation_id", limit=180
         ) or None
-        tags_json = _json_list(payload.get("tags") or [], field_name="tags", item_limit=100)
+        tags_json = _json_string_list(payload.get("tags"), field_name="tags", item_limit=100)
         now = _now()
         self.conn.execute(
             """
@@ -597,11 +503,11 @@ class ExpertCorpusStore:
                 material_id,
                 dimension,
                 change_type,
-                timecode_or_section,
-                claim_summary,
-                observation,
-                structural_consequence,
-                expert_interpretation,
+                values["timecode_or_section"],
+                values["claim_summary"],
+                values["observation"],
+                values["structural_consequence"],
+                values["expert_interpretation"],
                 confidence,
                 story_map_id,
                 story_diff_annotation_id,
@@ -615,10 +521,7 @@ class ExpertCorpusStore:
     def upsert_evidence(self, payload: dict[str, Any]) -> str:
         _reject_full_text(payload, entity="expert evidence")
         evidence_id = _clean(
-            payload.get("evidence_id") or uuid4(),
-            field_name="evidence_id",
-            limit=180,
-            required=True,
+            payload.get("evidence_id") or uuid4(), field_name="evidence_id", limit=180, required=True
         )
         claim_id = _clean(
             payload.get("claim_id"), field_name="claim_id", limit=180, required=True
@@ -626,33 +529,22 @@ class ExpertCorpusStore:
         self._require("expert_claims", "claim_id", claim_id, entity="expert claim")
         polarity = str(payload.get("polarity") or "supporting").strip().casefold()
         if polarity not in EVIDENCE_POLARITIES:
-            raise ExpertCorpusValidationError(
-                "evidence polarity должен быть supporting или contradicting"
-            )
+            raise ExpertCorpusValidationError("evidence polarity должен быть supporting или contradicting")
         evidence_kind = str(payload.get("evidence_kind") or "other").strip().casefold()
         if evidence_kind not in EVIDENCE_KINDS:
-            raise ExpertCorpusValidationError(
-                "Неизвестный evidence_kind: " + evidence_kind
-            )
+            raise ExpertCorpusValidationError(f"Неизвестный evidence_kind: {evidence_kind}")
         description = _clean(
-            payload.get("description"),
-            field_name="evidence.description",
-            limit=2000,
-            required=True,
+            payload.get("description"), field_name="evidence.description", limit=2000, required=True
         )
-        locator = _clean(
-            payload.get("locator"), field_name="evidence.locator", limit=700
-        ) or None
+        locator = _clean(payload.get("locator"), field_name="evidence.locator", limit=700) or None
         reference_id = _clean(
-            payload.get("reference_id"),
-            field_name="evidence.reference_id",
-            limit=300,
+            payload.get("reference_id"), field_name="evidence.reference_id", limit=300
         ) or None
-        confidence = _confidence(payload.get("confidence", 0.7))
         if evidence_kind in {"storymap", "storydiff", "production_context"} and not reference_id:
             raise ExpertCorpusValidationError(
                 f"evidence_kind={evidence_kind} требует reference_id"
             )
+        confidence = _confidence(payload.get("confidence", 0.7))
         now = _now()
         self.conn.execute(
             """
@@ -670,25 +562,12 @@ class ExpertCorpusStore:
                 confidence=excluded.confidence,
                 updated_at=excluded.updated_at
             """,
-            [
-                evidence_id,
-                claim_id,
-                polarity,
-                evidence_kind,
-                description,
-                locator,
-                reference_id,
-                confidence,
-                now,
-                now,
-            ],
+            [evidence_id, claim_id, polarity, evidence_kind, description, locator, reference_id, confidence, now, now],
         )
         return evidence_id
 
     def claim_chain(self, claim_id: str) -> dict[str, Any]:
-        claim_id = _clean(
-            claim_id, field_name="claim_id", limit=180, required=True
-        )
+        claim_id = _clean(claim_id, field_name="claim_id", limit=180, required=True)
         row = self.conn.execute(
             """
             SELECT
@@ -697,8 +576,7 @@ class ExpertCorpusStore:
                 c.dimension, c.change_type, c.timecode_or_section,
                 c.claim_summary, c.observation, c.structural_consequence,
                 c.expert_interpretation, c.confidence,
-                c.story_map_id, c.story_diff_annotation_id,
-                c.tags_json
+                c.story_map_id, c.story_diff_annotation_id, c.tags_json
             FROM expert_claims c
             JOIN expert_materials m ON m.material_id = c.material_id
             JOIN expert_profiles p ON p.expert_id = m.expert_id
@@ -708,7 +586,6 @@ class ExpertCorpusStore:
         ).fetchone()
         if row is None:
             raise ExpertCorpusValidationError(f"Неизвестный expert claim: {claim_id}")
-
         evidence_rows = self.conn.execute(
             """
             SELECT evidence_id, polarity, evidence_kind, description,
@@ -766,16 +643,15 @@ class ExpertCorpusStore:
         ).fetchone()
         if case is None:
             raise ExpertCorpusValidationError(f"Неизвестный expert case: {case_id}")
-
         rows = self.conn.execute(
             """
             SELECT
                 p.expert_id,
                 c.dimension,
                 c.change_type,
-                COUNT(*) AS claim_count,
-                SUM(CASE WHEN e.polarity = 'supporting' THEN 1 ELSE 0 END) AS support_count,
-                SUM(CASE WHEN e.polarity = 'contradicting' THEN 1 ELSE 0 END) AS contradict_count
+                COUNT(DISTINCT c.claim_id) AS claim_count,
+                COUNT(DISTINCT CASE WHEN e.polarity = 'supporting' THEN e.evidence_id END) AS support_count,
+                COUNT(DISTINCT CASE WHEN e.polarity = 'contradicting' THEN e.evidence_id END) AS contradict_count
             FROM expert_claims c
             JOIN expert_materials m ON m.material_id = c.material_id
             JOIN expert_profiles p ON p.expert_id = m.expert_id
@@ -786,8 +662,6 @@ class ExpertCorpusStore:
             """,
             [case_id],
         ).fetchall()
-
-        profiles = sorted({str(row[0]) for row in rows})
         return {
             "case_id": str(case[0]),
             "imdb_id": case[1],
@@ -795,7 +669,7 @@ class ExpertCorpusStore:
             "film_year": case[3],
             "source_work_id": case[4],
             "split": str(case[5]),
-            "expert_profiles": profiles,
+            "expert_profiles": sorted({str(row[0]) for row in rows}),
             "rows": [
                 {
                     "expert_id": str(row[0]),
@@ -819,14 +693,8 @@ class ExpertCorpusStore:
             ("evidence", "expert_evidence"),
         ):
             counts[key] = int(self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-
         split_rows = self.conn.execute(
-            """
-            SELECT split, COUNT(*)
-            FROM expert_cases
-            GROUP BY split
-            ORDER BY split
-            """
+            "SELECT split, COUNT(*) FROM expert_cases GROUP BY split ORDER BY split"
         ).fetchall()
         expert_rows = self.conn.execute(
             """
