@@ -9,7 +9,7 @@ from typing import Any
 from flask import Flask, jsonify, request
 
 from settings import config
-from src.kinovanga import KinoVanga
+from src.creative_kinovanga import KinoVanga
 from src.pre_release_analysis import build_pre_release_profile
 from src.train_model import resolve_current_model_path
 
