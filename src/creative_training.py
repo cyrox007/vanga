@@ -24,6 +24,11 @@ from src.director_team_features import (
     director_team_features_enabled,
     fetch_batch_director_team_context,
 )
+from src.full_cast_features import (
+    FULL_CAST_FEATURE_NAMES,
+    fetch_batch_full_cast_context,
+    full_cast_features_enabled,
+)
 from src.pair_features import (
     DIRECTOR_WRITER_PAIR_FEATURE_NAMES,
     director_writer_pair_features_enabled,
@@ -56,24 +61,20 @@ def get_batches(
     - director-actor pair off -> schema v8;
     - trend off -> schema v9;
     - director-team off -> schema v10;
-    - все текущие P2-блоки on -> candidate schema v11.
+    - full-cast off -> schema v11;
+    - все текущие P2-блоки on -> candidate schema v12.
 
-    Legacy-признаки v5-v10 по-прежнему используют primary director для обратной
-    совместимости. Schema v11 отдельно описывает весь набор director-credit и
-    историю их совместной работы.
-
-    Все P2-блоки используют одно дополнительное соединение DuckDB, чтобы не
-    увеличивать число одновременных соединений и память на production VPS.
+    Legacy actor slots 1..3 сохраняются. Schema v12 дополнительно использует всех
+    actor/actress из IMDb title_principals target-фильма и сворачивает их общую и
+    жанровую историю в устойчивые агрегаты без роста categorical cardinality.
     """
     creative_enabled = creative_team_features_enabled()
-    writer_pair_enabled = (
-        creative_enabled and director_writer_pair_features_enabled()
-    )
-    actor_pair_enabled = (
-        writer_pair_enabled and director_actor_pair_features_enabled()
-    )
+    writer_pair_enabled = creative_enabled and director_writer_pair_features_enabled()
+    actor_pair_enabled = writer_pair_enabled and director_actor_pair_features_enabled()
     trend_enabled = actor_pair_enabled and creative_trend_features_enabled()
     director_team_enabled = trend_enabled and director_team_features_enabled()
+    full_cast_enabled = director_team_enabled and full_cast_features_enabled()
+
     if not creative_enabled:
         yield from base_get_batches(
             genres,
@@ -85,34 +86,18 @@ def get_batches(
         )
         return
 
-    logger.info(
-        "Creative Team features включены: %s",
-        ", ".join(CREATIVE_TEAM_FEATURE_NAMES),
-    )
+    logger.info("Creative Team features включены: %s", ", ".join(CREATIVE_TEAM_FEATURE_NAMES))
     if writer_pair_enabled:
-        logger.info(
-            "Director-writer pair features включены: %s",
-            ", ".join(DIRECTOR_WRITER_PAIR_FEATURE_NAMES),
-        )
+        logger.info("Director-writer pair features включены: %s", ", ".join(DIRECTOR_WRITER_PAIR_FEATURE_NAMES))
     if actor_pair_enabled:
-        logger.info(
-            "Director-actor pair features включены: %s",
-            ", ".join(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES),
-        )
+        logger.info("Director-actor pair features включены: %s", ", ".join(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES))
     if trend_enabled:
-        logger.info(
-            "Creative trend features включены: %s",
-            ", ".join(CREATIVE_TREND_FEATURE_NAMES),
-        )
+        logger.info("Creative trend features включены: %s", ", ".join(CREATIVE_TREND_FEATURE_NAMES))
     if director_team_enabled:
-        logger.info(
-            "Director-team features включены: %s",
-            ", ".join(DIRECTOR_TEAM_FEATURE_NAMES),
-        )
+        logger.info("Director-team features включены: %s", ", ".join(DIRECTOR_TEAM_FEATURE_NAMES))
+    if full_cast_enabled:
+        logger.info("Full-cast features включены: %s", ", ".join(FULL_CAST_FEATURE_NAMES))
 
-    # Базовый data_filtr держит обычное соединение с той же DuckDB. Открываем
-    # второе соединение в том же режиме: DuckDB не допускает одновременно
-    # подключать один файл с несовместимыми read_only/read_write параметрами.
     conn = duckdb.connect(str(config.IMDB_DB_PATH))
     conn.execute("SET memory_limit = '256MB'")
     conn.execute("SET threads = 1")
@@ -135,64 +120,67 @@ def get_batches(
 
             for feature_name in CREATIVE_TEAM_FEATURE_NAMES:
                 default = 6.5 if feature_name.endswith("_avg_rating") else 0.0
-                values = [
-                    context.get(tconst, {}).get(feature_name, default)
-                    for tconst in tconsts
-                ]
-                enriched[feature_name] = np.asarray(values, dtype=np.float32)
+                enriched[feature_name] = np.asarray(
+                    [context.get(tconst, {}).get(feature_name, default) for tconst in tconsts],
+                    dtype=np.float32,
+                )
 
             if writer_pair_enabled:
                 pair_context = fetch_batch_director_writer_pair_context(conn, tconsts)
                 for feature_name in DIRECTOR_WRITER_PAIR_FEATURE_NAMES:
-                    default = (
-                        6.5
-                        if feature_name == "director_writer_pair_avg_rating"
-                        else 0.0
+                    default = 6.5 if feature_name == "director_writer_pair_avg_rating" else 0.0
+                    enriched[feature_name] = np.asarray(
+                        [pair_context.get(tconst, {}).get(feature_name, default) for tconst in tconsts],
+                        dtype=np.float32,
                     )
-                    values = [
-                        pair_context.get(tconst, {}).get(feature_name, default)
-                        for tconst in tconsts
-                    ]
-                    enriched[feature_name] = np.asarray(values, dtype=np.float32)
 
             if actor_pair_enabled:
-                actor_pair_context = fetch_batch_director_actor_pair_context(
-                    conn,
-                    tconsts,
-                )
+                actor_pair_context = fetch_batch_director_actor_pair_context(conn, tconsts)
                 for feature_name in DIRECTOR_ACTOR_PAIR_FEATURE_NAMES:
                     default = 6.5 if feature_name.endswith("_avg_rating") else 0.0
-                    values = [
-                        actor_pair_context.get(tconst, {}).get(feature_name, default)
-                        for tconst in tconsts
-                    ]
-                    enriched[feature_name] = np.asarray(values, dtype=np.float32)
+                    enriched[feature_name] = np.asarray(
+                        [actor_pair_context.get(tconst, {}).get(feature_name, default) for tconst in tconsts],
+                        dtype=np.float32,
+                    )
 
             if trend_enabled:
                 trend_context = fetch_batch_creative_trend_context(conn, tconsts)
                 for feature_name in CREATIVE_TREND_FEATURE_NAMES:
-                    values = [
-                        trend_context.get(tconst, {}).get(feature_name, 0.0)
-                        for tconst in tconsts
-                    ]
-                    enriched[feature_name] = np.asarray(values, dtype=np.float32)
+                    enriched[feature_name] = np.asarray(
+                        [trend_context.get(tconst, {}).get(feature_name, 0.0) for tconst in tconsts],
+                        dtype=np.float32,
+                    )
 
             if director_team_enabled:
                 team_context = fetch_batch_director_team_context(conn, tconsts)
                 for feature_name in DIRECTOR_TEAM_FEATURE_NAMES:
-                    default = (
-                        6.5
-                        if feature_name in {
-                            "director_team_avg_rating",
-                            "director_team_prior_collaboration_avg_rating",
-                        }
-                        else 0.0
+                    default = 6.5 if feature_name in {
+                        "director_team_avg_rating",
+                        "director_team_prior_collaboration_avg_rating",
+                    } else 0.0
+                    enriched[feature_name] = np.asarray(
+                        [team_context.get(tconst, {}).get(feature_name, default) for tconst in tconsts],
+                        dtype=np.float32,
                     )
-                    values = [
-                        team_context.get(tconst, {}).get(feature_name, default)
-                        for tconst in tconsts
-                    ]
-                    enriched[feature_name] = np.asarray(values, dtype=np.float32)
+
+            if full_cast_enabled:
+                cast_context = fetch_batch_full_cast_context(conn, tconsts)
+                rating_defaults = {
+                    "cast_avg_rating",
+                    "cast_rating_median",
+                    "cast_rating_min",
+                    "cast_rating_max",
+                    "cast_genre_avg_rating",
+                    "cast_genre_rating_median",
+                    "cast_genre_rating_min",
+                    "cast_genre_rating_max",
+                }
+                for feature_name in FULL_CAST_FEATURE_NAMES:
+                    default = 6.5 if feature_name in rating_defaults else 0.0
+                    enriched[feature_name] = np.asarray(
+                        [cast_context.get(tconst, {}).get(feature_name, default) for tconst in tconsts],
+                        dtype=np.float32,
+                    )
 
             yield enriched, y, titles, tconsts
     finally:

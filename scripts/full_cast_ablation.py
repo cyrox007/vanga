@@ -37,8 +37,8 @@ train_model_module.get_batches = creative_get_batches
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Непубликуемый temporal ablation: Creative Team baseline v10 "
-            "против multi-director candidate v11 на одной IMDb БД."
+            "Непубликуемый temporal ablation: multi-director baseline v11 "
+            "против Full Cast candidate v12 на одной IMDb БД."
         )
     )
     parser.add_argument("--iterations", type=int, default=1500)
@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _train_variant(
     *,
     label: str,
-    director_team_enabled: bool,
+    full_cast_enabled: bool,
     genres: list[str],
     iterations: int,
     batch_size: int,
@@ -60,20 +60,22 @@ def _train_variant(
     db_path: Path,
     db_signature: dict[str, int],
 ) -> dict[str, Any]:
-    os.environ["VANGA_TRAIN_COVERAGE_FEATURES"] = "1"
-    os.environ["VANGA_TRAIN_CREATIVE_TEAM_FEATURES"] = "1"
-    os.environ["VANGA_TRAIN_DIRECTOR_WRITER_PAIR_FEATURES"] = "1"
-    os.environ["VANGA_TRAIN_DIRECTOR_ACTOR_PAIR_FEATURES"] = "1"
-    os.environ["VANGA_TRAIN_CREATIVE_TREND_FEATURES"] = "1"
-    os.environ["VANGA_TRAIN_DIRECTOR_TEAM_FEATURES"] = "1" if director_team_enabled else "0"
-    # v12 должен быть выключен, иначе исторический v10→v11 эксперимент загрязняется.
-    os.environ["VANGA_TRAIN_FULL_CAST_FEATURES"] = "0"
+    for name in (
+        "VANGA_TRAIN_COVERAGE_FEATURES",
+        "VANGA_TRAIN_CREATIVE_TEAM_FEATURES",
+        "VANGA_TRAIN_DIRECTOR_WRITER_PAIR_FEATURES",
+        "VANGA_TRAIN_DIRECTOR_ACTOR_PAIR_FEATURES",
+        "VANGA_TRAIN_CREATIVE_TREND_FEATURES",
+        "VANGA_TRAIN_DIRECTOR_TEAM_FEATURES",
+    ):
+        os.environ[name] = "1"
+    os.environ["VANGA_TRAIN_FULL_CAST_FEATURES"] = "1" if full_cast_enabled else "0"
 
     logger.info("=" * 60)
     logger.info(
-        "DIRECTOR TEAM ABLATION: старт %s; director_team=%s",
+        "FULL CAST ABLATION: старт %s; full_cast=%s",
         label,
-        "on" if director_team_enabled else "off",
+        "on" if full_cast_enabled else "off",
     )
     model, metadata = train_catboost_model(
         genres,
@@ -87,7 +89,7 @@ def _train_variant(
         result = _result_from_metadata(
             metadata,
             label=label,
-            schema_version=11 if director_team_enabled else 10,
+            schema_version=12 if full_cast_enabled else 11,
             coverage_features_version=1,
             model_size_bytes=size_bytes,
         )
@@ -95,8 +97,8 @@ def _train_variant(
         result["director_writer_pair_features_version"] = 1
         result["director_actor_pair_features_version"] = 1
         result["creative_trend_features_version"] = 1
-        result["director_team_features_version"] = 1 if director_team_enabled else 0
-        result["full_cast_features_version"] = 0
+        result["director_team_features_version"] = 1
+        result["full_cast_features_version"] = 1 if full_cast_enabled else 0
         return result
     finally:
         del model
@@ -119,11 +121,11 @@ def main(argv: list[str] | None = None) -> int:
     signature = database_signature(db_path)
     genres = get_all_genres()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    work_root = Path(config.ABSPATH) / "temp" / "director-team-ablation" / stamp
+    work_root = Path(config.ABSPATH) / "temp" / "full-cast-ablation" / stamp
 
     baseline = _train_variant(
-        label="baseline-v10",
-        director_team_enabled=False,
+        label="baseline-v11",
+        full_cast_enabled=False,
         genres=genres,
         iterations=args.iterations,
         batch_size=args.batch_size,
@@ -134,8 +136,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     _assert_database_unchanged(db_path, signature)
     candidate = _train_variant(
-        label="candidate-v11",
-        director_team_enabled=True,
+        label="candidate-v12",
+        full_cast_enabled=True,
         genres=genres,
         iterations=args.iterations,
         batch_size=args.batch_size,
@@ -145,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         db_signature=signature,
     )
     _assert_database_unchanged(db_path, signature)
+
     comparison = compare_results(
         baseline,
         candidate,
@@ -162,12 +165,18 @@ def main(argv: list[str] | None = None) -> int:
         "published": False,
     }
     output = args.output or (
-        Path(config.ABSPATH) / "temp" / "ablation-reports" / f"director-team-{stamp}.json"
+        Path(config.ABSPATH) / "temp" / "ablation-reports" / f"full-cast-{stamp}.json"
     )
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    logger.info("DIRECTOR TEAM ABLATION ЗАВЕРШЁН; активная модель НЕ ИЗМЕНЕНА")
+    logger.info("=" * 60)
+    logger.info("FULL CAST ABLATION ЗАВЕРШЁН")
+    logger.info("Baseline v11 MAE: %.6f", baseline["test_mae"])
+    logger.info("Candidate v12 MAE: %.6f", candidate["test_mae"])
+    logger.info("Δ MAE: %+.6f", comparison["delta_mae"])
+    logger.info("Активная модель НЕ ИЗМЕНЕНА")
+    logger.info("=" * 60)
     return 0 if comparison["non_regression_passed"] else 2
 
 

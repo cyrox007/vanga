@@ -17,6 +17,10 @@ from src.director_team_features import (
     DIRECTOR_TEAM_FEATURE_NAMES,
     fetch_director_team_context,
 )
+from src.full_cast_features import (
+    FULL_CAST_FEATURE_NAMES,
+    fetch_full_cast_context,
+)
 from src.pair_features import (
     DIRECTOR_WRITER_PAIR_FEATURE_NAMES,
     fetch_director_writer_pair_context,
@@ -29,12 +33,13 @@ from src.kinovanga import KinoVanga as BaseKinoVanga
 
 
 class KinoVanga(BaseKinoVanga):
-    """KinoVanga с P2 Creative Team-признаками schema v7-v11.
+    """KinoVanga с P2 Creative Team-признаками schema v7-v12.
 
-    Legacy-признаки сохраняют primary director для совместимости старых моделей.
-    Schema v11 отдельно описывает весь список режиссёров target-фильма и историю
-    их совместной работы. Дополнительные SQL-запросы выполняются только если
-    соответствующие feature names присутствуют в metadata активной модели.
+    Legacy-признаки сохраняют primary director и actor slots 1..3 для
+    совместимости старых моделей. Schema v11 отдельно описывает режиссёрскую
+    команду, а v12 — весь переданный principal cast через общие и жанровые
+    агрегаты. Дополнительные SQL-запросы выполняются только для feature names,
+    реально присутствующих в metadata активной модели.
     """
 
     @staticmethod
@@ -51,6 +56,15 @@ class KinoVanga(BaseKinoVanga):
             result.append(str(director).strip())
         return result
 
+    @staticmethod
+    def _clean_actor_names(actors: Optional[List[str]]) -> list[str]:
+        result: list[str] = []
+        for value in actors or []:
+            clean = str(value or "").strip()
+            if clean and clean not in result:
+                result.append(clean)
+        return result
+
     def _prepare_features(
         self,
         year: int,
@@ -65,6 +79,7 @@ class KinoVanga(BaseKinoVanga):
     ):
         director_names = self._clean_director_names(director, directors)
         primary_director = director_names[0] if director_names else director
+        actor_names_all = self._clean_actor_names(actors)
 
         X = super()._prepare_features(
             year=year,
@@ -72,7 +87,7 @@ class KinoVanga(BaseKinoVanga):
             genres=genres,
             director=primary_director,
             writer=writer,
-            actors=actors,
+            actors=actor_names_all,
             num_votes=num_votes,
             title=title,
         )
@@ -85,6 +100,7 @@ class KinoVanga(BaseKinoVanga):
             .union(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES)
             .union(CREATIVE_TREND_FEATURE_NAMES)
             .union(DIRECTOR_TEAM_FEATURE_NAMES)
+            .union(FULL_CAST_FEATURE_NAMES)
         )
         if not feature_set.intersection(extended_features):
             return X
@@ -108,11 +124,7 @@ class KinoVanga(BaseKinoVanga):
             else {}
         )
 
-        director_info = (
-            director_people.get(primary_director, {})
-            if primary_director
-            else {}
-        )
+        director_info = director_people.get(primary_director, {}) if primary_director else {}
         writer_info = writer_people.get(writer, {}) if writer else {}
         director_id = director_info.get("nconst") or "Unknown"
         writer_id = writer_info.get("nconst") or "Unknown"
@@ -120,6 +132,19 @@ class KinoVanga(BaseKinoVanga):
             director_people.get(name, {}).get("nconst") or "Unknown"
             for name in director_names
         ]
+
+        actor_people_all = (
+            self._get_people_info(
+                actor_names_all,
+                before_year=int(year),
+                role="actor",
+            )
+            if actor_names_all
+            and feature_set.intersection(
+                set(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES).union(FULL_CAST_FEATURE_NAMES)
+            )
+            else {}
+        )
 
         values: dict[str, float] = {}
         if feature_set.intersection(CREATIVE_TEAM_FEATURE_NAMES):
@@ -166,28 +191,10 @@ class KinoVanga(BaseKinoVanga):
             )
 
         if feature_set.intersection(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES):
-            actor_names = [
-                str(name).strip()
-                for name in (actors or [])[: len(ACTOR_SLOTS)]
-                if str(name).strip()
-            ]
-            actor_people = (
-                self._get_people_info(
-                    actor_names,
-                    before_year=int(year),
-                    role="actor",
-                )
-                if actor_names
-                else {}
-            )
-
+            actor_names = actor_names_all[: len(ACTOR_SLOTS)]
             for slot in ACTOR_SLOTS:
-                actor_name = (
-                    actor_names[slot - 1]
-                    if slot - 1 < len(actor_names)
-                    else None
-                )
-                actor_info = actor_people.get(actor_name, {}) if actor_name else {}
+                actor_name = actor_names[slot - 1] if slot - 1 < len(actor_names) else None
+                actor_info = actor_people_all.get(actor_name, {}) if actor_name else {}
                 actor_id = actor_info.get("nconst") or "Unknown"
                 pair_context = fetch_director_actor_pair_context(
                     self.conn,
@@ -197,9 +204,7 @@ class KinoVanga(BaseKinoVanga):
                 )
                 values.update(
                     {
-                        f"director_actor_{slot}_pair_avg_rating": pair_context[
-                            "avg_rating"
-                        ],
+                        f"director_actor_{slot}_pair_avg_rating": pair_context["avg_rating"],
                         f"director_actor_{slot}_pair_count": pair_context["count"],
                         f"director_actor_{slot}_pair_known": pair_context["known"],
                     }
@@ -236,6 +241,20 @@ class KinoVanga(BaseKinoVanga):
                 )
             )
 
+        if feature_set.intersection(FULL_CAST_FEATURE_NAMES):
+            actor_ids = [
+                actor_people_all.get(name, {}).get("nconst") or "Unknown"
+                for name in actor_names_all
+            ]
+            values.update(
+                fetch_full_cast_context(
+                    self.conn,
+                    actor_nconsts=actor_ids,
+                    before_year=int(year),
+                    genres=genres,
+                )
+            )
+
         for name, value in values.items():
             if name in feature_set:
                 X[0, feature_names.index(name)] = float(value)
@@ -254,19 +273,14 @@ class KinoVanga(BaseKinoVanga):
         explain=False,
         directors=None,
     ) -> float | dict:
-        """Предсказывает рейтинг с поддержкой одного или нескольких режиссёров.
-
-        ``director`` остаётся backward-compatible primary director. Новый аргумент
-        ``directors`` задаёт полный режиссёрский состав; первый элемент становится
-        primary только для legacy feature contract.
-        """
+        """Предсказывает рейтинг с несколькими режиссёрами и полным principal cast."""
         if title:
             from src.logger import setup_logger
-
             setup_logger(__name__).info(f"Предсказание для фильма: {title} ({year})")
 
         requested_directors = self._clean_director_names(director, directors)
         primary_director = requested_directors[0] if requested_directors else director
+        requested_actors = self._clean_actor_names(actors)
 
         writer_features_enabled = {
             "writer_id",
@@ -277,12 +291,36 @@ class KinoVanga(BaseKinoVanga):
             title=title,
             director=primary_director,
             writer=writer if writer_features_enabled else None,
-            actors=actors or [],
+            actors=requested_actors,
             year=int(year),
         )
         resolved_title = resolved_input["title"]
         resolved_writer = resolved_input["writer"]
-        resolved_actors = resolved_input["actors"]
+        resolved_actors = list(resolved_input["actors"])
+        actor_matches = list((resolved_input.get("matches") or {}).get("actors") or [])
+        while len(actor_matches) < len(requested_actors):
+            actor_matches.append(None)
+
+        # Legacy resolver исторически обрабатывал только первые 3 актёрских alias.
+        # Для v12 каждый дополнительный актёр разрешается тем же resolver отдельно,
+        # чтобы русский ввод полного ансамбля не превращался в Unknown.
+        for index in range(3, len(requested_actors)):
+            raw_actor = requested_actors[index]
+            if not self.input_resolver.needs_resolution(raw_actor):
+                continue
+            one = self.input_resolver.resolve_inputs(
+                title=None,
+                director=None,
+                writer=None,
+                actors=[raw_actor],
+                year=int(year),
+            )
+            one_actors = one.get("actors") or []
+            one_matches = (one.get("matches") or {}).get("actors") or []
+            if one_actors:
+                resolved_actors[index] = one_actors[0]
+            if one_matches:
+                actor_matches[index] = one_matches[0]
 
         resolved_directors: list[str] = []
         director_matches: list[dict | None] = []
@@ -339,19 +377,17 @@ class KinoVanga(BaseKinoVanga):
             cat_features=self.metadata.get("cat_features_idx", []),
             feature_names=self.metadata["feature_names"],
         )
-        shap_values = self.model.get_feature_importance(
-            data=test_pool,
-            type="ShapValues",
-        )[0]
+        shap_values = self.model.get_feature_importance(data=test_pool, type="ShapValues")[0]
         base_value = shap_values[-1]
-        contributions = dict(
-            zip(self.metadata["feature_names"], shap_values[:-1])
-        )
+        contributions = dict(zip(self.metadata["feature_names"], shap_values[:-1]))
 
         matches = dict(resolved_input.get("matches") or {})
         matches["director"] = director_matches[0] if director_matches else None
         matches["directors"] = director_matches
         matches["resolved_directors"] = resolved_directors
+        matches["actors"] = actor_matches
+        matches["resolved_actors"] = resolved_actors
+        matches["resolved_cast_size"] = len(resolved_actors)
 
         return {
             "rating": rounded_rating,

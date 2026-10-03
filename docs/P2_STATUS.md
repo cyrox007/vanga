@@ -2,48 +2,23 @@
 
 ## Schema v7: контекст роли и жанра
 
-Первый инкремент P2 реализует признаки, доступные до премьеры и вычисляемые из предыдущих работ в той же роли:
-
-- `director_genre_avg_rating`;
-- `director_genre_prior_count`;
-- `director_recent_avg_rating`;
-- `writer_genre_avg_rating`;
-- `writer_genre_prior_count`;
-- `writer_recent_avg_rating`;
-- `director_is_writer`.
-
-`recent_avg_rating` считается по последним 5 фильмам с годом строго меньше года target-фильма. Genre history учитывает прошлые фильмы, у которых с target есть хотя бы один общий IMDb genre.
+Реализованы `director_genre_*`, `writer_genre_*`, recent history и `director_is_writer`. Все исторические данные ограничены `startYear < target_year`.
 
 ## Schema v8: история пары режиссёр-сценарист
 
-Добавлены `director_writer_pair_avg_rating`, `director_writer_pair_count`, `director_writer_pair_known`. Исторический фильм учитывается только при `startYear < target_year`.
+Добавлены `director_writer_pair_avg_rating`, `director_writer_pair_count`, `director_writer_pair_known`.
 
 ## Schema v9: режиссёр и первые три актёра
 
-Добавлены `director_actor_N_pair_avg_rating`, `director_actor_N_pair_count`, `director_actor_N_pair_known` для `N = 1..3`. Слоты совпадают с первыми тремя actor/actress по IMDb ordering.
+Добавлены `director_actor_N_pair_avg_rating`, `director_actor_N_pair_count`, `director_actor_N_pair_known` для `N = 1..3`. Это legacy personal slots, а не полный ансамбль.
 
 ## Schema v10: recent trend режиссёра и сценариста
 
-Добавлены `director_recent_trend`, `director_recent_trend_known`, `writer_recent_trend`, `writer_recent_trend_known`.
+`director_recent_trend`/`writer_recent_trend` = среднее последних 3 прошлых работ минус среднее предыдущих 3. При недостаточной истории `*_known=0`.
 
-Trend вычисляется как:
+## Schema v11: полноценная режиссёрская команда
 
-`mean(3 самых свежих прошлых работ) - mean(3 предыдущих прошлых работ)`.
-
-Если работ меньше шести, `trend=0`, но `trend_known=0`.
-
-## Candidate schema v11: полноценная режиссёрская команда
-
-Предыдущие схемы использовали primary director для legacy feature contract. Это недостаточно для фильмов с полноценной сорежиссурой, поэтому v11 добавляет отдельный multi-director block, не ломая старые признаки.
-
-API принимает:
-
-- legacy `director: "Имя"`;
-- новый `directors: ["Имя 1", "Имя 2", ...]`.
-
-Если переданы оба поля, `director` сохраняется как primary/backward-compatible значение, а полный список используется director-team блоком.
-
-Новые признаки:
+Legacy-признаки сохраняют primary director, а отдельный блок использует весь director-credit target-фильма:
 
 - `director_team_size`;
 - `director_team_known_ratio`;
@@ -53,48 +28,67 @@ API принимает:
 - `director_team_prior_collaboration_avg_rating`;
 - `director_team_collaboration_known`.
 
-`director_team_prior_collaboration_*` учитывает предыдущий фильм только если **весь текущий набор режиссёров** имеет director-credit в этом фильме. Это позволяет корректно описывать постоянные режиссёрские дуэты/команды, а не случайно приписывать историю одному primary director.
+API принимает `directors: [...]`; старое `director` остаётся backward-compatible.
+
+## Candidate schema v12: Full Cast Context
+
+V12 устраняет ограничение «только первые три актёра» для общего профиля ансамбля. Legacy `actor_1..actor_3` остаются для совместимости и индивидуальных pair-признаков, но новый блок использует **всех actor/actress из IMDb `title_principals` target-фильма**.
+
+Для каждого актёра отдельно вычисляется только прошлая история:
+
+- общая средняя оценка прошлых фильмов и `prior_count`;
+- средняя оценка прошлых фильмов, имеющих хотя бы один общий жанр с target-фильмом;
+- genre-specific `prior_count`.
+
+Персональные истории затем сворачиваются без добавления десятков высококардинальных `actor_N_id`:
+
+- `cast_size`;
+- `cast_known_ratio`;
+- `cast_avg_rating`, `cast_rating_median`, `cast_rating_std`, `cast_rating_min`, `cast_rating_max`;
+- `cast_prior_count_mean`, `cast_prior_count_max`;
+- `cast_genre_known_ratio`;
+- `cast_genre_avg_rating`, `cast_genre_rating_median`, `cast_genre_rating_std`, `cast_genre_rating_min`, `cast_genre_rating_max`;
+- `cast_genre_prior_count_mean`, `cast_genre_prior_count_max`.
+
+Таким образом каждый доступный principal actor влияет на общий профиль ансамбля, а сильная/слабая жанровая история не растворяется только в одной средней: модель получает median, spread, min/max, coverage и experience counts.
+
+Актёр без исторических работ остаётся в знаменателе coverage и в count-агрегатах как ноль, но числовой filler `6.5` **не участвует** в средних реальных рейтингов.
+
+API `/predict` теперь принимает до 32 актёров. Это защитный лимит публичного запроса, а training использует весь доступный principal cast из локальной IMDb БД.
 
 ## Temporal и missing-контракт
 
-Для всех P2-схем используются только фильмы с `startYear < target_year`. Target rating, фильмы того же календарного года и будущие работы не участвуют.
+Для всех P2-схем используются только фильмы с `startYear < target_year`. Target rating, фильмы того же календарного года и будущие работы исключены.
 
-Для pair history без данных используются `count=0`, `known=0`, а `6.5` остаётся только числовым filler.
-
-Для director-team:
-
-- `director_team_known_ratio` показывает долю режиссёров с реальной прошлой историей;
-- `director_team_collaboration_known=0` отделяет отсутствие прошлых совместных фильмов от реального среднего;
-- `director_team_size` хранит фактическое число режиссёров target-фильма.
+Full Cast также использует это правило отдельно для истории каждого актёра и его жанровой репутации.
 
 ## Train/inference parity
 
 Training:
 
-- `src/creative_training.py` добавляет P2-блоки поверх базового disk-first pipeline;
-- v11 получает полный список director-credit прямо из IMDb `title_principals`;
-- `VANGA_TRAIN_DIRECTOR_TEAM_FEATURES=0` воспроизводит schema v10;
-- все P2-блоки используют одно дополнительное DuckDB-соединение.
+- `src/creative_training.py` добавляет Full Cast после schema v11;
+- `VANGA_TRAIN_FULL_CAST_FEATURES=0` воспроизводит schema v11;
+- batch SQL возвращает персональную историю каждого principal actor, а общий Python-агрегатор строит итоговый feature vector.
 
 Inference:
 
-- `src/creative_kinovanga.py` принимает несколько режиссёров;
-- каждый режиссёр разрешается отдельно через существующий input resolver;
-- legacy признаки продолжают использовать первого/primary director;
-- v11 вычисляет отдельный team context по всем resolved director IDs;
-- старые модели без v11 feature names не используют director-team признаки.
+- `src/creative_kinovanga.py` сохраняет legacy top-3 personal slots;
+- для v12 дополнительно разрешает и агрегирует весь переданный cast;
+- `fetch_full_cast_context` использует тот же temporal/genre контракт;
+- unresolved actor уменьшает coverage, но не получает фиктивную «репутацию».
 
 ## Версии схем
 
-- schema v5 — baseline без coverage features;
-- schema v6 — coverage (`*_known`, `*_prior_count`);
-- schema v7 — v6 + genre/recent/director_is_writer;
-- schema v8 — v7 + director↔writer pair history;
-- schema v9 — v8 + director↔actor pair history;
-- schema v10 — v9 + director/writer recent trend 3-vs-3;
-- schema v11 — v10 + multi-director team history.
+- v5 — baseline без coverage;
+- v6 — coverage;
+- v7 — genre/recent/director_is_writer;
+- v8 — director↔writer;
+- v9 — director↔actor top-3;
+- v10 — director/writer trend;
+- v11 — multi-director team;
+- v12 — Full Cast Context.
 
-Production entrypoint не разрешает случайно публиковать неполные baseline-схемы. Новый полный retrain формирует candidate v11 и всё равно обязан пройти quality gate.
+Production entrypoint не разрешает публиковать v5-v11 baseline обычным полным retrain. Candidate v12 также обязан пройти quality gate.
 
 ## Ablation
 
@@ -102,18 +96,17 @@ Production entrypoint не разрешает случайно публиков�
 - `python scripts/director_writer_pair_ablation.py` — v7→v8;
 - `python scripts/director_actor_pair_ablation.py` — v8→v9;
 - `python scripts/creative_trend_ablation.py` — v9→v10;
-- `python scripts/director_team_ablation.py` — v10→v11.
+- `python scripts/director_team_ablation.py` — v10→v11, Full Cast принудительно выключен;
+- `python scripts/full_cast_ablation.py` — v11→v12.
 
-Каждый эксперимент сравнивает MAE/RMSE/R², temporal periods/row counts, feature set и размер модели и не меняет `models/current.json`.
-
-Перед production publication требуется полный последовательный ablation на актуальной серверной IMDb БД.
+Все ablation непубликующие и не меняют `models/current.json`.
 
 ## Что осталось в P2
 
 - история человека как `director+writer`;
-- team-wide director↔writer/director↔actor aggregation как отдельное исследование;
-- previous team collaboration aggregate;
-- ensemble/team cohesion только после проверки raw team/pair history;
-- серверный v6→v11 ablation и решение, какие кандидаты реально оставлять.
+- actor↔actor history и previous ensemble collaboration отдельным инкрементом;
+- team-wide director↔writer/director↔actor aggregation;
+- ensemble/team cohesion только после проверки Full Cast и raw pair history;
+- серверный последовательный v6→v12 ablation и решение, какие кандидаты реально оставлять.
 
-Связанный следующий слой — `docs/PRODUCTION_CONTEXT.md`: студия, продюсер, франшиза/shared universe, изменения производства и внешние creative consultancies.
+Связанный слой — `docs/PRODUCTION_CONTEXT.md`: студия, продюсер, franchise/shared universe, изменения производства и внешние creative consultancies.

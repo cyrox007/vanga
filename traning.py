@@ -20,9 +20,8 @@ from src.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-# Production training использует расширенный P2 generator. Сам train_model остаётся
-# общим disk-first engine, поэтому baseline v5-v10 и candidate v11 проходят один и
-# тот же temporal split, CatBoost-конфигурацию и quality gate.
+# Production training использует расширенный P2 generator. Все baseline и
+# candidate-схемы проходят один temporal split, CatBoost-конфигурацию и gate.
 train_model_module.get_batches = creative_get_batches
 
 BASELINE_SCHEMA_VERSION = 5
@@ -32,6 +31,7 @@ DIRECTOR_WRITER_PAIR_SCHEMA_VERSION = 8
 DIRECTOR_ACTOR_PAIR_SCHEMA_VERSION = 9
 CREATIVE_TREND_SCHEMA_VERSION = 10
 DIRECTOR_TEAM_SCHEMA_VERSION = 11
+FULL_CAST_SCHEMA_VERSION = 12
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,10 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--without-director-writer-pair-features", action="store_true")
     parser.add_argument("--without-director-actor-pair-features", action="store_true")
     parser.add_argument("--without-creative-trend-features", action="store_true")
+    parser.add_argument("--without-director-team-features", action="store_true")
     parser.add_argument(
-        "--without-director-team-features",
+        "--without-full-cast-features",
         action="store_true",
-        help="отключить multi-director block и воспроизвести schema v10",
+        help="отключить Full Cast block и воспроизвести schema v11",
     )
     parser.add_argument("--iterations", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=10000)
@@ -81,6 +82,7 @@ def _log_evaluation_summary(metadata: dict, size_bytes: int) -> None:
         "director_actor_pair_features_version",
         "creative_trend_features_version",
         "director_team_features_version",
+        "full_cast_features_version",
     ):
         logger.info("%s=%s", name, metadata.get(name))
     logger.info("MAE=%s", _metric_text(metadata, "test_mae"))
@@ -113,20 +115,23 @@ def main(argv: list[str] | None = None) -> None:
     actor_pair_enabled = writer_pair_enabled and not args.without_director_actor_pair_features
     trend_enabled = actor_pair_enabled and not args.without_creative_trend_features
     director_team_enabled = trend_enabled and not args.without_director_team_features
+    full_cast_enabled = director_team_enabled and not args.without_full_cast_features
 
-    if not director_team_enabled and not args.smoke and not args.evaluation_only:
-        labels = [
-            (coverage_enabled, "Baseline schema v5"),
-            (creative_enabled, "Baseline schema v6"),
-            (writer_pair_enabled, "Baseline schema v7"),
-            (actor_pair_enabled, "Baseline schema v8"),
-            (trend_enabled, "Baseline schema v9"),
-        ]
-        baseline_name = "Baseline schema v10 без director-team"
-        for enabled, label in labels:
-            if not enabled:
-                baseline_name = label
-                break
+    if not full_cast_enabled and not args.smoke and not args.evaluation_only:
+        if not coverage_enabled:
+            baseline_name = "Baseline schema v5"
+        elif not creative_enabled:
+            baseline_name = "Baseline schema v6"
+        elif not writer_pair_enabled:
+            baseline_name = "Baseline schema v7"
+        elif not actor_pair_enabled:
+            baseline_name = "Baseline schema v8"
+        elif not trend_enabled:
+            baseline_name = "Baseline schema v9"
+        elif not director_team_enabled:
+            baseline_name = "Baseline schema v10"
+        else:
+            baseline_name = "Baseline schema v11 без Full Cast"
         raise SystemExit(
             f"{baseline_name} нельзя публиковать через этот entrypoint. "
             "Используйте --evaluation-only или --smoke."
@@ -139,19 +144,18 @@ def main(argv: list[str] | None = None) -> None:
         "VANGA_TRAIN_DIRECTOR_ACTOR_PAIR_FEATURES": actor_pair_enabled,
         "VANGA_TRAIN_CREATIVE_TREND_FEATURES": trend_enabled,
         "VANGA_TRAIN_DIRECTOR_TEAM_FEATURES": director_team_enabled,
+        "VANGA_TRAIN_FULL_CAST_FEATURES": full_cast_enabled,
     }
     for name, enabled in env.items():
         os.environ[name] = "1" if enabled else "0"
 
-    if args.smoke:
-        mode = "SMOKE (без публикации)"
-    elif args.evaluation_only:
-        mode = "FULL EVALUATION (без публикации)"
-    else:
-        mode = "FULL"
-
-    if director_team_enabled:
-        schema_label = "candidate v11"
+    mode = "SMOKE (без публикации)" if args.smoke else (
+        "FULL EVALUATION (без публикации)" if args.evaluation_only else "FULL"
+    )
+    if full_cast_enabled:
+        schema_label = "candidate v12"
+    elif director_team_enabled:
+        schema_label = "baseline v11"
     elif trend_enabled:
         schema_label = "baseline v10"
     elif actor_pair_enabled:
@@ -168,10 +172,11 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("=" * 60)
     logger.info("ЗАПУСК ОБУЧЕНИЯ CATBOOST")
     logger.info(
-        "Режим: %s; schema=%s; director_team=%s; iterations=%s; batch_size=%s; max_batches=%s",
+        "Режим: %s; schema=%s; director_team=%s; full_cast=%s; iterations=%s; batch_size=%s; max_batches=%s",
         mode,
         schema_label,
         "on" if director_team_enabled else "off",
+        "on" if full_cast_enabled else "off",
         iterations,
         args.batch_size,
         args.max_batches,
@@ -186,7 +191,9 @@ def main(argv: list[str] | None = None) -> None:
         iterations=iterations,
     )
 
-    if director_team_enabled:
+    if full_cast_enabled:
+        schema_version = FULL_CAST_SCHEMA_VERSION
+    elif director_team_enabled:
         schema_version = DIRECTOR_TEAM_SCHEMA_VERSION
     elif trend_enabled:
         schema_version = CREATIVE_TREND_SCHEMA_VERSION
@@ -208,6 +215,7 @@ def main(argv: list[str] | None = None) -> None:
     metadata["director_actor_pair_features_version"] = 1 if actor_pair_enabled else 0
     metadata["creative_trend_features_version"] = 1 if trend_enabled else 0
     metadata["director_team_features_version"] = 1 if director_team_enabled else 0
+    metadata["full_cast_features_version"] = 1 if full_cast_enabled else 0
 
     interpret_model(model, metadata)
 
@@ -222,7 +230,15 @@ def main(argv: list[str] | None = None) -> None:
                 shutil.rmtree(artifact_path.parent, ignore_errors=True)
         return
 
-    if not all((coverage_enabled, creative_enabled, writer_pair_enabled, actor_pair_enabled, trend_enabled, director_team_enabled)):
+    if not all((
+        coverage_enabled,
+        creative_enabled,
+        writer_pair_enabled,
+        actor_pair_enabled,
+        trend_enabled,
+        director_team_enabled,
+        full_cast_enabled,
+    )):
         raise SystemExit("Неполную baseline-схему нельзя публиковать через этот entrypoint.")
 
     save_trained_model(model, metadata)
