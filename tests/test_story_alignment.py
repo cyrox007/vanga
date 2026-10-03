@@ -150,21 +150,23 @@ class StoryAlignmentTests(unittest.TestCase):
             "source",
             "canonical",
             [
-                {"key": "anna-bell", "kind": "character", "label": "Anna Bell"},
-                {"key": "anna-belle", "kind": "character", "label": "Anna Belle"},
+                {"key": "anna-belly", "kind": "character", "label": "Anna Belly"},
+                {"key": "anna-bellz", "kind": "character", "label": "Anna Bellz"},
             ],
         )
         adaptation = self._map(
             "adaptation",
             "canonical",
-            [{"key": "anna-bele", "kind": "character", "label": "Anna Bele"}],
+            [{"key": "anna-bellx", "kind": "character", "label": "Anna Bellx"}],
         )
 
         result = SourceAdaptationAligner.align(source, adaptation)
 
         self.assertEqual(result["story_map"]["nodes"][0]["maps_from"], [])
         self.assertEqual(len(result["ambiguous_matches"]), 1)
-        self.assertEqual(result["ambiguous_matches"][0]["adaptation_key"], "anna-bele")
+        self.assertEqual(result["ambiguous_matches"][0]["adaptation_key"], "anna-bellx")
+        scores = [row["confidence"] for row in result["ambiguous_matches"][0]["candidates"]]
+        self.assertEqual(scores[0], scores[1])
 
     def test_explicit_match_rejects_kind_mismatch(self):
         source = self._map(
