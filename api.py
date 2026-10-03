@@ -37,16 +37,13 @@ def _generation_key(model_path: Path) -> str:
 
 def _ensure_engine() -> KinoVanga:
     global _engine, _generation, _last_reload_error
-
     model_path = resolve_current_model_path()
     generation = _generation_key(model_path)
     if _engine is not None and _generation == generation:
         return _engine
-
     with _lock:
         if _engine is not None and _generation == generation:
             return _engine
-
         try:
             candidate = KinoVanga(model_path)
         except Exception as exc:
@@ -56,21 +53,16 @@ def _ensure_engine() -> KinoVanga:
                 logger.warning("Продолжаем обслуживать запросы предыдущей моделью")
                 return _engine
             raise
-
         previous = _engine
         _engine = candidate
         _generation = generation
         _last_reload_error = None
-
         if previous is not None:
             try:
-                # Search может ещё использовать catalog connection старого
-                # поколения; закрываем его только после завершения такого запроса.
                 with _catalog_lock:
                     previous.close()
             except Exception:
                 logger.exception("Не удалось закрыть старые соединения DuckDB")
-
         logger.info("Активировано новое поколение модели Vanga")
         return candidate
 
@@ -93,7 +85,6 @@ def search_movies():
         return jsonify({"ok": True, "items": []})
     if len(query) > 120:
         return _json_error("Слишком длинный поисковый запрос", 400)
-
     raw_year = str(request.args.get("year") or "").strip()
     year = None
     if raw_year:
@@ -103,19 +94,13 @@ def search_movies():
             return _json_error("year должен быть целым числом", 400)
         if not (1888 <= year <= 2100):
             return _json_error("year вне допустимого диапазона", 400)
-
     try:
         engine = _ensure_engine()
         with _catalog_lock:
-            items = engine.catalog.search_movies(
-                query,
-                limit=_search_limit(),
-                year=year,
-            )
+            items = engine.catalog.search_movies(query, limit=_search_limit(), year=year)
     except Exception:
         logger.exception("Ошибка поиска фильмов Vanga")
         return _json_error("Поиск фильмов временно недоступен", 503)
-
     return jsonify({"ok": True, "items": items, "generation": _generation})
 
 
@@ -126,23 +111,16 @@ def search_people():
         return jsonify({"ok": True, "items": []})
     if len(query) > 120:
         return _json_error("Слишком длинный поисковый запрос", 400)
-
     role = str(request.args.get("role") or "actor").strip().lower()
     if role not in {"director", "writer", "actor"}:
         return _json_error("role должен быть director, writer или actor", 400)
-
     try:
         engine = _ensure_engine()
         with _catalog_lock:
-            items = engine.catalog.search_people(
-                query,
-                role=role,
-                limit=_search_limit(),
-            )
+            items = engine.catalog.search_people(query, role=role, limit=_search_limit())
     except Exception:
         logger.exception("Ошибка поиска персон Vanga")
         return _json_error("Поиск персон временно недоступен", 503)
-
     return jsonify({"ok": True, "items": items, "generation": _generation})
 
 
@@ -150,19 +128,14 @@ def search_people():
 def catalog_ratings():
     if request.content_length is not None and request.content_length > 32 * 1024:
         return _json_error("Слишком большой запрос", 413)
-
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return _json_error("Ожидается JSON-объект", 400)
-
     imdb_ids = payload.get("imdb_ids")
-    if not isinstance(imdb_ids, list) or any(
-        not isinstance(item, str) for item in imdb_ids
-    ):
+    if not isinstance(imdb_ids, list) or any(not isinstance(item, str) for item in imdb_ids):
         return _json_error("imdb_ids должен быть массивом строк", 400)
     if len(imdb_ids) > 100:
         return _json_error("За один запрос можно проверить не больше 100 фильмов", 400)
-
     try:
         engine = _ensure_engine()
         with _catalog_lock:
@@ -170,14 +143,7 @@ def catalog_ratings():
     except Exception:
         logger.exception("Ошибка чтения текущих IMDb ratings")
         return _json_error("Рейтинги временно недоступны", 503)
-
-    return jsonify(
-        {
-            "ok": True,
-            "items": items,
-            "generation": _generation,
-        }
-    )
+    return jsonify({"ok": True, "items": items, "generation": _generation})
 
 
 @app.get("/health")
@@ -185,26 +151,22 @@ def health():
     try:
         model_path = resolve_current_model_path()
         engine = _ensure_engine()
-        return jsonify(
-            {
-                "ok": True,
-                "status": "ready",
-                "model": str(model_path.name),
-                "generation": _generation,
-                "reload_error": _last_reload_error,
-                "database": str(engine.db_path.name),
-            }
-        )
+        return jsonify({
+            "ok": True,
+            "status": "ready",
+            "model": str(model_path.name),
+            "generation": _generation,
+            "reload_error": _last_reload_error,
+            "database": str(engine.db_path.name),
+        })
     except Exception as exc:
         logger.exception("Vanga healthcheck: модель недоступна")
-        return jsonify(
-            {
-                "ok": False,
-                "status": "degraded",
-                "error": str(exc),
-                "reload_error": _last_reload_error,
-            }
-        ), 503
+        return jsonify({
+            "ok": False,
+            "status": "degraded",
+            "error": str(exc),
+            "reload_error": _last_reload_error,
+        }), 503
 
 
 @app.get("/model-info")
@@ -212,21 +174,17 @@ def model_info():
     try:
         engine = _ensure_engine()
         metadata = engine.metadata if isinstance(engine.metadata, dict) else {}
-        return jsonify(
-            {
-                "ok": True,
-                "generation": _generation,
-                "schema_version": metadata.get("schema_version"),
-                "feature_names": metadata.get("feature_names") or [],
-                "categorical_features": metadata.get("categorical_features") or [],
-                "quality": engine.quality_summary(),
-                "uncertainty_available": bool(
-                    metadata.get("test_abs_error_quantiles")
-                ),
-                "quality_gate": metadata.get("quality_gate"),
-                "model_size_bytes": metadata.get("model_size_bytes"),
-            }
-        )
+        return jsonify({
+            "ok": True,
+            "generation": _generation,
+            "schema_version": metadata.get("schema_version"),
+            "feature_names": metadata.get("feature_names") or [],
+            "categorical_features": metadata.get("categorical_features") or [],
+            "quality": engine.quality_summary(),
+            "uncertainty_available": bool(metadata.get("test_abs_error_quantiles")),
+            "quality_gate": metadata.get("quality_gate"),
+            "model_size_bytes": metadata.get("model_size_bytes"),
+        })
     except Exception:
         logger.exception("Не удалось получить сведения о модели Vanga")
         return _json_error("Сведения о модели временно недоступны", 503)
@@ -236,13 +194,28 @@ def model_info():
 def predict():
     if request.content_length is not None and request.content_length > 48 * 1024:
         return _json_error("Слишком большой запрос", 413)
-
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return _json_error("Ожидается JSON-объект", 400)
 
     title = str(payload.get("title") or "").strip()
-    director = str(payload.get("director") or "").strip()
+    legacy_director = str(payload.get("director") or "").strip()
+    raw_directors = payload.get("directors")
+    if raw_directors is None:
+        directors = [legacy_director] if legacy_director else []
+    elif isinstance(raw_directors, list) and all(isinstance(item, str) for item in raw_directors):
+        directors = []
+        for item in raw_directors:
+            clean = item.strip()
+            if clean and clean not in directors:
+                directors.append(clean)
+        if legacy_director and legacy_director not in directors:
+            directors.insert(0, legacy_director)
+    else:
+        return _json_error("directors должен быть массивом строк", 400)
+    directors = directors[:8]
+    director = directors[0] if directors else ""
+
     writer = str(payload.get("writer") or "").strip()
     synopsis = str(payload.get("synopsis") or "").strip()
     genres = payload.get("genres")
@@ -264,8 +237,10 @@ def predict():
         return _json_error("Укажите название фильма", 400)
     if imdb_id and (len(imdb_id) > 16 or not imdb_id.startswith("tt")):
         return _json_error("Некорректный imdb_id", 400)
-    if not director or len(director) > 240:
-        return _json_error("Укажите режиссёра", 400)
+    if not directors:
+        return _json_error("Укажите хотя бы одного режиссёра", 400)
+    if any(len(item) > 240 for item in directors):
+        return _json_error("Слишком длинное имя режиссёра", 400)
     if len(writer) > 240:
         return _json_error("Слишком длинное имя сценариста", 400)
     if len(synopsis) > 5000:
@@ -295,7 +270,6 @@ def predict():
         genres_value = [item.strip() for item in genres if item.strip()]
     else:
         return _json_error("genres должен быть строкой или массивом строк", 400)
-
     if not genres_value:
         return _json_error("Укажите жанр", 400)
     if not isinstance(actors, list) or any(not isinstance(item, str) for item in actors):
@@ -308,6 +282,7 @@ def predict():
             result: Any = engine.predict(
                 title=title,
                 director=director,
+                directors=directors,
                 writer=writer or None,
                 year=year,
                 runtime=runtime,
@@ -328,32 +303,32 @@ def predict():
                 contributions=result.get("contributions") or {},
             )
             profile["source"] = clean_source
+            profile["director_team"] = {
+                "requested": directors,
+                "count": len(directors),
+            }
     except Exception:
         logger.exception("Ошибка предсказания Vanga")
         return _json_error("Модель временно не смогла выполнить предсказание", 503)
 
-    return jsonify(
-        {
-            "ok": True,
-            "title": title,
-            "imdb_id": (
-                imdb_id
-                or (
-                    (result.get("input_resolution") or {}).get("title") or {}
-                ).get("imdb_id")
-                or None
-            ),
-            "generation": _generation,
-            "rating": result["rating"],
-            "base": result.get("base"),
-            "uncertainty": result.get("uncertainty"),
-            "quality": result.get("quality") or {},
-            "explanation": result["explanation"],
-            "contributions": result["contributions"],
-            "input_resolution": result.get("input_resolution", {}),
-            "pre_release_profile": profile,
-        }
-    )
+    return jsonify({
+        "ok": True,
+        "title": title,
+        "imdb_id": (
+            imdb_id
+            or (((result.get("input_resolution") or {}).get("title") or {}).get("imdb_id"))
+            or None
+        ),
+        "generation": _generation,
+        "rating": result["rating"],
+        "base": result.get("base"),
+        "uncertainty": result.get("uncertainty"),
+        "quality": result.get("quality") or {},
+        "explanation": result["explanation"],
+        "contributions": result["contributions"],
+        "input_resolution": result.get("input_resolution", {}),
+        "pre_release_profile": profile,
+    })
 
 
 if __name__ == "__main__":
