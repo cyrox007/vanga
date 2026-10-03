@@ -24,6 +24,11 @@ from src.pair_features import (
     director_writer_pair_features_enabled,
     fetch_batch_director_writer_pair_context,
 )
+from src.trend_features import (
+    CREATIVE_TREND_FEATURE_NAMES,
+    creative_trend_features_enabled,
+    fetch_batch_creative_trend_context,
+)
 from src.logger import setup_logger
 
 
@@ -42,9 +47,10 @@ def get_batches(
 
     Иерархия схем сохраняется воспроизводимой:
     - Creative Team off -> schema v6;
-    - Creative Team on + director-writer pair off -> schema v7;
-    - director-writer pair on + director-actor pair off -> schema v8;
-    - оба pair-блока on -> candidate schema v9.
+    - director-writer pair off -> schema v7;
+    - director-actor pair off -> schema v8;
+    - trend off -> schema v9;
+    - все текущие P2-блоки on -> candidate schema v10.
 
     Все P2-блоки используют одно дополнительное соединение DuckDB, чтобы не
     увеличивать число одновременных соединений и память на production VPS.
@@ -56,6 +62,7 @@ def get_batches(
     actor_pair_enabled = (
         writer_pair_enabled and director_actor_pair_features_enabled()
     )
+    trend_enabled = actor_pair_enabled and creative_trend_features_enabled()
     if not creative_enabled:
         yield from base_get_batches(
             genres,
@@ -80,6 +87,11 @@ def get_batches(
         logger.info(
             "Director-actor pair features включены: %s",
             ", ".join(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES),
+        )
+    if trend_enabled:
+        logger.info(
+            "Creative trend features включены: %s",
+            ", ".join(CREATIVE_TREND_FEATURE_NAMES),
         )
 
     # Базовый data_filtr держит обычное соединение с той же DuckDB. Открываем
@@ -136,6 +148,15 @@ def get_batches(
                     default = 6.5 if feature_name.endswith("_avg_rating") else 0.0
                     values = [
                         actor_pair_context.get(tconst, {}).get(feature_name, default)
+                        for tconst in tconsts
+                    ]
+                    enriched[feature_name] = np.asarray(values, dtype=np.float32)
+
+            if trend_enabled:
+                trend_context = fetch_batch_creative_trend_context(conn, tconsts)
+                for feature_name in CREATIVE_TREND_FEATURE_NAMES:
+                    values = [
+                        trend_context.get(tconst, {}).get(feature_name, 0.0)
                         for tconst in tconsts
                     ]
                     enriched[feature_name] = np.asarray(values, dtype=np.float32)
