@@ -1,38 +1,33 @@
 """
-КиноВанга - модуль предсказания рейтинга фильма.
+КиноВанга — inference-модуль предсказания рейтинга фильма.
 
-Модель принимает на вход:
-- название фильма (не используется напрямую, но может быть полезно для поиска)
-- год выхода
-- длительность (в минутах)
-- жанр (список или строка через запятую)
-- режиссёр (имя)
-- до 5 актёров (имена)
-
-Возвращает предсказанный рейтинг (0-10).
-
-ВАЖНО: Статистика по режиссёрам и актёрам вычисляется на лету через DuckDB,
-а не загружается из файлов. Это позволяет работать с ограниченной памятью.
+Все исторические признаки вычисляются из локальной IMDb DuckDB только по данным,
+которые существовали до года прогнозируемого фильма. Новые feature-блоки
+активируются по metadata конкретного поколения модели, поэтому старые поколения
+не получают лишних запросов и сохраняют прежний контракт.
 """
 
-from catboost import CatBoostRegressor, Pool
-import numpy as np
-import pickle
 from pathlib import Path
 from typing import List, Optional, Union
-import duckdb
+import pickle
 
-from src.logger import setup_logger
+from catboost import CatBoostRegressor, Pool
+import duckdb
+import numpy as np
+
 from settings import config
 from src.catalog import CatalogSearch
+from src.creative_team_features import load_person_context
 from src.input_aliases import RussianInputResolver
+from src.logger import setup_logger
 from src.normalize import extract_title_features, normalize_genre_str
+
 
 logger = setup_logger(__name__)
 
 
 class KinoVanga:
-    """Класс для предсказания рейтинга фильма."""
+    """Предсказание рейтинга и explainability для активного поколения Vanga."""
 
     def __init__(self, model_path, db_path=None):
         self.model_path = Path(model_path)
@@ -40,11 +35,9 @@ class KinoVanga:
         self.db_path = Path(db_path) if db_path else Path(config.IMDB_DB_PATH)
         self.director_cache = {}
         self.actor_cache = {}
-        self._people_cache = {}  # общий кэш для всех персон
-        # Открываем соединение один раз
+        self._people_cache = {}
+
         self.conn = duckdb.connect(str(self.db_path), read_only=True)
-        # Inference держит собственное соединение: catalog search не должен
-        # блокировать запрос модели во время внешнего alias lookup.
         self.conn.execute("SET memory_limit = '400MB'")
         self.conn.execute("SET threads = 2")
 
@@ -80,13 +73,7 @@ class KinoVanga:
         *,
         role: str,
     ) -> dict:
-        """Возвращает ID и role-specific history персоны до года прогноза.
-
-        ID найденной персоны сохраняется даже при нулевой prior history. Числовой
-        fallback 6.5 остаётся только для совместимости старых моделей; schema v6
-        отдельно получает ``known`` и ``prior_count`` и больше не смешивает
-        отсутствие данных с реальным средним рейтингом.
-        """
+        """Возвращает IMDb ID и role-specific history до года прогноза."""
         clean_names = [name.strip() for name in names if name and name.strip()]
         if not clean_names:
             return {}
@@ -102,7 +89,6 @@ class KinoVanga:
 
         cached: dict[str, dict] = {}
         missing: list[str] = []
-
         for name in clean_names:
             cache_key = (role, name.casefold(), int(before_year))
             if cache_key in self._people_cache:
@@ -240,6 +226,7 @@ class KinoVanga:
                 query,
                 [missing, *categories, int(before_year)],
             ).fetchall()
+
         for name, nconst, avg_rating, works_count in rows:
             prior_count = int(works_count or 0)
             info = {
@@ -260,24 +247,17 @@ class KinoVanga:
         return cached
 
     def _load_model(self):
-        logger.info(f"Загрузка модели из {self.model_path}")
-
-        # Загружаем CatBoost модель
+        logger.info("Загрузка модели из %s", self.model_path)
         self.model = CatBoostRegressor()
         self.model.load_model(self.model_path)
-
         logger.info("CatBoost модель загружена")
 
-        # Загружаем метаданные
         metadata_path = self.model_path.parent / "metadata.pkl"
-
         if not metadata_path.exists():
             raise FileNotFoundError(f"Не найден файл метаданных: {metadata_path}")
-
-        with open(metadata_path, "rb") as f:
-            self.metadata = pickle.load(f)
-
-        logger.info(f"Метаданные загружены: {metadata_path}")
+        with open(metadata_path, "rb") as handle:
+            self.metadata = pickle.load(handle)
+        logger.info("Метаданные загружены: %s", metadata_path)
 
     def quality_summary(self) -> dict:
         """Возвращает проверяемые метрики активной модели из metadata.pkl."""
@@ -310,17 +290,11 @@ class KinoVanga:
         }
 
     def uncertainty_for_rating(self, rating: float) -> dict | None:
-        """Строит эмпирический диапазон по ошибкам temporal holdout.
-
-        Диапазон не является вероятностью конкретного фильма. Он показывает,
-        какую абсолютную ошибку модель не превышала примерно в указанной доле
-        объектов временной тестовой выборки.
-        """
+        """Строит эмпирический диапазон по ошибкам temporal holdout."""
         metadata = self.metadata if isinstance(self.metadata, dict) else {}
         quantiles = metadata.get("test_abs_error_quantiles")
         if not isinstance(quantiles, dict):
             return None
-
         try:
             margin = float(quantiles["q80"])
         except (KeyError, TypeError, ValueError):
@@ -350,6 +324,17 @@ class KinoVanga:
             "test_rows": metadata.get("test_rows"),
         }
 
+    @staticmethod
+    def _empty_creative_context() -> dict:
+        return {
+            "genre_avg_rating": 6.5,
+            "genre_prior_count": 0,
+            "genre_known": 0.0,
+            "recent_avg_rating": 6.5,
+            "recent_count": 0,
+            "recent_known": 0.0,
+        }
+
     def _prepare_features(
         self,
         year: int,
@@ -364,15 +349,14 @@ class KinoVanga:
         """Готовит признаки в точности в том же виде, что и training pipeline."""
         import time
 
-        del num_votes  # пострелизный признак намеренно не используется
-
+        del num_votes
         t0 = time.perf_counter()
         actors = actors or []
 
         genres_str = ",".join(genres) if isinstance(genres, list) else (genres or "")
         genres_combined = normalize_genre_str(genres_str)
-
         feature_names_set = set(self.metadata.get("feature_names", []))
+
         title_features_dict = {}
         if title:
             for key, value in extract_title_features(title).items():
@@ -445,6 +429,50 @@ class KinoVanga:
                 }
             )
 
+        creative_feature_names = {
+            "director_genre_avg_rating",
+            "director_genre_prior_count",
+            "director_genre_known",
+            "director_recent_avg_rating",
+            "director_recent_count",
+            "director_recent_known",
+            "writer_genre_avg_rating",
+            "writer_genre_prior_count",
+            "writer_genre_known",
+            "writer_recent_avg_rating",
+            "writer_recent_count",
+            "writer_recent_known",
+            "director_is_writer",
+        }
+        creative_enabled = bool(feature_names_set & creative_feature_names)
+        if creative_enabled:
+            director_context = load_person_context(
+                self.conn,
+                nconst=None if director_id == "Unknown" else director_id,
+                role="director",
+                before_year=int(year),
+                genres=genres_combined,
+            )
+            writer_context = load_person_context(
+                self.conn,
+                nconst=None if writer_id == "Unknown" else writer_id,
+                role="writer",
+                before_year=int(year),
+                genres=genres_combined,
+            )
+        else:
+            director_context = self._empty_creative_context()
+            writer_context = self._empty_creative_context()
+
+        director_is_writer = (
+            1.0
+            if creative_enabled
+            and director_id != "Unknown"
+            and writer_id != "Unknown"
+            and director_id == writer_id
+            else 0.0
+        )
+
         features = {
             "startYear": (int(year) - 1900) / 100.0,
             "runtimeMinutes": int(runtime) / 100.0,
@@ -463,6 +491,21 @@ class KinoVanga:
             "actor_3_avg_rating": actor_infos[2]["avg_rating"],
             "actor_3_prior_count": float(actor_infos[2]["prior_count"]),
             "actor_3_known": actor_infos[2]["known"],
+            "director_genre_avg_rating": director_context["genre_avg_rating"],
+            "director_genre_prior_count": float(
+                director_context["genre_prior_count"]
+            ),
+            "director_genre_known": director_context["genre_known"],
+            "director_recent_avg_rating": director_context["recent_avg_rating"],
+            "director_recent_count": float(director_context["recent_count"]),
+            "director_recent_known": director_context["recent_known"],
+            "writer_genre_avg_rating": writer_context["genre_avg_rating"],
+            "writer_genre_prior_count": float(writer_context["genre_prior_count"]),
+            "writer_genre_known": writer_context["genre_known"],
+            "writer_recent_avg_rating": writer_context["recent_avg_rating"],
+            "writer_recent_count": float(writer_context["recent_count"]),
+            "writer_recent_known": writer_context["recent_known"],
+            "director_is_writer": director_is_writer,
             "genres_combined": genres_combined,
             "director_id": director_id,
             "writer_id": writer_id,
@@ -484,30 +527,26 @@ class KinoVanga:
 
         X = np.array(data, dtype=object).reshape(1, -1)
         logger.info(
-            f"_prepare_features завершён за {time.perf_counter() - t0:.3f} сек"
+            "_prepare_features завершён за %.3f сек",
+            time.perf_counter() - t0,
         )
         return X
 
-    def predict(self, year, runtime, genres, director=None, writer=None,
-            actors=None, num_votes=None, title=None, explain=False) -> float:
-        """
-        Предсказывает рейтинг фильма.
-
-        Args:
-            title: Название фильма (не используется в модели, но может быть полезно для логов)
-            year: Год выхода
-            runtime: Длительность в минутах
-            genres: Жанр (строка через запятую или список)
-            director: Имя режиссёра
-            writer: Имя сценариста
-            actors: Список имён актёров (до 5)
-            num_votes: Количество голосов (для новых фильмов можно не указывать)
-
-        Returns:
-            Предсказанный рейтинг (0-10)
-        """
+    def predict(
+        self,
+        year,
+        runtime,
+        genres,
+        director=None,
+        writer=None,
+        actors=None,
+        num_votes=None,
+        title=None,
+        explain=False,
+    ) -> float:
+        """Предсказывает рейтинг фильма."""
         if title:
-            logger.info(f"Предсказание для фильма: {title} ({year})")
+            logger.info("Предсказание для фильма: %s (%s)", title, year)
 
         writer_features_enabled = {
             "writer_id",
@@ -525,8 +564,6 @@ class KinoVanga:
         resolved_writer = resolved_input["writer"]
         resolved_actors = resolved_input["actors"]
 
-        # Подготовка признаков. Русские названия/имена при найденном
-        # соответствии уже заменены на канонические значения локального IMDb.
         X = self._prepare_features(
             year,
             runtime,
@@ -538,57 +575,44 @@ class KinoVanga:
             title=resolved_title,
         )
 
-        # Проверка размерности
-        expected_features = len(self.metadata['feature_names'])
+        expected_features = len(self.metadata["feature_names"])
         if X.shape[1] != expected_features:
             raise ValueError(
                 f"Ожидалось {expected_features} признаков, получено {X.shape[1]}. "
-                f"Проверьте корректность входных данных."
+                "Проверьте корректность входных данных."
             )
 
-        # Предсказание
         rating = float(self.model.predict(X)[0])
-        rating = max(0, min(10, rating))
-        rounded_rating = round(rating, 2)
-
+        rounded_rating = round(max(0, min(10, rating)), 2)
         if not explain:
             return rounded_rating
 
-        # --- Объяснение через SHAP ---
         test_pool = Pool(
             data=X,
-            cat_features=self.metadata.get('cat_features_idx', []),
-            feature_names=self.metadata['feature_names']
+            cat_features=self.metadata.get("cat_features_idx", []),
+            feature_names=self.metadata["feature_names"],
         )
-        shap_values = self.model.get_feature_importance(data=test_pool, type='ShapValues')[0]
+        shap_values = self.model.get_feature_importance(
+            data=test_pool,
+            type="ShapValues",
+        )[0]
         base_value = shap_values[-1]
-        contributions = dict(zip(self.metadata['feature_names'], shap_values[:-1]))
-
+        contributions = dict(
+            zip(self.metadata["feature_names"], shap_values[:-1])
+        )
         return {
-            'rating': rounded_rating,
-            'base': base_value,
-            'contributions': contributions,
-            'explanation': self._format_explanation(contributions),
-            'input_resolution': resolved_input["matches"],
-            'uncertainty': self.uncertainty_for_rating(rounded_rating),
-            'quality': self.quality_summary(),
+            "rating": rounded_rating,
+            "base": base_value,
+            "contributions": contributions,
+            "explanation": self._format_explanation(contributions),
+            "input_resolution": resolved_input["matches"],
+            "uncertainty": self.uncertainty_for_rating(rounded_rating),
+            "quality": self.quality_summary(),
         }
 
     def predict_batch(self, movies: List[dict]) -> List[float]:
-        """
-        Предсказывает рейтинги для нескольких фильмов.
-
-        Args:
-            movies: Список словарей с параметрами фильмов
-
-        Returns:
-            Список предсказанных рейтингов
-        """
-        ratings = []
-        for movie in movies:
-            rating = self.predict(**movie)
-            ratings.append(rating)
-        return ratings
+        """Предсказывает рейтинги для нескольких фильмов."""
+        return [self.predict(**movie) for movie in movies]
 
     def get_feature_importance(self) -> dict:
         """Возвращает встроенную CatBoost importance по признакам."""
@@ -653,19 +677,20 @@ class KinoVanga:
 
     def _format_explanation(self, contributions):
         parts = []
-        # Сортируем по абсолютному вкладу, берём топ-5
-        sorted_items = sorted(contributions.items(), key=lambda x: abs(x[1]), reverse=True)
-        for name, val in sorted_items[:5]:
-            if abs(val) > 0.05:  # порог значимости
-                sign = '+' if val > 0 else ''
-                parts.append(f"{name}: {sign}{val:.2f}")
+        sorted_items = sorted(
+            contributions.items(),
+            key=lambda item: abs(item[1]),
+            reverse=True,
+        )
+        for name, value in sorted_items[:5]:
+            if abs(value) > 0.05:
+                sign = "+" if value > 0 else ""
+                parts.append(f"{name}: {sign}{value:.2f}")
         if parts:
             return "Рейтинг сформирован за счёт: " + "; ".join(parts)
-        else:
-            return "Нет значимых факторов"
+        return "Нет значимых факторов"
 
 
-# Удобная функция для быстрого использования
 def predict_movie_rating(
     title: str,
     year: int,
@@ -674,26 +699,12 @@ def predict_movie_rating(
     director: str,
     writer: Optional[str] = None,
     actors: List[str] = None,
-    model_path: Optional[str] = None
+    model_path: Optional[str] = None,
 ) -> float:
-    """
-    Быстрое предсказание рейтинга фильма.
-
-    Args:
-        title: Название фильма
-        year: Год выхода
-        runtime: Длительность в минутах
-        genres: Жанр (строка через запятую или список)
-        director: Имя режиссёра
-        writer: Имя сценариста
-        actors: Список имён актёров (до 5)
-        model_path: Путь к модели (опционально)
-
-    Returns:
-        Предсказанный рейтинг
-    """
+    """Удобная функция для быстрого одиночного предсказания."""
     if model_path is None:
         from src.train_model import resolve_current_model_path
+
         model_path = str(resolve_current_model_path())
     kino = KinoVanga(model_path=model_path)
     return kino.predict(
@@ -703,5 +714,5 @@ def predict_movie_rating(
         director=director,
         writer=writer,
         actors=actors,
-        title=title
+        title=title,
     )
