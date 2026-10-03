@@ -1,4 +1,5 @@
 import gc
+import os
 from pathlib import Path
 from typing import Generator, List, Optional, Tuple
 
@@ -13,6 +14,17 @@ from src.normalize import extract_title_features, normalize_genre_str
 
 
 logger = setup_logger(__name__)
+
+
+def _coverage_features_enabled() -> bool:
+    """Возвращает режим coverage-признаков для воспроизводимого ablation.
+
+    По умолчанию schema v6 включена. Значение переменной окружения
+    ``VANGA_TRAIN_COVERAGE_FEATURES=0`` восстанавливает feature set baseline v5,
+    не меняя temporal SQL и исходный IMDb dataset.
+    """
+    raw = str(os.getenv("VANGA_TRAIN_COVERAGE_FEATURES", "1")).strip().casefold()
+    return raw not in {"0", "false", "no", "off"}
 
 
 @db_connector
@@ -56,11 +68,17 @@ def get_batches(
     - numVotes не используется, потому что до релиза этот признак неизвестен;
     - первые три актёра выбираются по рангу среди актёров, а не по глобальному ordering;
     - для совместимости avg_rating без истории остаётся 6.5, но schema v6 получает
-      отдельные *_known и *_prior_count, поэтому fallback больше не выглядит фактом.
+      отдельные *_known и *_prior_count, поэтому fallback больше не выглядит фактом;
+    - VANGA_TRAIN_COVERAGE_FEATURES=0 отключает только coverage-признаки и нужен
+      для честного ablation на том же temporal pipeline.
     """
     del genres  # список жанров оставлен в сигнатуре для обратной совместимости
+    coverage_enabled = _coverage_features_enabled()
 
-    logger.info("Инициализация генератора обучающих батчей")
+    logger.info(
+        "Инициализация генератора обучающих батчей; coverage_features=%s",
+        "on" if coverage_enabled else "off (baseline v5)",
+    )
     conn = duckdb.connect(config.IMDB_DB_PATH)
     conn.execute("SET memory_limit = '700MB'")
     conn.execute("SET threads = 2")
@@ -332,16 +350,18 @@ def get_batches(
                 numeric_df["director_avg_rating"] = (
                     df_batch["director_avg_rating"].fillna(6.5).astype(np.float32)
                 )
-                numeric_df["director_prior_count"] = director_prior.astype(np.float32)
-                numeric_df["director_known"] = (director_prior > 0).astype(np.float32)
+                if coverage_enabled:
+                    numeric_df["director_prior_count"] = director_prior.astype(np.float32)
+                    numeric_df["director_known"] = (director_prior > 0).astype(np.float32)
 
             if use_writer_stats:
                 writer_prior = df_batch["writer_prior_count"].fillna(0)
                 numeric_df["writer_avg_rating"] = (
                     df_batch["writer_avg_rating"].fillna(6.5).astype(np.float32)
                 )
-                numeric_df["writer_prior_count"] = writer_prior.astype(np.float32)
-                numeric_df["writer_known"] = (writer_prior > 0).astype(np.float32)
+                if coverage_enabled:
+                    numeric_df["writer_prior_count"] = writer_prior.astype(np.float32)
+                    numeric_df["writer_known"] = (writer_prior > 0).astype(np.float32)
 
             if use_actor_stats:
                 for i in range(3):
@@ -350,8 +370,9 @@ def get_batches(
                     known_col = f"actor_{i + 1}_known"
                     prior = df_batch[prior_col].fillna(0)
                     numeric_df[col] = df_batch[col].fillna(6.5).astype(np.float32)
-                    numeric_df[prior_col] = prior.astype(np.float32)
-                    numeric_df[known_col] = (prior > 0).astype(np.float32)
+                    if coverage_enabled:
+                        numeric_df[prior_col] = prior.astype(np.float32)
+                        numeric_df[known_col] = (prior > 0).astype(np.float32)
 
             title_features = (
                 df_batch["primaryTitle"]
