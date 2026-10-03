@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import os
 import shutil
 from datetime import datetime, timezone
@@ -10,6 +11,11 @@ from settings import config
 import src.train_model as train_model_module
 from src.creative_training import get_batches as creative_get_batches
 from src.data_freshness import require_fresh_imdb_data
+from src.stable_training import (
+    evaluate_validation_candidate,
+    make_year_limited_batches,
+    train_final_refit_model,
+)
 from src.train_model import (
     interpret_model,
     save_trained_model,
@@ -154,14 +160,24 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     freshness_report = None
+    stable_target_max_year = None
     if not args.smoke and not args.evaluation_only:
         try:
             freshness_report = require_fresh_imdb_data()
         except RuntimeError as exc:
             raise SystemExit(str(exc)) from exc
+        stable_target_max_year = freshness_report.get(
+            "recommended_training_target_max_year"
+        )
+        if stable_target_max_year is None:
+            raise SystemExit(
+                "IMDb Data Freshness не определил recommended_training_target_max_year"
+            )
+        stable_target_max_year = int(stable_target_max_year)
         logger.info(
-            "IMDb Data Freshness пройден: stable_history_through=%s; fingerprint=%s",
+            "IMDb Data Freshness пройден: stable_history_through=%s; target_max=%s; fingerprint=%s",
             freshness_report.get("stable_history_through_year"),
+            stable_target_max_year,
             freshness_report.get("logical_fingerprint_sha256"),
         )
 
@@ -181,7 +197,7 @@ def main(argv: list[str] | None = None) -> None:
         os.environ[name] = "1" if enabled else "0"
 
     mode = "SMOKE (без публикации)" if args.smoke else (
-        "FULL EVALUATION (без публикации)" if args.evaluation_only else "FULL"
+        "FULL EVALUATION (без публикации)" if args.evaluation_only else "FULL VALIDATE + REFIT"
     )
     if team_collaboration_enabled:
         schema_label = "candidate v15"
@@ -209,13 +225,14 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("=" * 60)
     logger.info("ЗАПУСК ОБУЧЕНИЯ CATBOOST")
     logger.info(
-        "Режим: %s; schema=%s; full_cast=%s; cast_pair=%s; dual_role=%s; team_collaboration=%s; iterations=%s; batch_size=%s; max_batches=%s",
+        "Режим: %s; schema=%s; full_cast=%s; cast_pair=%s; dual_role=%s; team_collaboration=%s; stable_target_max_year=%s; iterations=%s; batch_size=%s; max_batches=%s",
         mode,
         schema_label,
         "on" if full_cast_enabled else "off",
         "on" if cast_pair_enabled else "off",
         "on" if dual_role_enabled else "off",
         "on" if team_collaboration_enabled else "off",
+        stable_target_max_year,
         iterations,
         args.batch_size,
         args.max_batches,
@@ -223,12 +240,23 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("=" * 60)
 
     genres = get_all_genres()
-    model, metadata = train_catboost_model(
-        genres,
-        batch_size=args.batch_size,
-        max_batches=args.max_batches,
-        iterations=iterations,
-    )
+    previous_batch_provider = train_model_module.get_batches
+    if stable_target_max_year is not None:
+        train_model_module.get_batches = make_year_limited_batches(
+            creative_get_batches,
+            stable_target_max_year,
+        )
+    else:
+        train_model_module.get_batches = creative_get_batches
+    try:
+        validation_model, metadata = train_catboost_model(
+            genres,
+            batch_size=args.batch_size,
+            max_batches=args.max_batches,
+            iterations=iterations,
+        )
+    finally:
+        train_model_module.get_batches = previous_batch_provider
 
     if team_collaboration_enabled:
         schema_version = TEAM_COLLABORATION_SCHEMA_VERSION
@@ -270,22 +298,21 @@ def main(argv: list[str] | None = None) -> None:
             "stable_history_through_year": freshness_report.get(
                 "stable_history_through_year"
             ),
-            "recommended_training_target_max_year": freshness_report.get(
-                "recommended_training_target_max_year"
-            ),
+            "recommended_training_target_max_year": stable_target_max_year,
             "current_year_status": freshness_report.get("current_year_status"),
             "logical_fingerprint_sha256": freshness_report.get(
                 "logical_fingerprint_sha256"
             ),
         }
+        metadata["validation_target_max_year"] = stable_target_max_year
 
-    interpret_model(model, metadata)
+    interpret_model(validation_model, metadata)
 
     if args.smoke or args.evaluation_only:
         artifact_path = None
         kind = "smoke" if args.smoke else "evaluation"
         try:
-            artifact_path, size_bytes = _save_temporary_artifact(model, kind)
+            artifact_path, size_bytes = _save_temporary_artifact(validation_model, kind)
             _log_evaluation_summary(metadata, size_bytes)
         finally:
             if artifact_path is not None:
@@ -306,8 +333,40 @@ def main(argv: list[str] | None = None) -> None:
     )):
         raise SystemExit("Неполную baseline-схему нельзя публиковать через этот entrypoint.")
 
-    save_trained_model(model, metadata)
-    logger.info("ОБУЧЕНИЕ ЗАВЕРШЕНО УСПЕШНО")
+    try:
+        pre_refit_gate = evaluate_validation_candidate(metadata)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    metadata["pre_refit_quality_gate"] = pre_refit_gate
+    metadata["training_mode"] = "temporal_validation_then_stable_refit"
+    metadata["published_metrics_source"] = "separate_temporal_validation_model"
+
+    # На малом VPS нельзя одновременно держать validation и refit CatBoost.
+    # Метрики/feature schema уже сохранены в metadata, поэтому освобождаем модель
+    # до второго disk-first прохода.
+    del validation_model
+    gc.collect()
+    logger.info("Temporal validation model освобождена перед FINAL REFIT")
+
+    final_model, refit_metadata = train_final_refit_model(
+        genres,
+        base_get_batches=creative_get_batches,
+        expected_feature_names=list(metadata["feature_names"]),
+        max_target_year=stable_target_max_year,
+        batch_size=args.batch_size,
+        max_batches=args.max_batches,
+        iterations=iterations,
+    )
+    metadata.update(refit_metadata)
+    metadata["published_model_fit"] = "all_stable_targets"
+
+    interpret_model(final_model, metadata)
+    save_trained_model(final_model, metadata)
+    logger.info(
+        "ОБУЧЕНИЕ ЗАВЕРШЕНО УСПЕШНО: temporal validation + final refit years=%s-%s",
+        metadata.get("refit_year_from"),
+        metadata.get("refit_year_to"),
+    )
 
 
 if __name__ == "__main__":

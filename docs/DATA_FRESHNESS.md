@@ -72,7 +72,7 @@ python scripts/data_freshness.py check \
 
 Новые dataset metadata также получают `downloaded_at`.
 
-Сам updater не обязан падать, если snapshot ещё не production-ready: его задача скачать и собрать данные. Но full model publication должна быть запрещена до исправления freshness problems.
+Сам updater не обязан падать, если snapshot ещё не production-ready: его задача скачать и собрать данные. Но full model publication запрещена до исправления freshness problems.
 
 ## Связь с `traning.py`
 
@@ -80,17 +80,55 @@ python scripts/data_freshness.py check \
 - `--evaluation-only` — freshness guard не блокирует запуск;
 - обычный FULL mode — `require_fresh_imdb_data()` обязателен **до начала тяжёлого CatBoost training**.
 
-Fingerprint и `stable_history_through_year` сохраняются в metadata опубликованной candidate-модели.
+Fingerprint и `stable_history_through_year` сохраняются в metadata опубликованной модели.
 
-## Почему одного backfill недостаточно
+## Production lifecycle: validation → quality gate → refit
 
-Текущий temporal training использует последние два года как holdout. Это правильно для честной оценки, но означает, что evaluation-модель обучается без этих лет.
+После freshness/backfill Vanga не публикует непосредственно temporal-validation модель.
 
-Поэтому после freshness/backfill нужен следующий отдельный инкремент:
+FULL mode работает так:
 
-**temporal validation → quality gate → final refit на всех стабильных данных → atomic publication**.
+1. freshness guard определяет `recommended_training_target_max_year`;
+2. target rows более новых лет исключаются из validation dataset;
+3. последние два календарных года **внутри stable history** остаются out-of-time holdout;
+4. validation model считает MAE/RMSE/R² и uncertainty quantiles;
+5. candidate проходит quality gate против active metadata, когда holdout сопоставим;
+6. validation CatBoost освобождается из памяти;
+7. запускается отдельный disk-first **FINAL REFIT** на всех stable target rows до `recommended_training_target_max_year` включительно;
+8. публикуется refit-модель;
+9. metadata публикации продолжает хранить только честные metrics отдельной temporal-validation модели.
 
-Quality metrics при этом должны оставаться метриками holdout-модели; refit-модель не должна выдавать training fit за честную out-of-time оценку.
+Например, в 2026 году при stable cutoff 2025 validation использует 2024–2025 как holdout и более ранние годы как train. После прохождения quality gate production artifact переобучается уже на всей стабильной истории до 2025 включительно.
+
+Это принципиально: production model получает свежую историю 2024–2025, но качество не оценивается на тех же строках, на которых final artifact был refit.
+
+## Защита малой VPS
+
+Validation и final refit не удерживаются в памяти одновременно. После quality gate validation model удаляется и вызывается GC, затем строится второй disk-backed dataset.
+
+Refit использует те же ограничения CatBoost, что и validation:
+
+- один thread;
+- `used_ram_limit=900mb`;
+- ограничение CTR;
+- disk-first TSV;
+- тот же feature schema.
+
+Если feature schema между validation и refit различается, публикация прекращается.
+
+## Metadata опубликованной модели
+
+Новый lifecycle фиксирует как минимум:
+
+- `training_mode = temporal_validation_then_stable_refit`;
+- `published_metrics_source = separate_temporal_validation_model`;
+- validation train/test years и metrics;
+- `validation_target_max_year`;
+- `refit_year_from/refit_year_to`;
+- `refit_rows`;
+- `refit_target_max_year`;
+- freshness fingerprint;
+- pre-refit quality gate.
 
 ## История рейтинга
 
