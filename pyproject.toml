@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["api", "enrich", "settings", "traning"]
+py-modules = ["adaptation_analyze", "api", "enrich", "settings", "traning"]
 
 [tool.setuptools.packages.find]
 include = ["src*"]
