@@ -4,6 +4,7 @@ from typing import List, Optional, Union
 
 from catboost import Pool
 
+from src.cast_pair_features import CAST_PAIR_FEATURE_NAMES, fetch_cast_pair_context
 from src.creative_team_features import (
     CREATIVE_TEAM_FEATURE_NAMES,
     fetch_person_creative_context,
@@ -33,14 +34,7 @@ from src.kinovanga import KinoVanga as BaseKinoVanga
 
 
 class KinoVanga(BaseKinoVanga):
-    """KinoVanga с P2 Creative Team-признаками schema v7-v12.
-
-    Legacy-признаки сохраняют primary director и actor slots 1..3 для
-    совместимости старых моделей. Schema v11 отдельно описывает режиссёрскую
-    команду, а v12 — весь переданный principal cast через общие и жанровые
-    агрегаты. Дополнительные SQL-запросы выполняются только для feature names,
-    реально присутствующих в metadata активной модели.
-    """
+    """KinoVanga с P2 Creative Team-признаками schema v7-v13."""
 
     @staticmethod
     def _clean_director_names(
@@ -101,6 +95,7 @@ class KinoVanga(BaseKinoVanga):
             .union(CREATIVE_TREND_FEATURE_NAMES)
             .union(DIRECTOR_TEAM_FEATURE_NAMES)
             .union(FULL_CAST_FEATURE_NAMES)
+            .union(CAST_PAIR_FEATURE_NAMES)
         )
         if not feature_set.intersection(extended_features):
             return X
@@ -133,18 +128,23 @@ class KinoVanga(BaseKinoVanga):
             for name in director_names
         ]
 
+        actor_feature_set = set(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES).union(
+            FULL_CAST_FEATURE_NAMES,
+            CAST_PAIR_FEATURE_NAMES,
+        )
         actor_people_all = (
             self._get_people_info(
                 actor_names_all,
                 before_year=int(year),
                 role="actor",
             )
-            if actor_names_all
-            and feature_set.intersection(
-                set(DIRECTOR_ACTOR_PAIR_FEATURE_NAMES).union(FULL_CAST_FEATURE_NAMES)
-            )
+            if actor_names_all and feature_set.intersection(actor_feature_set)
             else {}
         )
+        actor_ids = [
+            actor_people_all.get(name, {}).get("nconst") or "Unknown"
+            for name in actor_names_all
+        ]
 
         values: dict[str, float] = {}
         if feature_set.intersection(CREATIVE_TEAM_FEATURE_NAMES):
@@ -242,16 +242,21 @@ class KinoVanga(BaseKinoVanga):
             )
 
         if feature_set.intersection(FULL_CAST_FEATURE_NAMES):
-            actor_ids = [
-                actor_people_all.get(name, {}).get("nconst") or "Unknown"
-                for name in actor_names_all
-            ]
             values.update(
                 fetch_full_cast_context(
                     self.conn,
                     actor_nconsts=actor_ids,
                     before_year=int(year),
                     genres=genres,
+                )
+            )
+
+        if feature_set.intersection(CAST_PAIR_FEATURE_NAMES):
+            values.update(
+                fetch_cast_pair_context(
+                    self.conn,
+                    actor_nconsts=actor_ids,
+                    before_year=int(year),
                 )
             )
 
@@ -301,9 +306,6 @@ class KinoVanga(BaseKinoVanga):
         while len(actor_matches) < len(requested_actors):
             actor_matches.append(None)
 
-        # Legacy resolver исторически обрабатывал только первые 3 актёрских alias.
-        # Для v12 каждый дополнительный актёр разрешается тем же resolver отдельно,
-        # чтобы русский ввод полного ансамбля не превращался в Unknown.
         for index in range(3, len(requested_actors)):
             raw_actor = requested_actors[index]
             if not self.input_resolver.needs_resolution(raw_actor):

@@ -8,6 +8,11 @@ import numpy as np
 import pandas as pd
 
 from settings import config
+from src.cast_pair_features import (
+    CAST_PAIR_FEATURE_NAMES,
+    cast_pair_features_enabled,
+    fetch_batch_cast_pair_context,
+)
 from src.data_filtr import get_batches as base_get_batches
 from src.creative_team_features import (
     CREATIVE_TEAM_FEATURE_NAMES,
@@ -53,20 +58,20 @@ def get_batches(
     use_writer_stats: bool = True,
     max_batches: Optional[int] = None,
 ) -> Generator[Tuple[pd.DataFrame, pd.Series, List[str], List[str]], None, None]:
-    """Добавляет P2 Creative Team features поверх проверенного base pipeline.
+    """Добавляет P2 Creative Team features поверх базового disk-first pipeline.
 
-    Иерархия схем сохраняется воспроизводимой:
-    - Creative Team off -> schema v6;
-    - director-writer pair off -> schema v7;
-    - director-actor pair off -> schema v8;
-    - trend off -> schema v9;
-    - director-team off -> schema v10;
-    - full-cast off -> schema v11;
-    - все текущие P2-блоки on -> candidate schema v12.
+    Иерархия схем:
+    - Creative Team off -> v6;
+    - director-writer pair off -> v7;
+    - director-actor pair off -> v8;
+    - trend off -> v9;
+    - director-team off -> v10;
+    - full-cast off -> v11;
+    - cast-pair off -> v12;
+    - все блоки on -> candidate v13.
 
-    Legacy actor slots 1..3 сохраняются. Schema v12 дополнительно использует всех
-    actor/actress из IMDb title_principals target-фильма и сворачивает их общую и
-    жанровую историю в устойчивые агрегаты без роста categorical cardinality.
+    V13 описывает историю совместной работы всех unordered actor↔actor пар
+    principal cast, не заменяя прозрачные pair-агрегаты единым cohesion score.
     """
     creative_enabled = creative_team_features_enabled()
     writer_pair_enabled = creative_enabled and director_writer_pair_features_enabled()
@@ -74,6 +79,7 @@ def get_batches(
     trend_enabled = actor_pair_enabled and creative_trend_features_enabled()
     director_team_enabled = trend_enabled and director_team_features_enabled()
     full_cast_enabled = director_team_enabled and full_cast_features_enabled()
+    cast_pair_enabled = full_cast_enabled and cast_pair_features_enabled()
 
     if not creative_enabled:
         yield from base_get_batches(
@@ -97,6 +103,8 @@ def get_batches(
         logger.info("Director-team features включены: %s", ", ".join(DIRECTOR_TEAM_FEATURE_NAMES))
     if full_cast_enabled:
         logger.info("Full-cast features включены: %s", ", ".join(FULL_CAST_FEATURE_NAMES))
+    if cast_pair_enabled:
+        logger.info("Cast-pair features включены: %s", ", ".join(CAST_PAIR_FEATURE_NAMES))
 
     conn = duckdb.connect(str(config.IMDB_DB_PATH))
     conn.execute("SET memory_limit = '256MB'")
@@ -179,6 +187,19 @@ def get_batches(
                     default = 6.5 if feature_name in rating_defaults else 0.0
                     enriched[feature_name] = np.asarray(
                         [cast_context.get(tconst, {}).get(feature_name, default) for tconst in tconsts],
+                        dtype=np.float32,
+                    )
+
+            if cast_pair_enabled:
+                cast_pair_context = fetch_batch_cast_pair_context(conn, tconsts)
+                rating_defaults = {
+                    "cast_pair_prior_rating_avg",
+                    "cast_pair_prior_rating_median",
+                }
+                for feature_name in CAST_PAIR_FEATURE_NAMES:
+                    default = 6.5 if feature_name in rating_defaults else 0.0
+                    enriched[feature_name] = np.asarray(
+                        [cast_pair_context.get(tconst, {}).get(feature_name, default) for tconst in tconsts],
                         dtype=np.float32,
                     )
 
