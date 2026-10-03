@@ -18,7 +18,7 @@ P4 превращает RU/EN пересказы сюжета в канонич�
 4. deterministic StoryDiff;
 5. expert interpretation — только поверх observation/structural consequence.
 
-Первый PR закрывает только шаг 1.
+Шаги 1–3 теперь имеют отдельные воспроизводимые слои; semantic extraction всё ещё остаётся исследовательской задачей.
 
 ## Что извлекает baseline v1
 
@@ -69,7 +69,7 @@ Raw excerpt отдельно в evidence не дублируется. Сам nod
 
 Map ID включает SHA-256 входного текста. Изменение summary поэтому создаёт новый raw-map identity, а не молча заменяет старое наблюдение.
 
-## Ограничения v1
+## Ограничения baseline v1
 
 Baseline не умеет надёжно:
 
@@ -77,13 +77,87 @@ Baseline не умеет надёжно:
 - морфологическую нормализацию русских имён;
 - объединение `Анна` и `Анну`;
 - распознавание тем и worldbuilding на semantic уровне;
-- сложные причинные связи внутри предложения;
-- bilingual entity identity;
-- source↔adaptation matching.
+- сложные причинные связи внутри предложения.
 
-Эти ограничения не скрываются: `metadata.alignment_status = not_aligned`, а весь результат помечается `research_only=true`.
+Эти ограничения не скрываются: весь результат помечается `research_only=true`/не используется как production feature без отдельной проверки.
 
-## CLI
+## RU/EN canonical merge
+
+`src/story_alignment.py` добавляет derived-слой `BilingualStoryMapMerger`. Raw RU/EN maps не изменяются.
+
+Автоматическое объединение намеренно консервативное:
+
+- exact normalized label разрешён для совместимых `kind`;
+- простая RU→Latin transliteration автоматически применяется только к `character`;
+- `event`/`motivation` с разным текстом на RU/EN **не считаются одним событием** только из-за похожести;
+- для нетривиальных переводов имён или терминов используется explicit alias group.
+
+Пример aliases JSON:
+
+```json
+{
+  "aliases": [
+    {
+      "alias_id": "jon-snow",
+      "kind": "character",
+      "labels": ["Джон Сноу", "Jon Snow"],
+      "canonical_label": "Jon Snow / Джон Сноу"
+    }
+  ]
+}
+```
+
+Derived canonical map получает новые стабильные keys, а `merge_evidence` сохраняет исходные map/node IDs, язык, label, метод сопоставления и confidence.
+
+## Source ↔ adaptation alignment
+
+`SourceAdaptationAligner` сопоставляет уже канонические карты первоисточника и экранизации.
+
+Автоматически допускаются:
+
+- exact normalized label для одного `kind`;
+- transliteration персонажей;
+- только однозначный fuzzy-match имени персонажа выше жёсткого порога.
+
+Если два source character дают почти одинаковый score, match не принимается и попадает в `ambiguous_matches`.
+
+События и мотивации не получают fuzzy semantic match автоматически. Для них пока нужен exact label или explicit match после проверки человеком/следующим semantic extractor.
+
+### Many-to-one / merge персонажей
+
+Explicit mapping может связать несколько source nodes с одним adaptation node:
+
+```json
+{
+  "matches": [
+    {
+      "adaptation_key": "friend-combined",
+      "source_keys": ["friend-a", "friend-b"],
+      "confidence": 0.95,
+      "note": "Подтверждённое объединение персонажей"
+    }
+  ]
+}
+```
+
+В derived adaptation map эти IDs записываются в `maps_from`. Существующий `StoryDiffAnalyzer` после этого автоматически выдаёт `change_type=merged` для соответствующих source nodes.
+
+Explicit match между разными `StoryNode.kind` запрещён.
+
+## Alignment evidence
+
+Результат alignment содержит:
+
+- `alignment_evidence` с методом/confidence каждого принятого match;
+- `ambiguous_matches`, которые система отказалась принимать автоматически;
+- `unmatched_source_keys`;
+- `unmatched_adaptation_keys`;
+- derived adaptation `StoryMap` с `maps_from`;
+- готовый deterministic `story_diff`.
+
+Этот слой также `research_only=true`: confidence описывает уверенность identity-match, а не художественное качество и не вероятность корректности всего StoryMap.
+
+## CLI baseline extractor
 
 ```bash
 python storymap_extract.py summary.txt \
@@ -103,16 +177,34 @@ python storymap_extract.py summary.txt \
 
 Если исходный summary содержит больше предложений, metadata явно возвращает `truncated=true`, `sentence_count_total` и `sentence_count_used`.
 
-## Следующий P4-инкремент
+## CLI bilingual merge / alignment
 
-Следующим отдельным слоем идёт **RU/EN canonical merge + source↔adaptation alignment**.
+Объединить RU/EN raw maps одной стороны:
 
-Он должен:
+```bash
+python storymap_align.py merge source-ru.json source-en.json \
+  --map-id source:canonical \
+  --aliases aliases.json \
+  --output source-canonical.json
+```
 
-- не переписывать raw maps;
-- хранить match evidence/confidence;
-- поддерживать explicit aliases;
-- сопоставлять characters/events/motivations только между совместимыми `kind`;
-- заполнять `maps_from` в derived adaptation map;
-- оставлять ambiguous matches неподтверждёнными;
-- позволять затем запускать существующий deterministic `StoryDiffAnalyzer`.
+Построить source↔adaptation alignment и StoryDiff:
+
+```bash
+python storymap_align.py align source-canonical.json film-canonical.json \
+  --matches confirmed-matches.json \
+  --output aligned.json
+```
+
+`--aliases` и `--matches` необязательны. Без них применяются только консервативные автоматические правила.
+
+## Следующие P4-инкременты
+
+После identity/alignment foundation нужны отдельные измеримые улучшения:
+
+1. semantic extractor для событий внутри предложения и coreference;
+2. извлечение relationships/worldbuilding/themes/ending;
+3. причинные связи `causes/motivates/explains/depends_on` не только по transition markers;
+4. semantic candidate matching событий как **предложение**, а не автоматическая истина: confidence + ambiguity + evidence;
+5. benchmark/blind set RU/EN summaries и метрики precision/recall по node/relation classes;
+6. кеширование raw/derived StoryMap, чтобы не повторять тяжёлый анализ на малом VPS.
