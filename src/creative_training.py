@@ -19,6 +19,11 @@ from src.director_actor_features import (
     director_actor_pair_features_enabled,
     fetch_batch_director_actor_pair_context,
 )
+from src.director_team_features import (
+    DIRECTOR_TEAM_FEATURE_NAMES,
+    director_team_features_enabled,
+    fetch_batch_director_team_context,
+)
 from src.pair_features import (
     DIRECTOR_WRITER_PAIR_FEATURE_NAMES,
     director_writer_pair_features_enabled,
@@ -50,7 +55,12 @@ def get_batches(
     - director-writer pair off -> schema v7;
     - director-actor pair off -> schema v8;
     - trend off -> schema v9;
-    - все текущие P2-блоки on -> candidate schema v10.
+    - director-team off -> schema v10;
+    - все текущие P2-блоки on -> candidate schema v11.
+
+    Legacy-признаки v5-v10 по-прежнему используют primary director для обратной
+    совместимости. Schema v11 отдельно описывает весь набор director-credit и
+    историю их совместной работы.
 
     Все P2-блоки используют одно дополнительное соединение DuckDB, чтобы не
     увеличивать число одновременных соединений и память на production VPS.
@@ -63,6 +73,7 @@ def get_batches(
         writer_pair_enabled and director_actor_pair_features_enabled()
     )
     trend_enabled = actor_pair_enabled and creative_trend_features_enabled()
+    director_team_enabled = trend_enabled and director_team_features_enabled()
     if not creative_enabled:
         yield from base_get_batches(
             genres,
@@ -92,6 +103,11 @@ def get_batches(
         logger.info(
             "Creative trend features включены: %s",
             ", ".join(CREATIVE_TREND_FEATURE_NAMES),
+        )
+    if director_team_enabled:
+        logger.info(
+            "Director-team features включены: %s",
+            ", ".join(DIRECTOR_TEAM_FEATURE_NAMES),
         )
 
     # Базовый data_filtr держит обычное соединение с той же DuckDB. Открываем
@@ -157,6 +173,23 @@ def get_batches(
                 for feature_name in CREATIVE_TREND_FEATURE_NAMES:
                     values = [
                         trend_context.get(tconst, {}).get(feature_name, 0.0)
+                        for tconst in tconsts
+                    ]
+                    enriched[feature_name] = np.asarray(values, dtype=np.float32)
+
+            if director_team_enabled:
+                team_context = fetch_batch_director_team_context(conn, tconsts)
+                for feature_name in DIRECTOR_TEAM_FEATURE_NAMES:
+                    default = (
+                        6.5
+                        if feature_name in {
+                            "director_team_avg_rating",
+                            "director_team_prior_collaboration_avg_rating",
+                        }
+                        else 0.0
+                    )
+                    values = [
+                        team_context.get(tconst, {}).get(feature_name, default)
                         for tconst in tconsts
                     ]
                     enriched[feature_name] = np.asarray(values, dtype=np.float32)
