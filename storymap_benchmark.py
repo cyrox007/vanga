@@ -9,6 +9,7 @@ from typing import Any
 from src.adaptation_analysis import AdaptationValidationError
 from src.story_alignment import story_map_from_payload
 from src.story_benchmark import StoryAlignmentBenchmark, StoryMatchCandidateGenerator
+from src.story_benchmark_runner import StoryBenchmarkSuiteRunner
 
 
 def _load(path: Path) -> Any:
@@ -74,6 +75,19 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("gold", type=Path)
     evaluate.add_argument("predicted", type=Path)
     evaluate.add_argument("--output", type=Path, default=None)
+
+    suite = sub.add_parser(
+        "suite",
+        help="запустить manifest из нескольких benchmark cases и агрегировать метрики",
+    )
+    suite.add_argument("manifest", type=Path, help="JSON suite manifest version=1")
+    suite.add_argument(
+        "--split",
+        choices=("train", "development", "blind"),
+        default=None,
+        help="запустить только один split; для blind-проверки рекомендуется указывать явно",
+    )
+    suite.add_argument("--output", type=Path, default=None)
     return parser
 
 
@@ -106,6 +120,18 @@ def main(argv: list[str] | None = None) -> int:
                 adaptation=adaptation,
                 gold=gold,
                 predicted_map=predicted,
+            )
+            _write(result, args.output)
+            return 0
+
+        if args.command == "suite":
+            manifest_path = args.manifest.resolve()
+            manifest = _load(manifest_path)
+            if not isinstance(manifest, dict):
+                raise AdaptationValidationError("Suite manifest должен быть JSON-объектом")
+            result = StoryBenchmarkSuiteRunner(manifest_path.parent).run(
+                manifest,
+                only_split=args.split,
             )
             _write(result, args.output)
             return 0
