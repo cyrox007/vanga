@@ -50,7 +50,10 @@ def get_batches(
         "Creative Team features включены: %s",
         ", ".join(CREATIVE_TEAM_FEATURE_NAMES),
     )
-    conn = duckdb.connect(str(config.IMDB_DB_PATH), read_only=True)
+    # Базовый data_filtr держит обычное соединение с той же DuckDB. Открываем
+    # второе соединение в том же режиме: DuckDB не допускает одновременно
+    # подключать один файл с несовместимыми read_only/read_write параметрами.
+    conn = duckdb.connect(str(config.IMDB_DB_PATH))
     conn.execute("SET memory_limit = '256MB'")
     conn.execute("SET threads = 1")
     conn.execute("SET preserve_insertion_order = false")
