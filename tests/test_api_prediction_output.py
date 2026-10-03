@@ -27,6 +27,7 @@ class _FakeCatalog:
 
 class _FakeEngine:
     catalog = _FakeCatalog()
+    conn = object()
     metadata = {
         "schema_version": 5,
         "feature_names": ["startYear", "writer_avg_rating", "writer_id"],
@@ -80,7 +81,7 @@ class ApiPredictionOutputTests(unittest.TestCase):
     def setUp(self):
         self.client = api.app.test_client()
 
-    def test_predict_exposes_base_and_contributions(self):
+    def test_predict_exposes_base_contributions_and_pre_release_profile(self):
         payload = {
             "title": "Inception",
             "director": "Christopher Nolan",
@@ -89,11 +90,28 @@ class ApiPredictionOutputTests(unittest.TestCase):
             "actors": ["Leonardo DiCaprio"],
             "year": 2010,
             "runtime": 148,
+            "synopsis": "Герой входит в чужие сны и должен выполнить почти невозможное задание.",
+            "source": {
+                "type": "original",
+                "format": "feature_film",
+            },
+        }
+        fake_profile = {
+            "method": "pre_release_profile_v1",
+            "potential": {"level": "high_upside"},
+            "data_coverage": {"percent": 82, "level": "high"},
+            "likely_strengths": [{"key": "direction"}],
+            "likely_weaknesses": [{"key": "genre"}],
         }
 
         with (
             patch.object(api, "_ensure_engine", return_value=_FakeEngine()),
             patch.object(api, "_generation", "generation-test"),
+            patch.object(
+                api,
+                "build_pre_release_profile",
+                return_value=fake_profile,
+            ),
         ):
             response = self.client.post("/predict", json=payload)
 
@@ -106,6 +124,37 @@ class ApiPredictionOutputTests(unittest.TestCase):
         self.assertEqual(body["uncertainty"]["coverage"], 0.8)
         self.assertEqual(body["quality"]["mae"], 1.02)
         self.assertIn("director_avg_rating", body["contributions"])
+        self.assertEqual(
+            body["pre_release_profile"]["potential"]["level"],
+            "high_upside",
+        )
+        self.assertEqual(
+            body["pre_release_profile"]["data_coverage"]["percent"],
+            82,
+        )
+        self.assertEqual(
+            body["pre_release_profile"]["source"]["type"],
+            "original",
+        )
+
+    def test_predict_validates_synopsis_and_source(self):
+        base = {
+            "title": "Inception",
+            "director": "Christopher Nolan",
+            "writer": "Jonathan Nolan",
+            "genres": ["Action", "Sci-Fi"],
+            "actors": [],
+            "year": 2010,
+            "runtime": 148,
+        }
+
+        too_long = dict(base, synopsis="x" * 5001)
+        response = self.client.post("/predict", json=too_long)
+        self.assertEqual(response.status_code, 400)
+
+        bad_source = dict(base, source=["book"])
+        response = self.client.post("/predict", json=bad_source)
+        self.assertEqual(response.status_code, 400)
 
     def test_model_info_exposes_reproducibility_metadata(self):
         with (

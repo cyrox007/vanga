@@ -10,6 +10,7 @@ from flask import Flask, jsonify, request
 
 from settings import config
 from src.kinovanga import KinoVanga
+from src.pre_release_analysis import build_pre_release_profile
 from src.train_model import resolve_current_model_path
 
 
@@ -233,7 +234,7 @@ def model_info():
 
 @app.post("/predict")
 def predict():
-    if request.content_length is not None and request.content_length > 32 * 1024:
+    if request.content_length is not None and request.content_length > 48 * 1024:
         return _json_error("Слишком большой запрос", 413)
 
     payload = request.get_json(silent=True)
@@ -243,9 +244,11 @@ def predict():
     title = str(payload.get("title") or "").strip()
     director = str(payload.get("director") or "").strip()
     writer = str(payload.get("writer") or "").strip()
+    synopsis = str(payload.get("synopsis") or "").strip()
     genres = payload.get("genres")
     actors = payload.get("actors") or []
     imdb_id = str(payload.get("imdb_id") or "").strip()
+    source = payload.get("source") or {}
 
     try:
         year = int(payload.get("year"))
@@ -265,6 +268,27 @@ def predict():
         return _json_error("Укажите режиссёра", 400)
     if len(writer) > 240:
         return _json_error("Слишком длинное имя сценариста", 400)
+    if len(synopsis) > 5000:
+        return _json_error("Синопсис не должен превышать 5000 символов", 400)
+    if not isinstance(source, dict):
+        return _json_error("source должен быть JSON-объектом", 400)
+
+    clean_source: dict[str, Any] = {}
+    for key in ("type", "title", "author", "format"):
+        value = str(source.get(key) or "").strip()
+        if len(value) > 240:
+            return _json_error(f"source.{key} слишком длинное", 400)
+        if value:
+            clean_source[key] = value
+    if source.get("series_size") is not None:
+        try:
+            series_size = int(source.get("series_size"))
+        except (TypeError, ValueError):
+            return _json_error("source.series_size должен быть целым числом", 400)
+        if not (1 <= series_size <= 10000):
+            return _json_error("source.series_size вне допустимого диапазона", 400)
+        clean_source["series_size"] = series_size
+
     if isinstance(genres, str):
         genres_value: str | list[str] = genres.strip()
     elif isinstance(genres, list) and all(isinstance(item, str) for item in genres):
@@ -291,6 +315,19 @@ def predict():
                 actors=actors,
                 explain=True,
             )
+            profile = build_pre_release_profile(
+                conn=engine.conn,
+                year=year,
+                runtime=runtime,
+                director=director,
+                writer=writer or None,
+                actors=actors,
+                synopsis=synopsis or None,
+                rating=float(result["rating"]),
+                uncertainty=result.get("uncertainty"),
+                contributions=result.get("contributions") or {},
+            )
+            profile["source"] = clean_source
     except Exception:
         logger.exception("Ошибка предсказания Vanga")
         return _json_error("Модель временно не смогла выполнить предсказание", 503)
@@ -314,6 +351,7 @@ def predict():
             "explanation": result["explanation"],
             "contributions": result["contributions"],
             "input_resolution": result.get("input_resolution", {}),
+            "pre_release_profile": profile,
         }
     )
 
