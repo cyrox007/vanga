@@ -6,14 +6,19 @@ from src.creative_team_features import (
     CREATIVE_TEAM_FEATURE_NAMES,
     fetch_person_creative_context,
 )
+from src.pair_features import (
+    DIRECTOR_WRITER_PAIR_FEATURE_NAMES,
+    fetch_director_writer_pair_context,
+)
 from src.kinovanga import KinoVanga as BaseKinoVanga
 
 
 class KinoVanga(BaseKinoVanga):
-    """KinoVanga с P2 Creative Team-признаками schema v7.
+    """KinoVanga с P2 Creative Team-признаками schema v7/v8.
 
-    Старые модели остаются совместимыми: если их metadata не содержит новых
-    feature names, подготовка признаков полностью делегируется базовому классу.
+    Старые модели остаются совместимыми: дополнительные запросы выполняются
+    только для feature names, которые реально присутствуют в metadata активной
+    модели.
     """
 
     def _prepare_features(
@@ -40,7 +45,10 @@ class KinoVanga(BaseKinoVanga):
 
         feature_names = list(self.metadata.get("feature_names") or [])
         feature_set = set(feature_names)
-        if not feature_set.intersection(CREATIVE_TEAM_FEATURE_NAMES):
+        extended_features = set(CREATIVE_TEAM_FEATURE_NAMES).union(
+            DIRECTOR_WRITER_PAIR_FEATURE_NAMES
+        )
+        if not feature_set.intersection(extended_features):
             return X
 
         director_people = (
@@ -67,36 +75,49 @@ class KinoVanga(BaseKinoVanga):
         director_id = director_info.get("nconst") or "Unknown"
         writer_id = writer_info.get("nconst") or "Unknown"
 
-        director_context = fetch_person_creative_context(
-            self.conn,
-            nconst=director_id,
-            before_year=int(year),
-            role="director",
-            genres=genres,
-        )
-        writer_context = fetch_person_creative_context(
-            self.conn,
-            nconst=writer_id,
-            before_year=int(year),
-            role="writer",
-            genres=genres,
-        )
+        values: dict[str, float] = {}
+        if feature_set.intersection(CREATIVE_TEAM_FEATURE_NAMES):
+            director_context = fetch_person_creative_context(
+                self.conn,
+                nconst=director_id,
+                before_year=int(year),
+                role="director",
+                genres=genres,
+            )
+            writer_context = fetch_person_creative_context(
+                self.conn,
+                nconst=writer_id,
+                before_year=int(year),
+                role="writer",
+                genres=genres,
+            )
+            values.update(
+                {
+                    "director_genre_avg_rating": director_context["genre_avg_rating"],
+                    "director_genre_prior_count": director_context["genre_prior_count"],
+                    "director_recent_avg_rating": director_context["recent_avg_rating"],
+                    "writer_genre_avg_rating": writer_context["genre_avg_rating"],
+                    "writer_genre_prior_count": writer_context["genre_prior_count"],
+                    "writer_recent_avg_rating": writer_context["recent_avg_rating"],
+                    "director_is_writer": (
+                        1.0
+                        if director_id != "Unknown"
+                        and writer_id != "Unknown"
+                        and director_id == writer_id
+                        else 0.0
+                    ),
+                }
+            )
 
-        values = {
-            "director_genre_avg_rating": director_context["genre_avg_rating"],
-            "director_genre_prior_count": director_context["genre_prior_count"],
-            "director_recent_avg_rating": director_context["recent_avg_rating"],
-            "writer_genre_avg_rating": writer_context["genre_avg_rating"],
-            "writer_genre_prior_count": writer_context["genre_prior_count"],
-            "writer_recent_avg_rating": writer_context["recent_avg_rating"],
-            "director_is_writer": (
-                1.0
-                if director_id != "Unknown"
-                and writer_id != "Unknown"
-                and director_id == writer_id
-                else 0.0
-            ),
-        }
+        if feature_set.intersection(DIRECTOR_WRITER_PAIR_FEATURE_NAMES):
+            values.update(
+                fetch_director_writer_pair_context(
+                    self.conn,
+                    director_nconst=director_id,
+                    writer_nconst=writer_id,
+                    before_year=int(year),
+                )
+            )
 
         for name, value in values.items():
             if name in feature_set:
