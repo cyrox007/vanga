@@ -42,17 +42,17 @@ def fetch_batch_director_team_context(
 ) -> dict[str, dict[str, float]]:
     """Считает историю всей режиссёрской команды до года target-фильма.
 
-    В отличие от legacy-признаков, которые сохраняют первого режиссёра для
-    обратной совместимости, этот блок использует ВСЕ director-credit target-фильма.
+    Legacy-признаки сохраняют первого режиссёра для обратной совместимости,
+    а этот блок использует ВСЕ director-credit target-фильма.
 
     ``director_team_avg_rating`` — среднее role-specific historical average
-    режиссёров, у которых есть прошлые фильмы. ``known_ratio`` отделяет отсутствие
-    истории от реального среднего.
+    только по режиссёрам с реальной прошлой историей. ``known_ratio`` показывает,
+    какая доля команды вообще имеет такую историю. ``prior_count_mean`` при этом
+    считается по всем режиссёрам, включая нули, чтобы training совпадал с inference.
 
     ``director_team_prior_collaboration_*`` описывает фильмы, где весь текущий
-    набор режиссёров уже работал вместе как режиссёрская команда. Для дуэтов вроде
-    Вачовски/Руссо это не теряет совместную историю. Target, same-year и future
-    фильмы исключены строгим ``startYear < target_year``.
+    набор режиссёров уже работал вместе как режиссёрская команда. Target,
+    same-year и future фильмы исключены строгим ``startYear < target_year``.
     """
     ids = [str(value).strip() for value in tconsts if str(value).strip()]
     if not ids:
@@ -106,10 +106,14 @@ def fetch_batch_director_team_context(
                 ts.team_size,
                 AVG(dh.avg_rating) AS team_avg_rating,
                 AVG(COALESCE(dh.prior_count, 0)) AS prior_count_mean,
-                COUNT(dh.nconst) AS known_directors
+                COUNT(CASE WHEN COALESCE(dh.prior_count, 0) > 0 THEN 1 END)
+                    AS known_directors
             FROM team_sizes ts
+            JOIN target_directors td
+              ON td.target_tconst = ts.target_tconst
             LEFT JOIN director_history dh
-              ON dh.target_tconst = ts.target_tconst
+              ON dh.target_tconst = td.target_tconst
+             AND dh.nconst = td.nconst
             GROUP BY ts.target_tconst, ts.team_size
         ),
         collaboration_candidates AS (
@@ -204,7 +208,7 @@ def fetch_director_team_context(
             SELECT
                 req.nconst,
                 AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating,
-                COUNT(DISTINCT p.tconst) AS prior_count
+                COUNT(DISTINCT b.tconst) AS prior_count
             FROM requested req
             LEFT JOIN title_principals p
               ON p.nconst = req.nconst
@@ -263,9 +267,7 @@ def fetch_director_team_context(
         [ids, int(before_year), len(ids)],
     ).fetchone()
     collaboration_count = float((row or [0])[0] or 0.0)
-    collaboration_avg = float(
-        row[1] if row and row[1] is not None else 6.5
-    )
+    collaboration_avg = float(row[1] if row and row[1] is not None else 6.5)
 
     return {
         "director_team_size": float(len(ids)),
