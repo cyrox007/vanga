@@ -37,16 +37,34 @@ class PersonHistory:
     avg_rating: float | None
 
     @property
+    def resolved(self) -> bool:
+        return bool(self.imdb_id)
+
+    @property
     def known(self) -> bool:
-        return bool(self.imdb_id and self.works_count > 0)
+        """Есть ли реальная рейтинговая история до года прогноза."""
+        return bool(self.imdb_id and self.works_count > 0 and self.avg_rating is not None)
+
+    @property
+    def state(self) -> str:
+        if not self.input:
+            return "not_provided"
+        if self.known:
+            return "known_history"
+        if self.resolved:
+            return "resolved_no_history"
+        return "not_resolved"
 
     def to_dict(self) -> dict:
         return {
             "input": self.input,
             "role": self.role,
             "imdb_id": self.imdb_id,
+            "resolved": self.resolved,
             "known": self.known,
+            "state": self.state,
             "works_count": self.works_count,
+            "prior_count": self.works_count,
             "avg_rating": round(self.avg_rating, 2) if self.avg_rating is not None else None,
         }
 
@@ -84,15 +102,21 @@ def _person_history(conn, name: str | None, role: str, before_year: int) -> Pers
             ), stats AS (
                 SELECT
                     c.nconst,
-                    COUNT(DISTINCT tw.tconst) AS works_count,
-                    AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating
+                    COUNT(DISTINCT CASE
+                        WHEN b.titleType = 'movie'
+                         AND TRY_CAST(b.startYear AS INTEGER) < ?
+                         AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
+                        THEN tw.tconst
+                    END) AS works_count,
+                    AVG(CASE
+                        WHEN b.titleType = 'movie'
+                         AND TRY_CAST(b.startYear AS INTEGER) < ?
+                        THEN TRY_CAST(r.averageRating AS DOUBLE)
+                    END) AS avg_rating
                 FROM candidates c
                 LEFT JOIN title_writers tw ON tw.nconst = c.nconst
                 LEFT JOIN title_basics b ON b.tconst = tw.tconst
                 LEFT JOIN title_ratings r ON r.tconst = b.tconst
-                WHERE b.titleType = 'movie'
-                  AND TRY_CAST(b.startYear AS INTEGER) < ?
-                  AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
                 GROUP BY c.nconst
             )
             SELECT nconst, works_count, avg_rating
@@ -100,7 +124,7 @@ def _person_history(conn, name: str | None, role: str, before_year: int) -> Pers
             ORDER BY works_count DESC, avg_rating DESC NULLS LAST, nconst
             LIMIT 1
             """,
-            [clean, int(before_year)],
+            [clean, int(before_year), int(before_year)],
         ).fetchone()
     else:
         categories = ("director",) if role == "director" else ("actor", "actress")
@@ -114,17 +138,23 @@ def _person_history(conn, name: str | None, role: str, before_year: int) -> Pers
             ), stats AS (
                 SELECT
                     c.nconst,
-                    COUNT(DISTINCT p.tconst) AS works_count,
-                    AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating
+                    COUNT(DISTINCT CASE
+                        WHEN b.titleType = 'movie'
+                         AND TRY_CAST(b.startYear AS INTEGER) < ?
+                         AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
+                        THEN p.tconst
+                    END) AS works_count,
+                    AVG(CASE
+                        WHEN b.titleType = 'movie'
+                         AND TRY_CAST(b.startYear AS INTEGER) < ?
+                        THEN TRY_CAST(r.averageRating AS DOUBLE)
+                    END) AS avg_rating
                 FROM candidates c
                 LEFT JOIN title_principals p
                   ON p.nconst = c.nconst
                  AND p.category IN ({placeholders})
                 LEFT JOIN title_basics b ON b.tconst = p.tconst
                 LEFT JOIN title_ratings r ON r.tconst = b.tconst
-                WHERE b.titleType = 'movie'
-                  AND TRY_CAST(b.startYear AS INTEGER) < ?
-                  AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
                 GROUP BY c.nconst
             )
             SELECT nconst, works_count, avg_rating
@@ -132,7 +162,7 @@ def _person_history(conn, name: str | None, role: str, before_year: int) -> Pers
             ORDER BY works_count DESC, avg_rating DESC NULLS LAST, nconst
             LIMIT 1
             """,
-            [clean, *categories, int(before_year)],
+            [clean, int(before_year), int(before_year), *categories],
         ).fetchone()
 
     if not row:
@@ -254,6 +284,14 @@ def analyze_synopsis(synopsis: str | None, runtime: int) -> dict:
     }
 
 
+def _coverage_level(score: float) -> str:
+    if score >= 0.80:
+        return "high"
+    if score >= 0.55:
+        return "medium"
+    return "low"
+
+
 def build_pre_release_profile(
     *,
     conn,
@@ -274,6 +312,7 @@ def build_pre_release_profile(
         for actor in actors[:3]
     ]
 
+    # Совместимый score профиля: история команды + наличие синопсиса.
     weighted: list[tuple[float, bool]] = [(0.30, director_history.known)]
     weighted.append((0.25, writer_history.known))
     actor_weight = 0.30 / 3.0
@@ -283,14 +322,66 @@ def build_pre_release_profile(
     synopsis_present = bool(str(synopsis or "").strip())
     weighted.append((0.15, synopsis_present))
 
-    coverage = sum(weight for weight, known in weighted if known)
-    coverage = round(max(0.0, min(1.0, coverage)), 3)
-    if coverage >= 0.80:
-        coverage_level = "high"
-    elif coverage >= 0.55:
-        coverage_level = "medium"
+    coverage = round(
+        max(0.0, min(1.0, sum(weight for weight, known in weighted if known))),
+        3,
+    )
+    coverage_level = _coverage_level(coverage)
+
+    # model_familiarity не учитывает synopsis: это только обеспеченность тех
+    # исторических person-сигналов, которые реально участвуют в rating-модели.
+    familiarity_weights: list[tuple[float, bool]] = [
+        (0.35, director_history.known),
+        (0.25, writer_history.known),
+    ]
+    for index in range(3):
+        familiarity_weights.append(
+            (
+                0.40 / 3.0,
+                index < len(actor_histories) and actor_histories[index].known,
+            )
+        )
+    familiarity = round(
+        max(
+            0.0,
+            min(
+                1.0,
+                sum(weight for weight, known in familiarity_weights if known),
+            ),
+        ),
+        3,
+    )
+
+    provided_people = [director_history]
+    if str(writer or "").strip():
+        provided_people.append(writer_history)
+    provided_people.extend(actor_histories)
+    known_people_count = sum(1 for item in provided_people if item.known)
+    resolved_people_count = sum(1 for item in provided_people if item.resolved)
+    provided_people_count = len(provided_people)
+    known_people_ratio = round(
+        known_people_count / provided_people_count, 3
+    ) if provided_people_count else 0.0
+    resolved_people_ratio = round(
+        resolved_people_count / provided_people_count, 3
+    ) if provided_people_count else 0.0
+
+    expected_known = [director_history.known, writer_history.known]
+    expected_known.extend(
+        index < len(actor_histories) and actor_histories[index].known
+        for index in range(3)
+    )
+    missing_feature_count = sum(1 for known in expected_known if not known)
+
+    abstention_recommended = familiarity < 0.20
+    if abstention_recommended:
+        abstention_reason = "insufficient_person_history"
+        abstention_message = (
+            "Исторических данных о ключевой команде слишком мало: точный рейтинг лучше не интерпретировать как надёжный прогноз."
+        )
     else:
-        coverage_level = "low"
+        abstention_reason = None
+        abstention_message = None
 
     warnings: list[str] = []
     if not director_history.known:
@@ -299,9 +390,13 @@ def build_pre_release_profile(
         warnings.append("Сценарист не указан либо его историческая выборка недостаточна")
     unknown_actors = sum(1 for item in actor_histories if not item.known)
     if unknown_actors:
-        warnings.append(f"Недостаточно истории для {unknown_actors} из {len(actor_histories)} переданных ключевых актёров")
+        warnings.append(
+            f"Недостаточно истории для {unknown_actors} из {len(actor_histories)} переданных ключевых актёров"
+        )
     if not synopsis_present:
         warnings.append("Синопсис не передан: сценарно-структурный слой ограничен")
+    if abstention_recommended:
+        warnings.append(abstention_message)
 
     groups = _group_contributions(contributions)
     strengths = [item for item in groups if item["value"] >= 0.08][:3]
@@ -329,7 +424,7 @@ def build_pre_release_profile(
             lower = upper = None
 
     expected = float(rating)
-    if coverage_level == "low":
+    if coverage_level == "low" or abstention_recommended:
         potential_level = "uncertain"
     elif upper is not None and upper >= 8.0:
         potential_level = "high_upside"
@@ -339,7 +434,7 @@ def build_pre_release_profile(
         potential_level = "moderate"
 
     return {
-        "method": "pre_release_profile_v1",
+        "method": "pre_release_profile_v2",
         "validated_target": False,
         "expected_rating": round(expected, 2),
         "potential": {
@@ -354,6 +449,22 @@ def build_pre_release_profile(
             "score": coverage,
             "percent": int(round(coverage * 100)),
             "level": coverage_level,
+            "model_familiarity": {
+                "score": familiarity,
+                "percent": int(round(familiarity * 100)),
+                "level": _coverage_level(familiarity),
+            },
+            "known_people_count": known_people_count,
+            "resolved_people_count": resolved_people_count,
+            "provided_people_count": provided_people_count,
+            "known_people_ratio": known_people_ratio,
+            "resolved_people_ratio": resolved_people_ratio,
+            "missing_feature_count": missing_feature_count,
+            "abstention": {
+                "recommended": abstention_recommended,
+                "reason": abstention_reason,
+                "message": abstention_message,
+            },
             "warnings": warnings,
             "director": director_history.to_dict(),
             "writer": writer_history.to_dict(),
