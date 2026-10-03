@@ -44,6 +44,11 @@ from src.pair_features import (
     director_writer_pair_features_enabled,
     fetch_batch_director_writer_pair_context,
 )
+from src.team_collaboration_features import (
+    TEAM_COLLABORATION_FEATURE_NAMES,
+    fetch_batch_team_collaboration_context,
+    team_collaboration_features_enabled,
+)
 from src.trend_features import (
     CREATIVE_TREND_FEATURE_NAMES,
     creative_trend_features_enabled,
@@ -74,11 +79,11 @@ def get_batches(
     - full-cast off -> v11;
     - cast-pair off -> v12;
     - dual-role off -> v13;
-    - все блоки on -> candidate v14.
+    - team-wide collaboration off -> v14;
+    - все блоки on -> candidate v15.
 
-    V14 добавляет историю человека именно в фильмах, где он одновременно имел
-    director- и writer-credit. Для режиссёрской стороны используется весь
-    multi-director target team, а не только primary director.
+    V15 агрегирует историю всех director↔writer и director↔actor связей target-команды,
+    не заменяя прозрачные pair-признаки единым cohesion score.
     """
     creative_enabled = creative_team_features_enabled()
     writer_pair_enabled = creative_enabled and director_writer_pair_features_enabled()
@@ -88,6 +93,7 @@ def get_batches(
     full_cast_enabled = director_team_enabled and full_cast_features_enabled()
     cast_pair_enabled = full_cast_enabled and cast_pair_features_enabled()
     dual_role_enabled = cast_pair_enabled and dual_role_features_enabled()
+    team_collaboration_enabled = dual_role_enabled and team_collaboration_features_enabled()
 
     if not creative_enabled:
         yield from base_get_batches(
@@ -115,6 +121,8 @@ def get_batches(
         logger.info("Cast-pair features включены: %s", ", ".join(CAST_PAIR_FEATURE_NAMES))
     if dual_role_enabled:
         logger.info("Dual-role features включены: %s", ", ".join(DUAL_ROLE_FEATURE_NAMES))
+    if team_collaboration_enabled:
+        logger.info("Team-wide collaboration features включены: %s", ", ".join(TEAM_COLLABORATION_FEATURE_NAMES))
 
     conn = duckdb.connect(str(config.IMDB_DB_PATH))
     conn.execute("SET memory_limit = '256MB'")
@@ -223,6 +231,20 @@ def get_batches(
                     default = 6.5 if feature_name in rating_defaults else 0.0
                     enriched[feature_name] = np.asarray(
                         [dual_context.get(tconst, {}).get(feature_name, default) for tconst in tconsts],
+                        dtype=np.float32,
+                    )
+
+            if team_collaboration_enabled:
+                team_collaboration_context = fetch_batch_team_collaboration_context(conn, tconsts)
+                rating_defaults = {
+                    "team_writer_pair_prior_rating_avg",
+                    "team_actor_pair_prior_rating_avg",
+                    "team_actor_pair_prior_rating_median",
+                }
+                for feature_name in TEAM_COLLABORATION_FEATURE_NAMES:
+                    default = 6.5 if feature_name in rating_defaults else 0.0
+                    enriched[feature_name] = np.asarray(
+                        [team_collaboration_context.get(tconst, {}).get(feature_name, default) for tconst in tconsts],
                         dtype=np.float32,
                     )
 
