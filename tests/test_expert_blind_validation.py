@@ -94,9 +94,7 @@ class ExpertBlindValidationTests(unittest.TestCase):
                 "media_type": "video",
             }
         )
-        self.store.link_case_material(
-            {"case_id": case_id, "material_id": material_id}
-        )
+        self.store.link_case_material({"case_id": case_id, "material_id": material_id})
         self.store.upsert_claim(
             {
                 "claim_id": claim_id,
@@ -162,7 +160,7 @@ class ExpertBlindValidationTests(unittest.TestCase):
             ],
         }
 
-    def test_manifest_contains_only_case_metadata(self):
+    def test_manifest_contains_only_case_metadata_and_sealed_gold_hash(self):
         manifest = self.validator.export_manifest(split="blind")
         text = json.dumps(manifest, ensure_ascii=False)
 
@@ -171,6 +169,7 @@ class ExpertBlindValidationTests(unittest.TestCase):
         self.assertFalse(manifest["contains_expert_interpretation"])
         self.assertNotIn("SECRET_RED_INTERPRETATION", text)
         self.assertNotIn("red-worldbuilding", text)
+        self.assertEqual(len(manifest["sealed_gold_fingerprint_sha256"]), 64)
         self.assertEqual(len(manifest["manifest_fingerprint_sha256"]), 64)
         self.assertEqual(
             manifest["manifest_fingerprint_sha256"],
@@ -181,15 +180,13 @@ class ExpertBlindValidationTests(unittest.TestCase):
         manifest = self.validator.export_manifest(split="blind")
         result = self.validator.evaluate(self._prediction_payload(manifest), split="blind")
 
-        self.assertEqual(result["overall"]["f1"], 1.0)
         self.assertEqual(result["per_expert"]["red-cynic"]["metrics"]["f1"], 1.0)
         self.assertEqual(result["per_expert"]["badcomedian"]["metrics"]["f1"], 1.0)
-        self.assertFalse(result["scoring_policy"]["silence_is_negative"])
-        self.assertTrue(
-            result["scoring_policy"]["score_only_dimensions_annotated_by_expert_for_case"]
-        )
-        self.assertTrue(result["expert_profiles_kept_separate"])
+        self.assertIsNone(result["combined_expert_score"])
+        self.assertIsNone(result["cross_expert_dimension_score"])
+        self.assertTrue(result["scoring_policy"]["expert_profiles_are_never_merged"])
         self.assertFalse(result["expert_interpretation_exposed_to_predictor"])
+        self.assertFalse(result["gold_labels_exposed_to_predictor"])
         self.assertIsNone(result["preference_score"])
 
         serialized = json.dumps(result, ensure_ascii=False)
@@ -213,9 +210,8 @@ class ExpertBlindValidationTests(unittest.TestCase):
         self.assertLess(result["per_expert"]["badcomedian"]["metrics"]["precision"], 1.0)
         self.assertEqual(result["per_expert"]["red-cynic"]["metrics"]["f1"], 1.0)
 
-    def test_prediction_in_dimension_not_annotated_by_expert_is_unscored_not_false_positive(self):
+    def test_prediction_in_uncovered_dimension_is_unscored(self):
         manifest = self.validator.export_manifest(split="blind")
-        baseline = self.validator.evaluate(self._prediction_payload(manifest), split="blind")
         payload = self._prediction_payload(manifest)
         payload["cases"][1]["findings"].append(
             {
@@ -228,23 +224,38 @@ class ExpertBlindValidationTests(unittest.TestCase):
         result = self.validator.evaluate(payload, split="blind")
 
         bad = result["per_expert"]["badcomedian"]
-        baseline_bad = baseline["per_expert"]["badcomedian"]
         self.assertEqual(bad["metrics"]["f1"], 1.0)
         self.assertEqual(bad["metrics"]["fp"], 0)
-        self.assertEqual(
-            bad["unscored_prediction_count"],
-            baseline_bad["unscored_prediction_count"] + 1,
+        self.assertEqual(bad["unscored_prediction_count"], 2)
+
+    def test_sealed_gold_change_invalidates_old_manifest(self):
+        old_manifest = self.validator.export_manifest(split="blind")
+        payload = self._prediction_payload(old_manifest)
+        self._add_claim(
+            expert_id="red-cynic",
+            case_id="blind-2",
+            claim_id="red-new-gold",
+            dimension="themes",
+            change_type="removed",
+            interpretation="SECRET_NEW_GOLD",
         )
-        self.assertEqual(
-            result["unscored_prediction_count"],
-            baseline["unscored_prediction_count"] + 1,
+        new_manifest = self.validator.export_manifest(split="blind")
+
+        self.assertNotEqual(
+            old_manifest["sealed_gold_fingerprint_sha256"],
+            new_manifest["sealed_gold_fingerprint_sha256"],
         )
+        self.assertNotEqual(
+            old_manifest["manifest_fingerprint_sha256"],
+            new_manifest["manifest_fingerprint_sha256"],
+        )
+        with self.assertRaises(ExpertCorpusValidationError):
+            self.validator.evaluate(payload, split="blind")
 
     def test_manifest_fingerprint_mismatch_is_rejected(self):
         manifest = self.validator.export_manifest(split="blind")
         payload = self._prediction_payload(manifest)
         payload["manifest_fingerprint_sha256"] = "0" * 64
-
         with self.assertRaises(ExpertCorpusValidationError):
             self.validator.evaluate(payload, split="blind")
 
@@ -252,11 +263,10 @@ class ExpertBlindValidationTests(unittest.TestCase):
         manifest = self.validator.export_manifest(split="blind")
         payload = self._prediction_payload(manifest)
         payload["cases"] = payload["cases"][:1]
-
         with self.assertRaises(ExpertCorpusValidationError):
             self.validator.evaluate(payload, split="blind")
 
-    def test_duplicate_class_and_missing_reference_are_rejected(self):
+    def test_duplicate_class_missing_reference_and_leakage_field_are_rejected(self):
         manifest = self.validator.export_manifest(split="blind")
         payload = self._prediction_payload(manifest)
         payload["cases"][0]["findings"].append(
@@ -275,7 +285,12 @@ class ExpertBlindValidationTests(unittest.TestCase):
         with self.assertRaises(ExpertCorpusValidationError):
             self.validator.evaluate(payload, split="blind")
 
-    def test_train_split_is_never_a_blind_acceptance_split(self):
+        payload = self._prediction_payload(manifest)
+        payload["cases"][0]["findings"][0]["expert_interpretation"] = "leak"
+        with self.assertRaises(ExpertCorpusValidationError):
+            self.validator.evaluate(payload, split="blind")
+
+    def test_train_split_is_never_an_acceptance_split(self):
         with self.assertRaises(ExpertCorpusValidationError):
             self.validator.export_manifest(split="train")
 
@@ -293,14 +308,10 @@ class ExpertBlindValidationTests(unittest.TestCase):
         payload = self._prediction_payload(manifest)
 
         strict = self.validator.evaluate(
-            payload,
-            split="blind",
-            require_supporting_evidence=True,
+            payload, split="blind", require_supporting_evidence=True
         )
         loose = self.validator.evaluate(
-            payload,
-            split="blind",
-            require_supporting_evidence=False,
+            payload, split="blind", require_supporting_evidence=False
         )
 
         self.assertEqual(strict["per_expert"]["red-cynic"]["metrics"]["f1"], 1.0)
