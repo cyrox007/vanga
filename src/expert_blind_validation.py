@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any
 
 from src.expert_corpus import (
     EXPERT_CHANGE_TYPES,
@@ -108,9 +108,8 @@ class BlindCasePrediction:
         findings = tuple(
             BlindFinding.from_dict(item) for item in (payload.get("findings") or [])
         )
-        # Одинаковый structural class внутри case считается одним детектом.
-        keys = [(item.dimension, item.change_type) for item in findings]
-        if len(keys) != len(set(keys)):
+        class_keys = [(item.dimension, item.change_type) for item in findings]
+        if len(class_keys) != len(set(class_keys)):
             raise ExpertCorpusValidationError(
                 "В одном case нельзя дублировать одинаковый dimension/change_type"
             )
@@ -126,7 +125,12 @@ class BlindCasePrediction:
 
 
 class ExpertBlindValidator:
-    """Post-hoc evaluator без передачи expert interpretation в predictor."""
+    """Post-hoc evaluator без передачи expert interpretation в predictor.
+
+    Важно: отсутствие claim у эксперта не считается отрицательной меткой. Для
+    expert×case оцениваются только dimensions, которые этот эксперт действительно
+    разметил. Predictions по другим dimensions остаются unscored.
+    """
 
     def __init__(self, store: ExpertCorpusStore) -> None:
         self.store = store
@@ -199,6 +203,7 @@ class ExpertBlindValidator:
             raise ExpertCorpusValidationError(
                 "manifest_fingerprint_sha256 должен быть SHA-256 hex"
             )
+
         cases = tuple(
             BlindCasePrediction.from_dict(item)
             for item in (payload.get("cases") or [])
@@ -206,11 +211,19 @@ class ExpertBlindValidator:
         case_ids = [item.case_id for item in cases]
         if len(case_ids) != len(set(case_ids)):
             raise ExpertCorpusValidationError("case_id в prediction run должны быть уникальны")
-        normalized = {
-            "version": version,
-            "run_id": run_id,
-            "manifest_fingerprint_sha256": manifest_fingerprint,
-            "cases": [
+
+        normalized_cases = []
+        for case in sorted(cases, key=lambda item: item.case_id):
+            findings = sorted(
+                case.findings,
+                key=lambda item: (
+                    item.dimension,
+                    item.change_type,
+                    item.reference_id,
+                    item.confidence,
+                ),
+            )
+            normalized_cases.append(
                 {
                     "case_id": case.case_id,
                     "findings": [
@@ -220,17 +233,20 @@ class ExpertBlindValidator:
                             "reference_id": finding.reference_id,
                             "confidence": finding.confidence,
                         }
-                        for finding in case.findings
+                        for finding in findings
                     ],
                 }
-                for case in cases
-            ],
+            )
+        normalized = {
+            "version": version,
+            "run_id": run_id,
+            "manifest_fingerprint_sha256": manifest_fingerprint,
+            "cases": normalized_cases,
         }
         return {
             "run_id": run_id,
             "manifest_fingerprint_sha256": manifest_fingerprint,
             "cases": cases,
-            "normalized": normalized,
             "prediction_fingerprint_sha256": _fingerprint(normalized),
         }
 
@@ -318,46 +334,61 @@ class ExpertBlindValidator:
         )
         gold_by_expert: dict[str, set[tuple[str, str, str]]] = {}
         expert_names: dict[str, str] = {}
-        expert_case_scope: dict[str, set[str]] = {}
+        dimensions_by_expert_case: dict[tuple[str, str], set[str]] = {}
         for case_id, expert_id, display_name, dimension, change_type in gold_rows:
             expert_id = str(expert_id)
             case_id = str(case_id)
+            dimension = str(dimension)
             expert_names[expert_id] = str(display_name)
-            expert_case_scope.setdefault(expert_id, set()).add(case_id)
             gold_by_expert.setdefault(expert_id, set()).add(
-                (case_id, str(dimension), str(change_type))
+                (case_id, dimension, str(change_type))
+            )
+            dimensions_by_expert_case.setdefault((expert_id, case_id), set()).add(
+                dimension
             )
 
         per_expert: dict[str, Any] = {}
         overall_gold: set[tuple[str, str, str, str]] = set()
         overall_predicted: set[tuple[str, str, str, str]] = set()
         dimension_totals: dict[str, dict[str, int]] = {}
+        overall_unscored = 0
 
         for expert_id in sorted(gold_by_expert):
             gold = gold_by_expert[expert_id]
-            scope = expert_case_scope.get(expert_id, set())
-            predicted = {
-                (case_id, dimension, change_type)
-                for case_id in scope
-                for dimension, change_type in predicted_by_case.get(case_id, set())
-            }
+            case_scope = {case_id for case_id, _dimension, _change_type in gold}
+            predicted: set[tuple[str, str, str]] = set()
+            unscored = 0
+            for case_id in case_scope:
+                scorable_dimensions = dimensions_by_expert_case.get(
+                    (expert_id, case_id), set()
+                )
+                for dimension, change_type in predicted_by_case.get(case_id, set()):
+                    if dimension in scorable_dimensions:
+                        predicted.add((case_id, dimension, change_type))
+                    else:
+                        unscored += 1
+
             tp_set = gold & predicted
             fp_set = predicted - gold
             fn_set = gold - predicted
             per_expert[expert_id] = {
                 "display_name": expert_names[expert_id],
-                "case_count": len(scope),
+                "case_count": len(case_scope),
                 "gold_class_count": len(gold),
-                "predicted_class_count": len(predicted),
+                "predicted_scored_class_count": len(predicted),
+                "unscored_prediction_count": unscored,
                 "metrics": _metric(len(tp_set), len(fp_set), len(fn_set)),
             }
+            overall_unscored += unscored
             overall_gold |= {(expert_id, *item) for item in gold}
             overall_predicted |= {(expert_id, *item) for item in predicted}
 
             dimensions = {item[1] for item in gold | predicted}
             for dimension in dimensions:
                 gold_dimension = {item for item in gold if item[1] == dimension}
-                predicted_dimension = {item for item in predicted if item[1] == dimension}
+                predicted_dimension = {
+                    item for item in predicted if item[1] == dimension
+                }
                 totals = dimension_totals.setdefault(
                     dimension, {"tp": 0, "fp": 0, "fn": 0}
                 )
@@ -388,7 +419,12 @@ class ExpertBlindValidator:
             "prediction_policy": {
                 "min_prediction_confidence": min_prediction_confidence,
             },
+            "scoring_policy": {
+                "silence_is_negative": False,
+                "score_only_dimensions_annotated_by_expert_for_case": True,
+            },
             "overall": _metric(len(overall_tp), len(overall_fp), len(overall_fn)),
+            "unscored_prediction_count": overall_unscored,
             "per_expert": per_expert,
             "by_dimension": by_dimension,
             "expert_profiles_kept_separate": True,
