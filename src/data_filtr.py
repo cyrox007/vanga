@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from settings import config
+from src.creative_team_features import load_training_context
 from src.database import db_connector
 from src.logger import setup_logger
 from src.normalize import extract_title_features, normalize_genre_str
@@ -25,6 +26,19 @@ def _coverage_features_enabled() -> bool:
     """
     raw = str(os.getenv("VANGA_TRAIN_COVERAGE_FEATURES", "1")).strip().casefold()
     return raw not in {"0", "false", "no", "off"}
+
+
+def _creative_team_features_enabled() -> bool:
+    """Возвращает режим candidate Creative Team v7.
+
+    По умолчанию выключен: production schema v6 не должна получить новые
+    признаки до отдельного temporal ablation. Включается только явно через
+    ``VANGA_TRAIN_CREATIVE_TEAM_FEATURES=1``.
+    """
+    raw = str(
+        os.getenv("VANGA_TRAIN_CREATIVE_TEAM_FEATURES", "0")
+    ).strip().casefold()
+    return raw in {"1", "true", "yes", "on"}
 
 
 @db_connector
@@ -70,14 +84,18 @@ def get_batches(
     - для совместимости avg_rating без истории остаётся 6.5, но schema v6 получает
       отдельные *_known и *_prior_count, поэтому fallback больше не выглядит фактом;
     - VANGA_TRAIN_COVERAGE_FEATURES=0 отключает только coverage-признаки и нужен
-      для честного ablation на том же temporal pipeline.
+      для честного ablation на том же temporal pipeline;
+    - Creative Team v7 по умолчанию выключен и не добавляет дополнительный SQL
+      к production v6, пока не включён VANGA_TRAIN_CREATIVE_TEAM_FEATURES=1.
     """
     del genres  # список жанров оставлен в сигнатуре для обратной совместимости
     coverage_enabled = _coverage_features_enabled()
+    creative_team_enabled = _creative_team_features_enabled()
 
     logger.info(
-        "Инициализация генератора обучающих батчей; coverage_features=%s",
+        "Инициализация генератора обучающих батчей; coverage_features=%s; creative_team=%s",
         "on" if coverage_enabled else "off (baseline v5)",
+        "on (candidate v7)" if creative_team_enabled else "off",
     )
     conn = duckdb.connect(config.IMDB_DB_PATH)
     conn.execute("SET memory_limit = '700MB'")
@@ -307,6 +325,16 @@ def get_batches(
                 ],
             )
 
+            if creative_team_enabled:
+                context_df = load_training_context(conn, tconsts_batch)
+                if not context_df.empty:
+                    df_batch = df_batch.merge(
+                        context_df,
+                        on="tconst",
+                        how="left",
+                        validate="one_to_one",
+                    )
+
             numeric_cols = [
                 "startYear",
                 "runtimeMinutes",
@@ -322,6 +350,20 @@ def get_batches(
                 "actor_2_prior_count",
                 "actor_3_prior_count",
             ]
+            if creative_team_enabled:
+                numeric_cols.extend(
+                    [
+                        "director_genre_avg_rating",
+                        "director_genre_prior_count",
+                        "director_recent_avg_rating",
+                        "director_recent_count",
+                        "writer_genre_avg_rating",
+                        "writer_genre_prior_count",
+                        "writer_recent_avg_rating",
+                        "writer_recent_count",
+                        "director_is_writer",
+                    ]
+                )
             for col in numeric_cols:
                 df_batch[col] = pd.to_numeric(df_batch[col], errors="coerce")
 
@@ -373,6 +415,36 @@ def get_batches(
                     if coverage_enabled:
                         numeric_df[prior_col] = prior.astype(np.float32)
                         numeric_df[known_col] = (prior > 0).astype(np.float32)
+
+            if creative_team_enabled:
+                for prefix in ("director", "writer"):
+                    genre_count = df_batch[f"{prefix}_genre_prior_count"].fillna(0)
+                    recent_count = df_batch[f"{prefix}_recent_count"].fillna(0)
+                    numeric_df[f"{prefix}_genre_avg_rating"] = (
+                        df_batch[f"{prefix}_genre_avg_rating"]
+                        .fillna(6.5)
+                        .astype(np.float32)
+                    )
+                    numeric_df[f"{prefix}_genre_prior_count"] = (
+                        genre_count.astype(np.float32)
+                    )
+                    numeric_df[f"{prefix}_genre_known"] = (
+                        genre_count > 0
+                    ).astype(np.float32)
+                    numeric_df[f"{prefix}_recent_avg_rating"] = (
+                        df_batch[f"{prefix}_recent_avg_rating"]
+                        .fillna(6.5)
+                        .astype(np.float32)
+                    )
+                    numeric_df[f"{prefix}_recent_count"] = (
+                        recent_count.astype(np.float32)
+                    )
+                    numeric_df[f"{prefix}_recent_known"] = (
+                        recent_count > 0
+                    ).astype(np.float32)
+                numeric_df["director_is_writer"] = (
+                    df_batch["director_is_writer"].fillna(0).astype(np.float32)
+                )
 
             title_features = (
                 df_batch["primaryTitle"]
