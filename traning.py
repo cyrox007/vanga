@@ -86,6 +86,14 @@ def _save_temporary_artifact(model, kind: str) -> tuple[Path, int]:
     return path, path.stat().st_size
 
 
+def _metric_text(metadata: dict, name: str) -> str:
+    value = metadata.get(name)
+    try:
+        return f"{float(value):.6f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
 def _log_evaluation_summary(metadata: dict, size_bytes: int) -> None:
     logger.info("=" * 60)
     logger.info("РЕЗУЛЬТАТ НЕПУБЛИКУЕМОЙ ОЦЕНКИ")
@@ -94,9 +102,9 @@ def _log_evaluation_summary(metadata: dict, size_bytes: int) -> None:
         "coverage_features_version=%s",
         metadata.get("coverage_features_version"),
     )
-    logger.info("MAE=%.6f", float(metadata.get("test_mae")))
-    logger.info("RMSE=%.6f", float(metadata.get("test_rmse")))
-    logger.info("R²=%.6f", float(metadata.get("test_r2")))
+    logger.info("MAE=%s", _metric_text(metadata, "test_mae"))
+    logger.info("RMSE=%s", _metric_text(metadata, "test_rmse"))
+    logger.info("R²=%s", _metric_text(metadata, "test_r2"))
     logger.info(
         "holdout=%s-%s; test_rows=%s",
         metadata.get("test_year_from"),
