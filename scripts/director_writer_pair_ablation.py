@@ -33,7 +33,8 @@ from src.train_model import train_catboost_model
 logger = setup_logger(__name__)
 
 # Оба варианта используют один disk-first engine, coverage и Creative Team v7.
-# Единственное отличие — director↔writer pair block.
+# Единственное отличие — director↔writer pair block. Director↔actor schema v9
+# здесь принудительно выключена, чтобы v7→v8 эксперимент не менялся со временем.
 train_model_module.get_batches = creative_get_batches
 
 
@@ -73,9 +74,10 @@ def _train_variant(
     os.environ["VANGA_TRAIN_DIRECTOR_WRITER_PAIR_FEATURES"] = (
         "1" if pair_enabled else "0"
     )
+    os.environ["VANGA_TRAIN_DIRECTOR_ACTOR_PAIR_FEATURES"] = "0"
     logger.info("=" * 60)
     logger.info(
-        "DIRECTOR-WRITER PAIR ABLATION: старт %s; pair=%s",
+        "DIRECTOR-WRITER PAIR ABLATION: старт %s; pair=%s; director_actor=off",
         label,
         "on" if pair_enabled else "off",
     )
@@ -99,6 +101,7 @@ def _train_variant(
         )
         result["creative_team_features_version"] = 1
         result["director_writer_pair_features_version"] = 1 if pair_enabled else 0
+        result["director_actor_pair_features_version"] = 0
         logger.info(
             "ABLATION %s: MAE=%.6f RMSE=%.6f R²=%.6f features=%s size=%.2f МБ",
             label,
