@@ -79,22 +79,23 @@
 
 ## P2. Creative Team Model
 
-Цель — моделировать не «известные фамилии», а роли, контекст и совместимость творческой команды. Нумерация ML schema независима от номера roadmap-фазы: P1 дал schema v6, контекст роли/жанра — v7, director↔writer pair — v8, director↔actor pair — candidate v9.
+Цель — моделировать не «известные фамилии», а роли, контекст и совместимость творческой команды. Нумерация ML schema независима от номера roadmap-фазы: P1 дал schema v6, контекст роли/жанра — v7, director↔writer pair — v8, director↔actor pair — v9, recent trend — candidate v10.
 
 - [~] `director_genre_avg_rating` и `writer_genre_avg_rating` — реализованы в schema v7, требуется полный ablation.
 - [~] `director_genre_prior_count` и `writer_genre_prior_count` — явное состояние отсутствия жанровой истории.
 - [~] `director_recent_avg_rating` и `writer_recent_avg_rating` по последним 5 прошлым работам — реализованы в schema v7, требуется полный ablation.
-- [R] `director_trend`/`writer_trend`: улучшается или ухудшается recent form.
+- [~] `director_recent_trend`, `writer_recent_trend` и `*_trend_known` — реализованы в candidate v10 как разница среднего последних 3 и предыдущих 3 прошлых работ; нужен temporal v9→v10 ablation.
 - [~] `director_is_writer` — реализован в schema v7, требуется полный ablation.
 - [ ] История человека отдельно как director, writer и director+writer.
 - [~] `director_writer_pair_avg_rating`, `director_writer_pair_count`, `director_writer_pair_known` — реализованы в schema v8; нужен полный temporal v7→v8 ablation перед публикацией.
-- [~] `director_actor_N_pair_avg_rating`, `director_actor_N_pair_count`, `director_actor_N_pair_known` для первых трёх актёров — реализованы в candidate v9; нужен полный temporal v8→v9 ablation.
+- [~] `director_actor_N_pair_avg_rating`, `director_actor_N_pair_count`, `director_actor_N_pair_known` для первых трёх актёров — реализованы в schema v9; нужен полный temporal v8→v9 ablation.
 - [ ] Число предыдущих совместных работ ключевой команды как отдельный агрегат.
 - [R] Ensemble/team cohesion признаки без утечки из будущего.
 - [R] Проверить, какие pair/cohesion features реально улучшают temporal MAE.
-- [~] Для первого P2-блока добавлен отдельный ablation `baseline v6 → candidate v7`, pair-блоки исключены.
-- [~] Для director↔writer pair добавлен отдельный ablation `baseline v7 → candidate v8`, director↔actor блок принудительно исключён.
-- [~] Для director↔actor pair добавлен отдельный ablation `baseline v8 → candidate v9`, который не публикует модель.
+- [~] Для первого P2-блока добавлен отдельный ablation `baseline v6 → candidate v7`, более поздние P2-блоки исключены.
+- [~] Для director↔writer pair добавлен отдельный ablation `baseline v7 → candidate v8`, последующие блоки принудительно исключены.
+- [~] Для director↔actor pair добавлен отдельный ablation `baseline v8 → candidate v9`, trend принудительно исключён.
+- [~] Для recent trend добавлен отдельный ablation `baseline v9 → candidate v10`, который не публикует модель.
 - [ ] Для каждого следующего блока проводить отдельный ablation и не публиковать ухудшающие признаки.
 
 ## P3. Первоисточник и адаптация как pre-release признаки
@@ -227,7 +228,7 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 
 1. **Production rollout текущего Vanga + jsint-site и retrain с актуальной схемой.**
 2. **Завершить серверную валидацию P1 schema v6.**
-3. **Creative Team: полный v6→v7→v8→v9 ablation; затем trend/director+writer/team-cohesion только отдельными инкрементами.**
+3. **Creative Team: полный v6→v7→v8→v9→v10 ablation; затем director+writer/team-cohesion только отдельными инкрементами.**
 4. **Text → StoryMap extractor для RU/EN summaries.**
 5. **Пилот Expert Analysis Corpus: Красный Циник + BadComedian + blind validation.**
 6. **Source/adaptation pre-release features, выведенные из ретроспективных закономерностей.**
@@ -254,6 +255,6 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 - `README.md` — текущее состояние Vanga и эксплуатация.
 - `docs/ADAPTATION_ANALYZER.md` — архитектура ретроспективного анализа адаптаций.
 - `docs/DATA_COVERAGE.md` и `docs/P1_STATUS.md` — контракт и статус P1.
-- `docs/P2_STATUS.md` — Creative Team schema v7/v8/v9 и безопасные поэтапные ablation.
+- `docs/P2_STATUS.md` — Creative Team schema v7/v8/v9/v10 и безопасные поэтапные ablation.
 - `docs/EXPERT_ANALYSIS_CORPUS.md` — многопрофильный экспертный корпус, blind validation и переносимые методы анализа.
 - Этот `docs/ROADMAP.md` — источник истины по согласованным планам дальнейшего развития.
