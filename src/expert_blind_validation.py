@@ -61,6 +61,14 @@ def _metric(tp: int, fp: int, fn: int) -> dict[str, float | int]:
     }
 
 
+def _reject_unknown_keys(payload: dict[str, Any], allowed: set[str], *, entity: str) -> None:
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise ExpertCorpusValidationError(
+            f"{entity} содержит неизвестные/запрещённые поля: " + ", ".join(unknown)
+        )
+
+
 @dataclass(frozen=True)
 class BlindFinding:
     dimension: str
@@ -72,6 +80,11 @@ class BlindFinding:
     def from_dict(cls, payload: dict[str, Any]) -> "BlindFinding":
         if not isinstance(payload, dict):
             raise ExpertCorpusValidationError("finding должен быть JSON-объектом")
+        _reject_unknown_keys(
+            payload,
+            {"dimension", "change_type", "reference_id", "confidence"},
+            entity="finding",
+        )
         dimension = str(payload.get("dimension") or "").strip()
         change_type = str(payload.get("change_type") or "").strip()
         if dimension not in EXPERT_DIMENSIONS:
@@ -105,9 +118,11 @@ class BlindCasePrediction:
     def from_dict(cls, payload: dict[str, Any]) -> "BlindCasePrediction":
         if not isinstance(payload, dict):
             raise ExpertCorpusValidationError("case prediction должен быть JSON-объектом")
-        findings = tuple(
-            BlindFinding.from_dict(item) for item in (payload.get("findings") or [])
-        )
+        _reject_unknown_keys(payload, {"case_id", "findings"}, entity="case prediction")
+        raw_findings = payload.get("findings") or []
+        if not isinstance(raw_findings, list):
+            raise ExpertCorpusValidationError("findings должен быть массивом")
+        findings = tuple(BlindFinding.from_dict(item) for item in raw_findings)
         class_keys = [(item.dimension, item.change_type) for item in findings]
         if len(class_keys) != len(set(class_keys)):
             raise ExpertCorpusValidationError(
@@ -115,21 +130,18 @@ class BlindCasePrediction:
             )
         return cls(
             case_id=_clean(
-                payload.get("case_id"),
-                field_name="case_id",
-                limit=180,
-                required=True,
+                payload.get("case_id"), field_name="case_id", limit=180, required=True
             ),
             findings=findings,
         )
 
 
 class ExpertBlindValidator:
-    """Post-hoc evaluator без передачи expert interpretation в predictor.
+    """Post-hoc evaluator, не раскрывающий predictor-у expert gold.
 
-    Важно: отсутствие claim у эксперта не считается отрицательной меткой. Для
-    expert×case оцениваются только dimensions, которые этот эксперт действительно
-    разметил. Predictions по другим dimensions остаются unscored.
+    Отсутствие claim у эксперта не трактуется как отрицательная метка. Для
+    expert×case оцениваются только dimensions, которые этот эксперт реально
+    размечал. Метрики разных экспертов никогда не объединяются в один score.
     """
 
     def __init__(self, store: ExpertCorpusStore) -> None:
@@ -144,8 +156,7 @@ class ExpertBlindValidator:
             )
         return split
 
-    def export_manifest(self, *, split: str = "blind") -> dict[str, Any]:
-        split = self._validate_split(split)
+    def _public_cases(self, split: str) -> list[dict[str, Any]]:
         rows = self.store.conn.execute(
             """
             SELECT case_id, imdb_id, film_title, film_year, source_work_id
@@ -155,21 +166,60 @@ class ExpertBlindValidator:
             """,
             [split],
         ).fetchall()
-        cases = [
+        return [
             {
                 "case_id": str(row[0]),
                 "imdb_id": row[1],
                 "film_title": str(row[2]),
-                "film_year": row[3],
+                "film_year": int(row[3]) if row[3] is not None else None,
                 "source_work_id": row[4],
             }
             for row in rows
         ]
+
+    def _sealed_gold_rows(self, split: str) -> list[tuple[str, str, str, str, str, float]]:
+        rows = self.store.conn.execute(
+            """
+            SELECT DISTINCT
+                m.expert_id, c.case_id, c.claim_id,
+                c.dimension, c.change_type, c.confidence
+            FROM expert_claims c
+            JOIN expert_materials m ON m.material_id = c.material_id
+            JOIN expert_cases ec ON ec.case_id = c.case_id
+            WHERE ec.split = ?
+            ORDER BY m.expert_id, c.case_id, c.claim_id, c.dimension, c.change_type
+            """,
+            [split],
+        ).fetchall()
+        return [
+            (
+                str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]),
+                round(float(row[5]), 8),
+            )
+            for row in rows
+        ]
+
+    def _sealed_gold_fingerprint(self, split: str) -> str:
+        return _fingerprint(
+            {
+                "version": BLIND_VALIDATION_VERSION,
+                "split": split,
+                "gold_rows": self._sealed_gold_rows(split),
+            }
+        )
+
+    def export_manifest(self, *, split: str = "blind") -> dict[str, Any]:
+        split = self._validate_split(split)
+        cases = self._public_cases(split)
+        if not cases:
+            raise ExpertCorpusValidationError(f"В corpus нет case-ов split={split}")
         payload = {
             "version": BLIND_VALIDATION_VERSION,
             "split": split,
             "case_count": len(cases),
             "cases": cases,
+            # Hash привязывает manifest к закрытому gold, но не раскрывает labels.
+            "sealed_gold_fingerprint_sha256": self._sealed_gold_fingerprint(split),
             "contains_expert_claims": False,
             "contains_expert_interpretation": False,
         }
@@ -180,6 +230,11 @@ class ExpertBlindValidator:
     def parse_prediction_run(payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ExpertCorpusValidationError("prediction run должен быть JSON-объектом")
+        _reject_unknown_keys(
+            payload,
+            {"version", "run_id", "manifest_fingerprint_sha256", "cases"},
+            entity="prediction run",
+        )
         try:
             version = int(payload.get("version", BLIND_VALIDATION_VERSION))
         except (TypeError, ValueError) as exc:
@@ -188,9 +243,7 @@ class ExpertBlindValidator:
             raise ExpertCorpusValidationError(
                 f"Поддерживается prediction run version={BLIND_VALIDATION_VERSION}"
             )
-        run_id = _clean(
-            payload.get("run_id"), field_name="run_id", limit=180, required=True
-        )
+        run_id = _clean(payload.get("run_id"), field_name="run_id", limit=180, required=True)
         manifest_fingerprint = _clean(
             payload.get("manifest_fingerprint_sha256"),
             field_name="manifest_fingerprint_sha256",
@@ -203,27 +256,19 @@ class ExpertBlindValidator:
             raise ExpertCorpusValidationError(
                 "manifest_fingerprint_sha256 должен быть SHA-256 hex"
             )
-
-        cases = tuple(
-            BlindCasePrediction.from_dict(item)
-            for item in (payload.get("cases") or [])
-        )
+        raw_cases = payload.get("cases") or []
+        if not isinstance(raw_cases, list):
+            raise ExpertCorpusValidationError("prediction run.cases должен быть массивом")
+        cases = tuple(BlindCasePrediction.from_dict(item) for item in raw_cases)
         case_ids = [item.case_id for item in cases]
         if len(case_ids) != len(set(case_ids)):
             raise ExpertCorpusValidationError("case_id в prediction run должны быть уникальны")
 
-        normalized_cases = []
-        for case in sorted(cases, key=lambda item: item.case_id):
-            findings = sorted(
-                case.findings,
-                key=lambda item: (
-                    item.dimension,
-                    item.change_type,
-                    item.reference_id,
-                    item.confidence,
-                ),
-            )
-            normalized_cases.append(
+        normalized = {
+            "version": version,
+            "run_id": run_id,
+            "manifest_fingerprint_sha256": manifest_fingerprint,
+            "cases": [
                 {
                     "case_id": case.case_id,
                     "findings": [
@@ -233,15 +278,17 @@ class ExpertBlindValidator:
                             "reference_id": finding.reference_id,
                             "confidence": finding.confidence,
                         }
-                        for finding in findings
+                        for finding in sorted(
+                            case.findings,
+                            key=lambda item: (
+                                item.dimension, item.change_type,
+                                item.reference_id, item.confidence,
+                            ),
+                        )
                     ],
                 }
-            )
-        normalized = {
-            "version": version,
-            "run_id": run_id,
-            "manifest_fingerprint_sha256": manifest_fingerprint,
-            "cases": normalized_cases,
+                for case in sorted(cases, key=lambda item: item.case_id)
+            ],
         }
         return {
             "run_id": run_id,
@@ -291,31 +338,29 @@ class ExpertBlindValidator:
     ) -> dict[str, Any]:
         split = self._validate_split(split)
         min_prediction_confidence = _bounded(
-            min_prediction_confidence,
-            field_name="min_prediction_confidence",
+            min_prediction_confidence, field_name="min_prediction_confidence"
         )
         min_gold_confidence = _bounded(
-            min_gold_confidence,
-            field_name="min_gold_confidence",
+            min_gold_confidence, field_name="min_gold_confidence"
         )
         manifest = self.export_manifest(split=split)
         run = self.parse_prediction_run(prediction_payload)
         if run["manifest_fingerprint_sha256"] != manifest["manifest_fingerprint_sha256"]:
             raise ExpertCorpusValidationError(
-                "Prediction run создан не для текущего blind manifest: fingerprint mismatch"
+                "Prediction run создан не для текущего sealed manifest: fingerprint mismatch"
             )
 
         expected_case_ids = {item["case_id"] for item in manifest["cases"]}
         predicted_case_ids = {case.case_id for case in run["cases"]}
         unexpected = sorted(predicted_case_ids - expected_case_ids)
+        missing = sorted(expected_case_ids - predicted_case_ids)
         if unexpected:
             raise ExpertCorpusValidationError(
                 "Prediction run содержит case вне выбранного split: " + ", ".join(unexpected)
             )
-        missing = sorted(expected_case_ids - predicted_case_ids)
         if missing:
             raise ExpertCorpusValidationError(
-                "Prediction run должен явно содержать каждый case manifest, включая cases с findings=[]: "
+                "Prediction run должен содержать каждый case manifest, включая findings=[]: "
                 + ", ".join(missing)
             )
 
@@ -343,25 +388,18 @@ class ExpertBlindValidator:
             gold_by_expert.setdefault(expert_id, set()).add(
                 (case_id, dimension, str(change_type))
             )
-            dimensions_by_expert_case.setdefault((expert_id, case_id), set()).add(
-                dimension
-            )
+            dimensions_by_expert_case.setdefault((expert_id, case_id), set()).add(dimension)
 
         per_expert: dict[str, Any] = {}
-        overall_gold: set[tuple[str, str, str, str]] = set()
-        overall_predicted: set[tuple[str, str, str, str]] = set()
-        dimension_totals: dict[str, dict[str, int]] = {}
-        overall_unscored = 0
-
         for expert_id in sorted(gold_by_expert):
             gold = gold_by_expert[expert_id]
             case_scope = {case_id for case_id, _dimension, _change_type in gold}
             predicted: set[tuple[str, str, str]] = set()
             unscored = 0
+            dimension_counts: dict[str, dict[str, int]] = {}
+
             for case_id in case_scope:
-                scorable_dimensions = dimensions_by_expert_case.get(
-                    (expert_id, case_id), set()
-                )
+                scorable_dimensions = dimensions_by_expert_case.get((expert_id, case_id), set())
                 for dimension, change_type in predicted_by_case.get(case_id, set()):
                     if dimension in scorable_dimensions:
                         predicted.add((case_id, dimension, change_type))
@@ -371,6 +409,15 @@ class ExpertBlindValidator:
             tp_set = gold & predicted
             fp_set = predicted - gold
             fn_set = gold - predicted
+            for dimension in sorted({item[1] for item in gold | predicted}):
+                gold_dim = {item for item in gold if item[1] == dimension}
+                pred_dim = {item for item in predicted if item[1] == dimension}
+                dimension_counts[dimension] = {
+                    "tp": len(gold_dim & pred_dim),
+                    "fp": len(pred_dim - gold_dim),
+                    "fn": len(gold_dim - pred_dim),
+                }
+
             per_expert[expert_id] = {
                 "display_name": expert_names[expert_id],
                 "case_count": len(case_scope),
@@ -378,31 +425,11 @@ class ExpertBlindValidator:
                 "predicted_scored_class_count": len(predicted),
                 "unscored_prediction_count": unscored,
                 "metrics": _metric(len(tp_set), len(fp_set), len(fn_set)),
+                "by_dimension": {
+                    dimension: _metric(values["tp"], values["fp"], values["fn"])
+                    for dimension, values in dimension_counts.items()
+                },
             }
-            overall_unscored += unscored
-            overall_gold |= {(expert_id, *item) for item in gold}
-            overall_predicted |= {(expert_id, *item) for item in predicted}
-
-            dimensions = {item[1] for item in gold | predicted}
-            for dimension in dimensions:
-                gold_dimension = {item for item in gold if item[1] == dimension}
-                predicted_dimension = {
-                    item for item in predicted if item[1] == dimension
-                }
-                totals = dimension_totals.setdefault(
-                    dimension, {"tp": 0, "fp": 0, "fn": 0}
-                )
-                totals["tp"] += len(gold_dimension & predicted_dimension)
-                totals["fp"] += len(predicted_dimension - gold_dimension)
-                totals["fn"] += len(gold_dimension - predicted_dimension)
-
-        overall_tp = overall_gold & overall_predicted
-        overall_fp = overall_predicted - overall_gold
-        overall_fn = overall_gold - overall_predicted
-        by_dimension = {
-            dimension: _metric(values["tp"], values["fp"], values["fn"])
-            for dimension, values in sorted(dimension_totals.items())
-        }
 
         return {
             "version": BLIND_VALIDATION_VERSION,
@@ -410,6 +437,7 @@ class ExpertBlindValidator:
             "split": split,
             "run_id": run["run_id"],
             "manifest_fingerprint_sha256": manifest["manifest_fingerprint_sha256"],
+            "sealed_gold_fingerprint_sha256": manifest["sealed_gold_fingerprint_sha256"],
             "prediction_fingerprint_sha256": run["prediction_fingerprint_sha256"],
             "case_count": len(expected_case_ids),
             "gold_policy": {
@@ -422,13 +450,13 @@ class ExpertBlindValidator:
             "scoring_policy": {
                 "silence_is_negative": False,
                 "score_only_dimensions_annotated_by_expert_for_case": True,
+                "expert_profiles_are_never_merged": True,
             },
-            "overall": _metric(len(overall_tp), len(overall_fp), len(overall_fn)),
-            "unscored_prediction_count": overall_unscored,
             "per_expert": per_expert,
-            "by_dimension": by_dimension,
-            "expert_profiles_kept_separate": True,
+            "combined_expert_score": None,
+            "cross_expert_dimension_score": None,
             "expert_interpretation_exposed_to_predictor": False,
+            "gold_labels_exposed_to_predictor": False,
             "preference_score": None,
             "research_only": True,
         }
