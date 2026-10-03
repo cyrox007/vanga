@@ -2,10 +2,42 @@ from __future__ import annotations
 
 import argparse
 import logging
+from datetime import datetime, timezone
 
 from settings import config
 from src.production_context import ProductionContextStore
 from src.production_materializer import ProductionContextMaterializer
+
+
+REFRESH_STATE_KEY = "wikidata_production_materializer_refresh_cursor"
+
+
+def _get_state(store: ProductionContextStore, key: str) -> str:
+    row = store.conn.execute(
+        "SELECT state_value FROM production_materialization_state WHERE state_key = ?",
+        [key],
+    ).fetchone()
+    return str(row[0]) if row else ""
+
+
+def _set_state(store: ProductionContextStore, key: str, value: str) -> None:
+    store.conn.execute(
+        """
+        INSERT INTO production_materialization_state(state_key, state_value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(state_key) DO UPDATE SET
+            state_value = excluded.state_value,
+            updated_at = excluded.updated_at
+        """,
+        [key, value, datetime.now(timezone.utc)],
+    )
+
+
+def _reset_state(store: ProductionContextStore, key: str) -> None:
+    store.conn.execute(
+        "DELETE FROM production_materialization_state WHERE state_key = ?",
+        [key],
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,7 +64,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reset-cursor",
         action="store_true",
-        help="Сбросить materialization cursor.",
+        help="Сбросить cursor выбранного materialization режима.",
+    )
+    parser.add_argument(
+        "--refresh-known",
+        action="store_true",
+        help=(
+            "Повторно материализовать уже обработанные IMDb IDs после refresh production cache. "
+            "Использует отдельный циклический cursor."
+        ),
     )
     return parser
 
@@ -53,12 +93,13 @@ def main(argv: list[str] | None = None) -> int:
         enrichment_db=args.enrichment_db,
         production_store=store,
     )
+    state_key = REFRESH_STATE_KEY if args.refresh_known else materializer.STATE_KEY
     try:
         if args.reset_cursor:
-            materializer.reset_cursor()
-            logging.info("Production Context materialization cursor сброшен.")
+            _reset_state(store, state_key)
+            logging.info("Production Context materialization cursor %s сброшен.", state_key)
 
-        cursor = materializer.get_cursor()
+        cursor = _get_state(store, state_key)
         processed = 0
         totals = {"production_companies": 0, "producers": 0, "series": 0}
 
@@ -73,15 +114,25 @@ def main(argv: list[str] | None = None) -> int:
                 limit=limit,
             )
             if count == 0:
-                logging.info("Новых cached production metadata для materialization нет.")
+                logging.info(
+                    "Cached production metadata для materialization нет (режим=%s).",
+                    "refresh" if args.refresh_known else "new",
+                )
+                if args.refresh_known:
+                    _reset_state(store, state_key)
+                    cursor = ""
+                    logging.info(
+                        "Полный materialization refresh-cycle завершён; cursor сброшен для следующего запуска."
+                    )
                 break
             processed += count
             for key, value in batch_totals.items():
                 totals[key] += value
             cursor = new_cursor
-            materializer.set_cursor(cursor)
+            _set_state(store, state_key, cursor)
             logging.info(
-                "Materialization: films=%s, companies=%s, producers=%s, series=%s, cursor=%s.",
+                "Materialization: режим=%s, films=%s, companies=%s, producers=%s, series=%s, cursor=%s.",
+                "refresh" if args.refresh_known else "new",
                 processed,
                 totals["production_companies"],
                 totals["producers"],
