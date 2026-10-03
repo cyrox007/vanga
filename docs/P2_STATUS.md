@@ -28,48 +28,70 @@ V12 сохраняет legacy `actor_1..actor_3`, но общий профиль
 
 V13 считает все unordered actor↔actor пары principal cast и их прошлые совместные фильмы. Основные признаки: `cast_pair_total`, `cast_pair_known_ratio`, collaboration mean/median/max и pair-rating avg/median/std. Пары без истории остаются в знаменателе familiarity как нули; unresolved actor не получает фиктивной истории.
 
-## Candidate schema v14: director+writer dual-role history
+## Schema v14: director+writer dual-role history
 
-V14 отделяет ещё одну закономерность от обычной режиссёрской или сценарной репутации: **опыт человека в фильмах, где он одновременно имел director-credit и writer-credit**.
-
-Для режиссёрской стороны учитывается весь текущий multi-director team, а не только primary director:
+V14 отделяет опыт человека в фильмах, где он одновременно имел director-credit и writer-credit. Для режиссёрской стороны учитывается весь текущий multi-director team, а не только primary director:
 
 - `director_team_dual_role_known_ratio`;
 - `director_team_dual_role_avg_rating`;
 - `director_team_dual_role_prior_count_mean`;
 - `director_team_dual_role_prior_count_max`.
 
-Для текущего сценариста по существующему first-writer contract:
+Для текущего сценариста считаются `writer_dual_role_avg_rating`, `writer_dual_role_prior_count`, `writer_dual_role_known` и факт `writer_is_in_director_team`.
 
-- `writer_dual_role_avg_rating`;
-- `writer_dual_role_prior_count`;
-- `writer_dual_role_known`;
-- `writer_is_in_director_team`.
+## Candidate schema v15: Team-wide Collaboration
 
-`writer_is_in_director_team` не является оценкой качества: это только явный факт, что текущий сценарист одновременно входит в режиссёрскую команду target-фильма.
+V15 расширяет legacy pair-признаки на всю творческую команду и не сводит фильм обратно к primary director.
 
-Если из двух режиссёров dual-role история есть только у одного, `known_ratio=0.5`; режиссёр без такой истории входит в count-агрегаты как ноль, но filler `6.5` не участвует в среднем реальных рейтингов.
+### Director team ↔ writer
+
+Для каждого режиссёра target-фильма строится отдельная историческая связь с текущим first writer, после чего пары агрегируются:
+
+- `team_writer_pair_total`;
+- `team_writer_pair_known_ratio`;
+- `team_writer_pair_prior_collaboration_mean`;
+- `team_writer_pair_prior_collaboration_max`;
+- `team_writer_pair_prior_rating_avg`.
+
+Если у фильма два режиссёра и только один раньше работал с текущим сценаристом, `known_ratio=0.5`, а второй режиссёр остаётся в count-агрегате как ноль.
+
+### Director team ↔ Full Cast
+
+Используется декартово произведение **всех режиссёров × всех principal actor/actress** target-фильма. Для каждой пары считаются только прошлые совместные фильмы, после чего строятся:
+
+- `team_actor_pair_total`;
+- `team_actor_pair_known_ratio`;
+- `team_actor_pair_prior_collaboration_mean`;
+- `team_actor_pair_prior_collaboration_median`;
+- `team_actor_pair_prior_collaboration_max`;
+- `team_actor_pair_prior_rating_avg`;
+- `team_actor_pair_prior_rating_median`;
+- `team_actor_pair_prior_rating_std`.
+
+Таким образом четвёртый и последующие актёры влияют не только на Full Cast v12 и actor↔actor v13, но и на историю их работы со всей режиссёрской командой.
+
+V15 по-прежнему не вводит единый `cohesion score`: сначала проверяются прозрачные сырые агрегаты связей.
 
 ## Temporal и missing-контракт
 
 Для всех P2-схем используются только фильмы с `startYear < target_year`. Target rating, фильмы того же календарного года и будущие работы исключены.
 
-Для v14 исторический фильм учитывается человеку только если на одном и том же prior title у него есть и director-credit, и writer-credit. Это не то же самое, что история пары «один режиссёр + другой сценарист» из v8.
+Unknown/unresolved участник остаётся в знаменателе соответствующего pair coverage, но не получает фиктивной совместной истории. Rating-агрегаты используют только реально известные пары; `6.5` остаётся числовым fallback при полном отсутствии истории.
 
 ## Train/inference parity
 
 Training:
 
-- `src/creative_training.py` добавляет v14 после actor-pair v13;
-- `VANGA_TRAIN_DUAL_ROLE_FEATURES=0` воспроизводит schema v13;
-- batch SQL использует весь director team и first writer;
+- `src/creative_training.py` добавляет v15 после dual-role v14;
+- `VANGA_TRAIN_TEAM_COLLABORATION_FEATURES=0` воспроизводит schema v14;
+- batch SQL использует весь director team, first writer и весь principal cast;
 - все P2-блоки продолжают использовать одно дополнительное DuckDB-соединение.
 
 Inference:
 
-- использует те же resolved director IDs и writer ID;
-- `fetch_dual_role_context` повторяет strict temporal и missing-семантику training;
-- старые модели без v14 feature names не выполняют dual-role запросы.
+- использует те же resolved director/writer/actor IDs;
+- `fetch_team_collaboration_context` повторяет strict temporal и missing-семантику training;
+- старые модели без v15 feature names не выполняют team-wide запросы.
 
 ## Версии схем
 
@@ -82,9 +104,10 @@ Inference:
 - v11 — multi-director team;
 - v12 — Full Cast Context;
 - v13 — actor↔actor pair history / ensemble familiarity;
-- v14 — director+writer dual-role history.
+- v14 — director+writer dual-role history;
+- v15 — team-wide director↔writer/director↔actor collaboration.
 
-Production entrypoint не разрешает случайно публиковать v5-v13 baseline обычным полным retrain. Candidate v14 также обязан пройти temporal quality gate.
+Production entrypoint не разрешает случайно публиковать v5-v14 baseline обычным полным retrain. Candidate v15 обязан пройти temporal quality gate.
 
 ## Ablation
 
@@ -94,16 +117,16 @@ Production entrypoint не разрешает случайно публиков�
 - `python scripts/creative_trend_ablation.py` — v9→v10;
 - `python scripts/director_team_ablation.py` — v10→v11;
 - `python scripts/full_cast_ablation.py` — v11→v12;
-- `python scripts/cast_pair_ablation.py` — v12→v13, v14 принудительно выключен;
-- `python scripts/dual_role_ablation.py` — v13→v14.
+- `python scripts/cast_pair_ablation.py` — v12→v13;
+- `python scripts/dual_role_ablation.py` — v13→v14, v15 принудительно выключен;
+- `python scripts/team_collaboration_ablation.py` — v14→v15.
 
 Все ablation непубликующие и не меняют `models/current.json`.
 
 ## Что осталось в P2
 
-- team-wide director↔writer/director↔actor aggregation для всех режиссёров и всего cast;
-- previous key-team collaboration aggregate как отдельный прозрачный блок;
+- previous key-team collaboration aggregate как отдельный прозрачный блок, только если v15 покажет пользу;
 - ensemble/team cohesion только после server ablation raw history-признаков;
-- серверный последовательный v6→v14 ablation и решение, какие кандидаты реально оставлять.
+- серверный последовательный v6→v15 ablation и решение, какие кандидаты реально оставлять.
 
 Связанный слой — `docs/PRODUCTION_CONTEXT.md`: студия, продюсер, franchise/shared universe, изменения производства и внешние creative consultancies.
