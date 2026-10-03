@@ -91,11 +91,12 @@ class TrainingFeatureContractTests(unittest.TestCase):
                     principals.append((tconst, 1, "nm_director", "director"))
 
                 # На target актёры имеют ordering 2/4/6: старый код терял 2-го и 3-го.
+                # actor3 до target не имеет ни одной прошлой работы: это проверяет
+                # различие реального prior average и совместимого fallback 6.5.
                 principals.extend(
                     [
                         ("tt0000001", 2, "nm_actor1", "actor"),
                         ("tt0000001", 3, "nm_actor2", "actor"),
-                        ("tt0000001", 4, "nm_actor3", "actress"),
                         ("tt0000002", 2, "nm_actor1", "actor"),
                         ("tt0000002", 4, "nm_actor2", "actor"),
                         ("tt0000002", 6, "nm_actor3", "actress"),
@@ -144,21 +145,34 @@ class TrainingFeatureContractTests(unittest.TestCase):
                     8.0,
                     places=5,
                 )
+                self.assertEqual(float(target_X["director_prior_count"]), 1.0)
+                self.assertEqual(float(target_X["director_known"]), 1.0)
+
                 self.assertAlmostEqual(
                     float(target_X["writer_avg_rating"]),
                     8.0,
                     places=5,
                 )
+                self.assertEqual(float(target_X["writer_prior_count"]), 1.0)
+                self.assertEqual(float(target_X["writer_known"]), 1.0)
+
                 self.assertAlmostEqual(
                     float(target_X["actor_1_avg_rating"]),
                     8.0,
                     places=5,
                 )
+                self.assertEqual(float(target_X["actor_1_prior_count"]), 1.0)
+                self.assertEqual(float(target_X["actor_1_known"]), 1.0)
+                self.assertEqual(float(target_X["actor_2_prior_count"]), 1.0)
+                self.assertEqual(float(target_X["actor_2_known"]), 1.0)
 
                 self.assertEqual(target_X["writer_id"], "nm_writer")
                 self.assertEqual(target_X["actor_1_id"], "nm_actor1")
                 self.assertEqual(target_X["actor_2_id"], "nm_actor2")
                 self.assertEqual(target_X["actor_3_id"], "nm_actor3")
+                self.assertEqual(float(target_X["actor_3_avg_rating"]), 6.5)
+                self.assertEqual(float(target_X["actor_3_prior_count"]), 0.0)
+                self.assertEqual(float(target_X["actor_3_known"]), 0.0)
             finally:
                 config.ABSPATH = old_abspath
                 config.IMDB_DB_PATH = old_imdb_db_path

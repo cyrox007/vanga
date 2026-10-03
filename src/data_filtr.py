@@ -55,7 +55,8 @@ def get_batches(
     - статистика режиссёра, сценариста и актёров считается только по фильмам прошлых лет;
     - numVotes не используется, потому что до релиза этот признак неизвестен;
     - первые три актёра выбираются по рангу среди актёров, а не по глобальному ordering;
-    - неизвестная историческая статистика заполняется нейтральным значением 6.5.
+    - для совместимости avg_rating без истории остаётся 6.5, но schema v6 получает
+      отдельные *_known и *_prior_count, поэтому fallback больше не выглядит фактом.
     """
     del genres  # список жанров оставлен в сигнатуре для обратной совместимости
 
@@ -114,7 +115,8 @@ def get_batches(
             SELECT
                 bm.tconst,
                 fd.nconst,
-                AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating
+                AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating,
+                COUNT(DISTINCT p.tconst) AS prior_count
             FROM batch_movies bm
             JOIN first_director fd ON fd.tconst = bm.tconst
             JOIN title_principals p
@@ -140,7 +142,8 @@ def get_batches(
             SELECT
                 bm.tconst,
                 fw.nconst,
-                AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating
+                AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating,
+                COUNT(DISTINCT tw.tconst) AS prior_count
             FROM batch_movies bm
             JOIN first_writer fw ON fw.tconst = bm.tconst
             JOIN title_writers tw ON tw.nconst = fw.nconst
@@ -180,7 +183,8 @@ def get_batches(
             SELECT
                 bm.tconst,
                 ar.rn,
-                AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating
+                AVG(TRY_CAST(r.averageRating AS DOUBLE)) AS avg_rating,
+                COUNT(DISTINCT p.tconst) AS prior_count
             FROM batch_movies bm
             JOIN actor_ranked ar ON ar.tconst = bm.tconst
             JOIN title_principals p
@@ -198,7 +202,10 @@ def get_batches(
                 tconst,
                 MAX(CASE WHEN rn = 1 THEN avg_rating END) AS actor_1_avg_rating,
                 MAX(CASE WHEN rn = 2 THEN avg_rating END) AS actor_2_avg_rating,
-                MAX(CASE WHEN rn = 3 THEN avg_rating END) AS actor_3_avg_rating
+                MAX(CASE WHEN rn = 3 THEN avg_rating END) AS actor_3_avg_rating,
+                MAX(CASE WHEN rn = 1 THEN prior_count END) AS actor_1_prior_count,
+                MAX(CASE WHEN rn = 2 THEN prior_count END) AS actor_2_prior_count,
+                MAX(CASE WHEN rn = 3 THEN prior_count END) AS actor_3_prior_count
             FROM actor_history
             GROUP BY tconst
         )
@@ -211,14 +218,19 @@ def get_batches(
             bm.averageRating,
             fd.nconst AS director_nconst,
             dh.avg_rating AS director_avg_rating,
+            dh.prior_count AS director_prior_count,
             fw.nconst AS writer_nconst,
             wh.avg_rating AS writer_avg_rating,
+            wh.prior_count AS writer_prior_count,
             ap.actor_1_nconst,
             ap.actor_2_nconst,
             ap.actor_3_nconst,
             ah.actor_1_avg_rating,
             ah.actor_2_avg_rating,
-            ah.actor_3_avg_rating
+            ah.actor_3_avg_rating,
+            ah.actor_1_prior_count,
+            ah.actor_2_prior_count,
+            ah.actor_3_prior_count
         FROM batch_movies bm
         LEFT JOIN first_director fd ON fd.tconst = bm.tconst
         LEFT JOIN director_history dh ON dh.tconst = bm.tconst
@@ -261,14 +273,19 @@ def get_batches(
                     "averageRating",
                     "director_nconst",
                     "director_avg_rating",
+                    "director_prior_count",
                     "writer_nconst",
                     "writer_avg_rating",
+                    "writer_prior_count",
                     "actor_1_nconst",
                     "actor_2_nconst",
                     "actor_3_nconst",
                     "actor_1_avg_rating",
                     "actor_2_avg_rating",
                     "actor_3_avg_rating",
+                    "actor_1_prior_count",
+                    "actor_2_prior_count",
+                    "actor_3_prior_count",
                 ],
             )
 
@@ -277,10 +294,15 @@ def get_batches(
                 "runtimeMinutes",
                 "averageRating",
                 "director_avg_rating",
+                "director_prior_count",
                 "writer_avg_rating",
+                "writer_prior_count",
                 "actor_1_avg_rating",
                 "actor_2_avg_rating",
                 "actor_3_avg_rating",
+                "actor_1_prior_count",
+                "actor_2_prior_count",
+                "actor_3_prior_count",
             ]
             for col in numeric_cols:
                 df_batch[col] = pd.to_numeric(df_batch[col], errors="coerce")
@@ -306,19 +328,30 @@ def get_batches(
             ).astype(np.float32)
 
             if use_director_stats:
+                director_prior = df_batch["director_prior_count"].fillna(0)
                 numeric_df["director_avg_rating"] = (
                     df_batch["director_avg_rating"].fillna(6.5).astype(np.float32)
                 )
+                numeric_df["director_prior_count"] = director_prior.astype(np.float32)
+                numeric_df["director_known"] = (director_prior > 0).astype(np.float32)
 
             if use_writer_stats:
+                writer_prior = df_batch["writer_prior_count"].fillna(0)
                 numeric_df["writer_avg_rating"] = (
                     df_batch["writer_avg_rating"].fillna(6.5).astype(np.float32)
                 )
+                numeric_df["writer_prior_count"] = writer_prior.astype(np.float32)
+                numeric_df["writer_known"] = (writer_prior > 0).astype(np.float32)
 
             if use_actor_stats:
                 for i in range(3):
                     col = f"actor_{i + 1}_avg_rating"
+                    prior_col = f"actor_{i + 1}_prior_count"
+                    known_col = f"actor_{i + 1}_known"
+                    prior = df_batch[prior_col].fillna(0)
                     numeric_df[col] = df_batch[col].fillna(6.5).astype(np.float32)
+                    numeric_df[prior_col] = prior.astype(np.float32)
+                    numeric_df[known_col] = (prior > 0).astype(np.float32)
 
             title_features = (
                 df_batch["primaryTitle"]

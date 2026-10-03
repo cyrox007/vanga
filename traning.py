@@ -17,6 +17,11 @@ from src.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+# Schema v6 вводит явные *_known и *_prior_count для исторических person-сигналов.
+# Это отдельная версия контракта train/inference; публикация всё равно проходит
+# temporal holdout и существующий quality gate.
+COVERAGE_SCHEMA_VERSION = 6
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -101,6 +106,8 @@ def main(argv: list[str] | None = None) -> None:
         max_batches=args.max_batches,
         iterations=iterations,
     )
+    metadata["schema_version"] = COVERAGE_SCHEMA_VERSION
+    metadata["coverage_features_version"] = 1
 
     interpret_model(model, metadata)
 
