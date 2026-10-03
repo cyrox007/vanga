@@ -11,6 +11,7 @@ from src.create_db import (
     create_duckdb_table_direct,
     create_indexes,
 )
+from src.data_freshness import build_freshness_report, write_freshness_manifest
 from src.data_loader import download_imdb_dataset
 from src.database import cleanup_temp
 from src.logger import setup_logger
@@ -50,6 +51,28 @@ def _validate_database(path: Path) -> None:
             logger.info(f"Проверка {table_name}: {count} строк")
     finally:
         conn.close()
+
+
+def _write_freshness_manifest(target: Path) -> dict:
+    data_dir = Path(config.ABSPATH) / "data" / "imdb"
+    report = build_freshness_report(target, data_dir=data_dir)
+    manifest = write_freshness_manifest(
+        report,
+        data_dir / "freshness-manifest.json",
+    )
+    if report.get("ready_for_full_training"):
+        logger.info(
+            "IMDb Data Freshness: готово к full training; stable_history_through=%s; fingerprint=%s",
+            report.get("stable_history_through_year"),
+            report.get("logical_fingerprint_sha256"),
+        )
+    else:
+        logger.warning(
+            "IMDb Data Freshness: full training заблокирован: %s",
+            "; ".join(report.get("blocking_reasons") or ["неизвестная причина"]),
+        )
+    logger.info("IMDb freshness manifest записан: %s", manifest)
+    return report
 
 
 def _build_staged_database(target: Path) -> None:
@@ -105,11 +128,13 @@ def main() -> int:
                 "IMDb datasets не изменились и схема актуальна — "
                 "пересборка БД не требуется"
             )
+            _write_freshness_manifest(target)
             return 0
 
     logger.info("Собираем новую IMDb БД в staging-файле")
     _build_staged_database(target)
     cleanup_temp()
+    _write_freshness_manifest(target)
     return 0
 
 
