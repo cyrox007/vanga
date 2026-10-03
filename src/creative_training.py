@@ -14,6 +14,11 @@ from src.creative_team_features import (
     creative_team_features_enabled,
     fetch_batch_creative_team_context,
 )
+from src.pair_features import (
+    DIRECTOR_WRITER_PAIR_FEATURE_NAMES,
+    director_writer_pair_features_enabled,
+    fetch_batch_director_writer_pair_context,
+)
 from src.logger import setup_logger
 
 
@@ -30,12 +35,17 @@ def get_batches(
 ) -> Generator[Tuple[pd.DataFrame, pd.Series, List[str], List[str]], None, None]:
     """Добавляет P2 Creative Team features поверх проверенного base pipeline.
 
-    Base pipeline остаётся источником schema v5/v6. Это позволяет воспроизводимо
-    отключить P2 через ``VANGA_TRAIN_CREATIVE_TEAM_FEATURES=0`` и сравнить v6 с
-    кандидатом v7 на том же temporal dataset.
+    Иерархия схем сохраняется воспроизводимой:
+    - Creative Team off -> schema v6;
+    - Creative Team on + pair off -> schema v7;
+    - Creative Team on + pair on -> candidate schema v8.
+
+    Оба P2-блока используют одно дополнительное соединение DuckDB, чтобы не
+    увеличивать число одновременных соединений и память на production VPS.
     """
-    enabled = creative_team_features_enabled()
-    if not enabled:
+    creative_enabled = creative_team_features_enabled()
+    pair_enabled = creative_enabled and director_writer_pair_features_enabled()
+    if not creative_enabled:
         yield from base_get_batches(
             genres,
             batch_size=batch_size,
@@ -50,6 +60,12 @@ def get_batches(
         "Creative Team features включены: %s",
         ", ".join(CREATIVE_TEAM_FEATURE_NAMES),
     )
+    if pair_enabled:
+        logger.info(
+            "Director-writer pair features включены: %s",
+            ", ".join(DIRECTOR_WRITER_PAIR_FEATURE_NAMES),
+        )
+
     # Базовый data_filtr держит обычное соединение с той же DuckDB. Открываем
     # второе соединение в том же режиме: DuckDB не допускает одновременно
     # подключать один файл с несовместимыми read_only/read_write параметрами.
@@ -80,6 +96,20 @@ def get_batches(
                     for tconst in tconsts
                 ]
                 enriched[feature_name] = np.asarray(values, dtype=np.float32)
+
+            if pair_enabled:
+                pair_context = fetch_batch_director_writer_pair_context(conn, tconsts)
+                for feature_name in DIRECTOR_WRITER_PAIR_FEATURE_NAMES:
+                    default = (
+                        6.5
+                        if feature_name == "director_writer_pair_avg_rating"
+                        else 0.0
+                    )
+                    values = [
+                        pair_context.get(tconst, {}).get(feature_name, default)
+                        for tconst in tconsts
+                    ]
+                    enriched[feature_name] = np.asarray(values, dtype=np.float32)
 
             yield enriched, y, titles, tconsts
     finally:

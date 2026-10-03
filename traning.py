@@ -21,17 +21,19 @@ from src.logger import setup_logger
 logger = setup_logger(__name__)
 
 # Production training использует расширенный P2 generator. Сам train_model остаётся
-# общим disk-first engine, поэтому baseline v5/v6 и candidate v7 проходят один и
-# тот же temporal split, CatBoost-конфигурацию и quality gate.
+# общим disk-first engine, поэтому baseline v5/v6/v7 и candidate v8 проходят один
+# и тот же temporal split, CatBoost-конфигурацию и quality gate.
 train_model_module.get_batches = creative_get_batches
 
-# Schema v6 вводит явные *_known и *_prior_count для исторических person-сигналов.
-# Schema v7 добавляет только pre-release Creative Team context: жанровую историю,
-# recent form и director_is_writer. Публикация всё равно проходит temporal holdout
-# и существующий quality gate.
+# Нумерация схем описывает только фактический feature contract:
+# v5 — baseline без coverage;
+# v6 — coverage known/prior_count;
+# v7 — genre/recent/director_is_writer;
+# v8 — история совместной работы director↔writer.
 BASELINE_SCHEMA_VERSION = 5
 COVERAGE_SCHEMA_VERSION = 6
 CREATIVE_TEAM_SCHEMA_VERSION = 7
+DIRECTOR_WRITER_PAIR_SCHEMA_VERSION = 8
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,6 +70,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "отключить P2 Creative Team block и воспроизвести schema v6: "
             "coverage включён, genre/recent/director_is_writer отсутствуют"
+        ),
+    )
+    parser.add_argument(
+        "--without-director-writer-pair-features",
+        action="store_true",
+        help=(
+            "отключить историю пары режиссёр-сценарист и воспроизвести schema v7"
         ),
     )
     parser.add_argument(
@@ -123,6 +132,10 @@ def _log_evaluation_summary(metadata: dict, size_bytes: int) -> None:
         "creative_team_features_version=%s",
         metadata.get("creative_team_features_version"),
     )
+    logger.info(
+        "director_writer_pair_features_version=%s",
+        metadata.get("director_writer_pair_features_version"),
+    )
     logger.info("MAE=%s", _metric_text(metadata, "test_mae"))
     logger.info("RMSE=%s", _metric_text(metadata, "test_rmse"))
     logger.info("R²=%s", _metric_text(metadata, "test_r2"))
@@ -151,17 +164,21 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--max-batches должно быть положительным числом")
 
     coverage_enabled = not args.without_coverage_features
-    # Creative Team schema строится поверх coverage schema. Если пользователь
-    # просит baseline v5, P2 автоматически отключается и не создаёт гибридную
-    # схему, которую нельзя честно сопоставить с v5/v6.
     creative_enabled = coverage_enabled and not args.without_creative_team_features
+    pair_enabled = (
+        creative_enabled and not args.without_director_writer_pair_features
+    )
 
-    non_publishable_baseline = not coverage_enabled or not creative_enabled
-    if non_publishable_baseline and not args.smoke and not args.evaluation_only:
+    # Любая неполная схема теперь является только baseline для smoke/evaluation.
+    # Обычный production retrain должен идти через полный candidate v8, чтобы
+    # нельзя было незаметно опубликовать v5/v6/v7 после смены default-контракта.
+    if not pair_enabled and not args.smoke and not args.evaluation_only:
         if not coverage_enabled:
             baseline_name = "Baseline schema v5"
-        else:
+        elif not creative_enabled:
             baseline_name = "Baseline schema v6 без Creative Team"
+        else:
+            baseline_name = "Baseline schema v7 без director-writer pair"
         raise SystemExit(
             f"{baseline_name} нельзя публиковать через этот entrypoint. "
             "Используйте --evaluation-only или --smoke."
@@ -171,6 +188,9 @@ def main(argv: list[str] | None = None) -> None:
     os.environ["VANGA_TRAIN_CREATIVE_TEAM_FEATURES"] = (
         "1" if creative_enabled else "0"
     )
+    os.environ["VANGA_TRAIN_DIRECTOR_WRITER_PAIR_FEATURES"] = (
+        "1" if pair_enabled else "0"
+    )
 
     if args.smoke:
         mode = "SMOKE (без публикации)"
@@ -179,8 +199,10 @@ def main(argv: list[str] | None = None) -> None:
     else:
         mode = "FULL"
 
-    if creative_enabled:
-        schema_label = "candidate v7"
+    if pair_enabled:
+        schema_label = "candidate v8"
+    elif creative_enabled:
+        schema_label = "baseline v7"
     elif coverage_enabled:
         schema_label = "baseline v6"
     else:
@@ -189,12 +211,13 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("=" * 60)
     logger.info("ЗАПУСК ОБУЧЕНИЯ CATBOOST")
     logger.info(
-        "Режим: %s; schema=%s; coverage=%s; creative_team=%s; "
+        "Режим: %s; schema=%s; coverage=%s; creative_team=%s; pair=%s; "
         "iterations=%s; batch_size=%s; max_batches=%s",
         mode,
         schema_label,
         "on" if coverage_enabled else "off",
         "on" if creative_enabled else "off",
+        "on" if pair_enabled else "off",
         iterations,
         args.batch_size,
         args.max_batches,
@@ -210,7 +233,9 @@ def main(argv: list[str] | None = None) -> None:
         max_batches=args.max_batches,
         iterations=iterations,
     )
-    if creative_enabled:
+    if pair_enabled:
+        metadata["schema_version"] = DIRECTOR_WRITER_PAIR_SCHEMA_VERSION
+    elif creative_enabled:
         metadata["schema_version"] = CREATIVE_TEAM_SCHEMA_VERSION
     elif coverage_enabled:
         metadata["schema_version"] = COVERAGE_SCHEMA_VERSION
@@ -218,6 +243,7 @@ def main(argv: list[str] | None = None) -> None:
         metadata["schema_version"] = BASELINE_SCHEMA_VERSION
     metadata["coverage_features_version"] = 1 if coverage_enabled else 0
     metadata["creative_team_features_version"] = 1 if creative_enabled else 0
+    metadata["director_writer_pair_features_version"] = 1 if pair_enabled else 0
 
     interpret_model(model, metadata)
 
@@ -242,9 +268,9 @@ def main(argv: list[str] | None = None) -> None:
             logger.info("НЕПУБЛИКУЕМАЯ ОЦЕНКА ЗАВЕРШЕНА УСПЕШНО")
         return
 
-    # Defense in depth: ни v5, ни v6-baseline не должны попасть в публикацию,
-    # даже если раннюю валидацию аргументов в будущем случайно изменят.
-    if not coverage_enabled or not creative_enabled:
+    # Defense in depth: baseline v5/v6/v7 не должен попасть в публикацию даже
+    # если раннюю валидацию аргументов в будущем случайно изменят.
+    if not coverage_enabled or not creative_enabled or not pair_enabled:
         raise SystemExit(
             "Неполную baseline-схему нельзя публиковать через этот entrypoint."
         )

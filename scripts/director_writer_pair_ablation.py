@@ -32,18 +32,16 @@ from src.train_model import train_catboost_model
 
 logger = setup_logger(__name__)
 
-# Весь ablation должен проходить через один и тот же disk-first training engine.
-# Меняется только P2 Creative Team block; coverage schema v6 остаётся включённой
-# в обеих половинах сравнения. Pair block schema v8 здесь принудительно выключен,
-# чтобы исторический v6→v7 эксперимент оставался воспроизводимым.
+# Оба варианта используют один disk-first engine, coverage и Creative Team v7.
+# Единственное отличие — director↔writer pair block.
 train_model_module.get_batches = creative_get_batches
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Непубликуемый temporal ablation: baseline v6 с coverage-признаками "
-            "против Creative Team candidate v7 на одной IMDb БД."
+            "Непубликуемый temporal ablation: Creative Team baseline v7 "
+            "против director-writer pair candidate v8 на одной IMDb БД."
         )
     )
     parser.add_argument("--iterations", type=int, default=1500)
@@ -61,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _train_variant(
     *,
     label: str,
-    creative_enabled: bool,
+    pair_enabled: bool,
     genres: list[str],
     iterations: int,
     batch_size: int,
@@ -71,15 +69,15 @@ def _train_variant(
     db_signature: dict[str, int],
 ) -> dict[str, Any]:
     os.environ["VANGA_TRAIN_COVERAGE_FEATURES"] = "1"
-    os.environ["VANGA_TRAIN_CREATIVE_TEAM_FEATURES"] = (
-        "1" if creative_enabled else "0"
+    os.environ["VANGA_TRAIN_CREATIVE_TEAM_FEATURES"] = "1"
+    os.environ["VANGA_TRAIN_DIRECTOR_WRITER_PAIR_FEATURES"] = (
+        "1" if pair_enabled else "0"
     )
-    os.environ["VANGA_TRAIN_DIRECTOR_WRITER_PAIR_FEATURES"] = "0"
     logger.info("=" * 60)
     logger.info(
-        "CREATIVE TEAM ABLATION: старт %s; creative_team=%s; pair=off",
+        "DIRECTOR-WRITER PAIR ABLATION: старт %s; pair=%s",
         label,
-        "on" if creative_enabled else "off",
+        "on" if pair_enabled else "off",
     )
 
     model, metadata = train_catboost_model(
@@ -95,12 +93,12 @@ def _train_variant(
         result = _result_from_metadata(
             metadata,
             label=label,
-            schema_version=7 if creative_enabled else 6,
+            schema_version=8 if pair_enabled else 7,
             coverage_features_version=1,
             model_size_bytes=size_bytes,
         )
-        result["creative_team_features_version"] = 1 if creative_enabled else 0
-        result["director_writer_pair_features_version"] = 0
+        result["creative_team_features_version"] = 1
+        result["director_writer_pair_features_version"] = 1 if pair_enabled else 0
         logger.info(
             "ABLATION %s: MAE=%.6f RMSE=%.6f R²=%.6f features=%s size=%.2f МБ",
             label,
@@ -133,11 +131,11 @@ def main(argv: list[str] | None = None) -> int:
     signature = database_signature(db_path)
     genres = get_all_genres()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    work_root = Path(config.ABSPATH) / "temp" / "creative-team-ablation" / stamp
+    work_root = Path(config.ABSPATH) / "temp" / "director-writer-pair-ablation" / stamp
 
     baseline = _train_variant(
-        label="baseline-v6",
-        creative_enabled=False,
+        label="baseline-v7",
+        pair_enabled=False,
         genres=genres,
         iterations=args.iterations,
         batch_size=args.batch_size,
@@ -149,8 +147,8 @@ def main(argv: list[str] | None = None) -> int:
     _assert_database_unchanged(db_path, signature)
 
     candidate = _train_variant(
-        label="candidate-v7",
-        creative_enabled=True,
+        label="candidate-v8",
+        pair_enabled=True,
         genres=genres,
         iterations=args.iterations,
         batch_size=args.batch_size,
@@ -184,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(config.ABSPATH)
             / "temp"
             / "ablation-reports"
-            / f"creative-team-{stamp}.json"
+            / f"director-writer-pair-{stamp}.json"
         )
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -194,9 +192,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     logger.info("=" * 60)
-    logger.info("CREATIVE TEAM ABLATION ЗАВЕРШЁН")
-    logger.info("Baseline v6 MAE: %.6f", baseline["test_mae"])
-    logger.info("Candidate v7 MAE: %.6f", candidate["test_mae"])
+    logger.info("DIRECTOR-WRITER PAIR ABLATION ЗАВЕРШЁН")
+    logger.info("Baseline v7 MAE: %.6f", baseline["test_mae"])
+    logger.info("Candidate v8 MAE: %.6f", candidate["test_mae"])
     logger.info("Δ MAE: %+.6f", comparison["delta_mae"])
     logger.info(
         "Non-regression: %s",
