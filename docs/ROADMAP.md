@@ -24,6 +24,7 @@
 11. **Актёрский ансамбль нельзя сводить к трём фамилиям.** Legacy top-3 могут сохраняться как персональные признаки, но общий cast-контекст должен учитывать каждого доступного principal actor/actress, его общую и жанровую историю и явное покрытие данными.
 12. **Совместимость ансамбля сначала измеряется прозрачными связями.** Нельзя сразу вводить непрозрачный `cohesion score`: сначала отдельно проверяются actor↔actor/director↔actor/director↔writer histories и только после temporal ablation допускается более общий агрегат.
 13. **Совмещение ролей — отдельный факт, а не синоним качества.** Опыт человека как director+writer хранится отдельно от его обычной режиссёрской и сценарной истории и допускается в production только после ablation.
+14. **Production Context — factual layer.** Для производственного события отдельно хранятся `event_at`, `known_at` и provenance; pre-release snapshot видит только то, что было известно к cutoff.
 
 ## Уже реализовано
 
@@ -127,16 +128,18 @@
 
 Цель — учесть производство фильма как систему: студию, продюсеров, франшизу, shared universe, изменения команды и внешнее творческое влияние. Полный контракт описан в `docs/PRODUCTION_CONTEXT.md`.
 
-- [ ] Нормализовать `production_company` / `production_label` с provenance.
-- [ ] Нормализовать producer IDs / creative lead там, где источник воспроизводим.
-- [ ] Ввести `franchise_id`, installment index и `shared_universe_id`.
+- [~] Factual registry реализован в отдельной `production_context.duckdb`: projects/entities/links/sources/events/consultancies, без прямой ML-интеграции.
+- [~] `production_company` / `production_label` и provenance поддерживаются schema; требуется нормализованное наполнение данными.
+- [~] Producer IDs / creative lead поддерживаются registry; требуется воспроизводимое наполнение и identity resolution.
+- [~] `franchise_id`, installment index и `shared_universe_id` поддерживаются project identity с `identity_known_at`.
 - [R] Проверить исторические studio/producer/franchise aggregates строго по более ранним релизам.
 - [R] Исследовать `continuity_load` / cross-project dependency как proxy сложности shared-universe производства.
-- [ ] Создать timestamped registry production changes: смена режиссёра, сценариста, creative lead, release date, format.
-- [R] Исследовать pre-release `rewrite_count`, `director_change_count`, `writer_change_count`, `release_delay_count`.
-- [R] Исследовать публично подтверждённые reshoot/additional-photography и major recut только если событие было известно до даты прогноза.
-- [ ] Ввести общий registry внешних story/script/character/worldbuilding/authenticity/sensitivity consultants.
+- [~] Timestamped registry production changes реализован: `event_at`, `known_at`, stage, source, details; требуется реальное наполнение.
+- [R] Исследовать pre-release `rewrite_count`, `director_change_count`, `writer_change_count`, `release_delay_count` через `features_as_of`.
+- [R] Исследовать публично подтверждённые reshoot/additional-photography и major recut только если `known_at <= cutoff`.
+- [~] Общий registry внешних story/script/character/worldbuilding/authenticity/sensitivity consultants реализован; требуется реальное наполнение.
 - [R] Проверять влияние consultancy scope статистически; название конкретной компании не считать причинным признаком само по себе.
+- [~] CLI `init/import/snapshot/timeline` готов для воспроизводимого локального/серверного наполнения и проверки temporal snapshots.
 - [ ] Любое утверждение эксперта о «веянии», корпоративном или культурном влиянии хранить как `expert_interpretation`; в pre-release модель переносить только измеримый proxy.
 - [ ] Не использовать политическую позицию, культурную идентичность, расу, этничность и иные чувствительные характеристики людей как признаки качества фильма.
 
@@ -274,7 +277,7 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 1. **Production rollout текущего Vanga + jsint-site и retrain с актуальной схемой.**
 2. **Завершить серверную валидацию P1 schema v6.**
 3. **Creative Team: полный v6→v7→v8→v9→v10→v11→v12→v13→v14→v15 ablation; затем key-team aggregate/cohesion только отдельными инкрементами после проверки raw histories.**
-4. **Production Context: studio/producer/franchise registry и timestamped production-change facts.**
+4. **Production Context: наполнить factual registry studio/producer/franchise/events/consultancies и только затем исследовать temporal proxy features.**
 5. **Text → StoryMap extractor для RU/EN summaries.**
 6. **Пилот Expert Analysis Corpus: Красный Циник + BadComedian + blind validation.**
 7. **Source/adaptation pre-release features, выведенные из ретроспективных закономерностей.**
@@ -302,6 +305,6 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 - `docs/ADAPTATION_ANALYZER.md` — архитектура ретроспективного анализа адаптаций.
 - `docs/DATA_COVERAGE.md` и `docs/P1_STATUS.md` — контракт и статус P1.
 - `docs/P2_STATUS.md` — Creative Team schema v7-v15 и безопасные поэтапные ablation.
-- `docs/PRODUCTION_CONTEXT.md` — multi-director, studio/franchise/producer context и внешний creative influence.
+- `docs/PRODUCTION_CONTEXT.md` — factual registry, temporal/provenance contract, multi-director, studio/franchise/producer context и внешний creative influence.
 - `docs/EXPERT_ANALYSIS_CORPUS.md` — многопрофильный экспертный корпус, blind validation и переносимые методы анализа.
 - Этот `docs/ROADMAP.md` — источник истины по согласованным планам дальнейшего развития.
