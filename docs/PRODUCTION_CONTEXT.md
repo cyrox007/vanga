@@ -8,13 +8,14 @@ Production Context отделён от IMDb training pipeline и CatBoost:
 - `src/production_identity.py` — canonical identity/aliases и count-based historical `as-of` aggregates;
 - `src/production_outcomes.py` — research-only outcome history;
 - `src/production_continuity.py` — factual cross-project continuity/dependency registry;
-- `scripts/production_context.py` — `init/import/snapshot/history/continuity/outcomes/timeline/resolve-*`;
+- `src/production_changes.py` — derived factual production-change proxies;
+- `scripts/production_context.py` — `init/import/snapshot/history/continuity/changes/outcomes/timeline/resolve-*`;
 - отдельная `production_context.duckdb`;
 - ML-интеграции outcome ratings пока нет.
 
 ## Базовый принцип
 
-Студия, продюсер, creative lead, франшиза, shared universe, cross-project dependency или consultancy не являются автоматическим плюсом/минусом. Система хранит наблюдаемые факты и только после temporal ablation может использовать проверенный proxy.
+Студия, продюсер, creative lead, франшиза, shared universe, cross-project dependency, production change или consultancy не являются автоматическим плюсом/минусом. Система хранит наблюдаемые факты и только после temporal ablation может использовать проверенный proxy.
 
 ## Temporal/provenance контракт
 
@@ -41,15 +42,7 @@ Pre-release snapshot использует только `known_at <= cutoff`.
 
 ### Production entities
 
-Canonical entity kinds:
-
-- `studio`;
-- `production_company`;
-- `production_label`;
-- `producer`;
-- `creative_lead`;
-- `consultancy`;
-- `other`.
+Canonical entity kinds: `studio`, `production_company`, `production_label`, `producer`, `creative_lead`, `consultancy`, `other`.
 
 `project_entity_links` связывает entity с фильмом, role, stage, `known_at` и provenance.
 
@@ -69,6 +62,10 @@ Entity/group alias регистрируется явно с provenance. Техн
 
 Event хранит stage, `event_at`, `known_at`, source и structured details без оценочного ярлыка.
 
+Для `release_date_change` derived слой понимает `details.old_release_at` и `details.new_release_at`.
+
+Для `reshoot` дополнительная съёмка может быть явно отмечена в `details.activity/subtype/shoot_type = additional_photography`.
+
 ### Consultancies
 
 Consultancy scope: story/script/character/worldbuilding/authenticity/sensitivity/other. Название consultancy само по себе не является quality feature.
@@ -77,36 +74,15 @@ Consultancy scope: story/script/character/worldbuilding/authenticity/sensitivity
 
 `ProductionContinuityContext` хранит документированные связи между проектами в `production_project_dependencies`.
 
-Направление link:
+Направление link: `project_id` — текущий/зависимый проект, `related_project_id` — связанный проект. Для symmetric `crossover_with` направление техническое и не означает причинность.
 
-- `project_id` — текущий/зависимый проект;
-- `related_project_id` — связанный проект.
+Relation types: `sequel_of`, `prequel_of`, `spin_off_of`, `continues_story_from`, `crossover_with`, `requires_context_from`, `other`.
 
-Для symmetric `crossover_with` направление техническое и не означает причинность.
-
-Поддерживаемые relation types:
-
-- `sequel_of`;
-- `prequel_of`;
-- `spin_off_of`;
-- `continues_story_from`;
-- `crossover_with`;
-- `requires_context_from`;
-- `other`.
-
-Scopes:
-
-- story;
-- character;
-- world;
-- continuity;
-- other.
+Scopes: story/character/world/continuity/other.
 
 Каждая связь требует `known_at` и `source_id`. Повторное подтверждение того же relation/scope другим source не увеличивает feature-count.
 
 ### Continuity features
-
-`ProductionContinuityContext.features_as_of(project_id, cutoff)` возвращает прозрачные raw proxies:
 
 - `production_continuity_dependency_count`;
 - `production_continuity_prior_released_count`;
@@ -115,20 +91,53 @@ Scopes:
 - `production_continuity_downstream_known_count`;
 - `production_continuity_downstream_future_count`;
 - `production_continuity_cross_project_count`;
-- relation-type counts;
-- scope counts;
+- relation/scope counts;
 - `production_continuity_prior_release_span_years`;
 - `production_continuity_known`.
 
-Это описание объёма cross-project coordination/continuity, а не quality sign. Большое значение нельзя заранее трактовать как ухудшение или улучшение фильма.
+Это описание coordination/continuity load, а не quality sign.
 
-Continuity features входят в factual `snapshot`, поскольку используют только датированные registry facts и release dates; ML всё равно требует отдельного ablation.
+## Derived production-change proxies
+
+`ProductionChangeContext` строит прозрачные агрегаты поверх timestamped events и не дублирует raw event counts.
+
+### Team/rework
+
+- `production_team_change_count` = director/writer/creative-lead/production-label changes;
+- `production_rework_count` = rewrite + reshoot + recut;
+- `production_additional_photography_count` — только явно размеченные additional-photography events.
+
+### Release date shifts
+
+Для событий `release_date_change`, где известны обе даты:
+
+- `production_release_delay_count`;
+- `production_release_delay_days_total/max/mean`;
+- `production_release_advance_count`;
+- `production_release_advance_days_total/max`;
+- `production_release_shift_known_ratio`.
+
+Generic release-date change без обеих дат остаётся raw fact, но не превращается в выдуманный delay/advance.
+
+### Coverage/stages
+
+- `production_change_event_date_known_ratio`;
+- `production_change_stage_<stage>_count`.
+
+Все derived proxies используют только events с `known_at <= cutoff`. Большое число rewrite/reshoot/delay не получает автоматический отрицательный знак.
 
 ## Factual snapshot
 
-`ProductionContextStore.features_as_of(project_id, cutoff)` возвращает только факты, известные на cutoff: franchise/shared-universe identity, installment, entity counts, production changes и consultancy counts/scopes.
+`ProductionContextStore.features_as_of(project_id, cutoff)` возвращает raw facts: franchise/shared-universe identity, installment, entity counts, event-type counts и consultancy counts/scopes.
 
-CLI `snapshot` объединяет factual registry + count-based historical identity + continuity proxies. Research outcome ratings намеренно туда не входят.
+CLI `snapshot` объединяет:
+
+- factual registry;
+- count-based historical identity;
+- continuity proxies;
+- derived production-change proxies.
+
+Research outcome ratings намеренно туда не входят.
 
 ## Historical identity
 
@@ -150,24 +159,15 @@ CLI `snapshot` объединяет factual registry + count-based historical id
 
 `ProductionOutcomeHistory.features_as_of(project_id, cutoff)` считает rating-агрегаты прошлых canonical production identity.
 
-Для franchise/shared-universe и ролей studio/production_company/production_label/producer/creative_lead доступны:
-
-- prior project count;
-- prior rated project count;
-- rating coverage;
-- rating avg/median/std.
-
-Для entity roles дополнительно есть `production_<role>_rating_history_known_ratio`.
+Для franchise/shared-universe и ролей studio/production_company/production_label/producer/creative_lead доступны prior project count, rated count, coverage, avg/median/std. Для entity roles дополнительно есть `production_<role>_rating_history_known_ratio`.
 
 `production_key_team_repeat_*` использует только прошлые фильмы, где повторялись минимум две текущие production entities.
 
-Одинаковый prior film считается один раз независимо от числа совпавших entities.
-
 ### Ограничение rating-time
 
-Текущая IMDb `averageRating` — актуальный snapshot, а не значение рейтинга на историческом cutoff. Поэтому outcome identity/release timing строгий, но rating number пока не point-in-time.
+Текущая IMDb `averageRating` — актуальный snapshot, а не значение рейтинга на историческом cutoff.
 
-Из-за этого:
+Поэтому:
 
 - `production_outcome_rating_point_in_time = 0`;
 - CLI возвращает `research_only=true` и `rating_point_in_time=false`;
@@ -179,9 +179,7 @@ CLI `snapshot` объединяет factual registry + count-based historical id
 
 ## Missing-контракт
 
-Prior project без IMDb rating остаётся в `prior_project_count`, но не входит в `prior_rated_project_count`, поэтому coverage уменьшается.
-
-При полном отсутствии rated history numeric fallback `6.5` всегда сопровождается coverage=0/rated_count=0 и не трактуется как реальная репутация.
+Prior project без IMDb rating остаётся в `prior_project_count`, но не входит в `prior_rated_project_count`, поэтому coverage уменьшается. При полном отсутствии rated history numeric fallback `6.5` сопровождается coverage=0/rated_count=0 и не трактуется как реальная репутация.
 
 ## CLI
 
@@ -191,16 +189,17 @@ python scripts/production_context.py import data/production-context/example.json
 python scripts/production_context.py snapshot PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/production_context.py history PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/production_context.py continuity PROJECT_ID 2026-01-15T00:00:00Z
+python scripts/production_context.py changes PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/production_context.py outcomes PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/production_context.py outcomes PROJECT_ID 2026-01-15T00:00:00Z --imdb-db /path/to/imdb.duckdb
 python scripts/production_context.py timeline PROJECT_ID 2026-01-15T00:00:00Z
 ```
 
-JSON bundle теперь может содержать `dependencies` после `projects`/provenance. Каждый элемент dependency обязан ссылаться на существующие project IDs и source ID.
+JSON bundle может содержать `dependencies`; каждый dependency обязан ссылаться на существующие project IDs и source ID.
 
 ## Связь с Creative Team
 
-Schema v11-v15 моделируют режиссёров/сценариста/актёров и их прошлые связи. Production Context не дублирует их, а добавляет studio/producer/franchise/shared-universe/events/consultancies/cross-project dependencies.
+Schema v11-v15 моделируют режиссёров/сценариста/актёров и их прошлые связи. Production Context добавляет studio/producer/franchise/shared-universe/events/consultancies/cross-project dependencies.
 
 ## Экспертные утверждения
 
