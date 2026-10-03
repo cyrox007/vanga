@@ -34,6 +34,8 @@ logger = setup_logger(__name__)
 
 # Оба варианта используют coverage + Creative Team + director↔writer schema v8.
 # Единственное отличие — история режиссёра с первыми тремя актёрами target-фильма.
+# Creative trend schema v10 здесь принудительно выключена, чтобы v8→v9 ablation
+# оставался воспроизводимым после добавления следующих блоков.
 train_model_module.get_batches = creative_get_batches
 
 
@@ -74,9 +76,10 @@ def _train_variant(
     os.environ["VANGA_TRAIN_DIRECTOR_ACTOR_PAIR_FEATURES"] = (
         "1" if actor_pair_enabled else "0"
     )
+    os.environ["VANGA_TRAIN_CREATIVE_TREND_FEATURES"] = "0"
     logger.info("=" * 60)
     logger.info(
-        "DIRECTOR-ACTOR PAIR ABLATION: старт %s; director_actor=%s",
+        "DIRECTOR-ACTOR PAIR ABLATION: старт %s; director_actor=%s; trend=off",
         label,
         "on" if actor_pair_enabled else "off",
     )
@@ -103,6 +106,7 @@ def _train_variant(
         result["director_actor_pair_features_version"] = (
             1 if actor_pair_enabled else 0
         )
+        result["creative_trend_features_version"] = 0
         logger.info(
             "ABLATION %s: MAE=%.6f RMSE=%.6f R²=%.6f features=%s size=%.2f МБ",
             label,
