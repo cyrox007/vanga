@@ -46,6 +46,7 @@ _SENTENCE_START_NOISE = {
     "then",
     "they",
     "this",
+    "therefore",
     "when",
     "while",
     "автор",
@@ -280,6 +281,20 @@ class RuleBasedStoryExtractor:
                 if not normalized:
                     continue
                 words = normalized.split()
+
+                # Capitalized discourse marker в начале предложения не является
+                # частью имени: "Поэтому Анна" -> "Анна",
+                # "Therefore Alice Carter" -> "Alice Carter".
+                if match.start() == 0 and words and words[0] in _SENTENCE_START_NOISE:
+                    label_parts = label.split()
+                    if len(label_parts) <= 1:
+                        continue
+                    label = " ".join(label_parts[1:])
+                    normalized = _normal_name(label)
+                    words = normalized.split()
+                    if not normalized:
+                        continue
+
                 if len(words) == 1 and words[0] in _SENTENCE_START_NOISE:
                     continue
                 item = candidates.setdefault(
