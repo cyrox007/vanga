@@ -29,6 +29,11 @@ from src.director_team_features import (
     director_team_features_enabled,
     fetch_batch_director_team_context,
 )
+from src.dual_role_features import (
+    DUAL_ROLE_FEATURE_NAMES,
+    dual_role_features_enabled,
+    fetch_batch_dual_role_context,
+)
 from src.full_cast_features import (
     FULL_CAST_FEATURE_NAMES,
     fetch_batch_full_cast_context,
@@ -68,10 +73,12 @@ def get_batches(
     - director-team off -> v10;
     - full-cast off -> v11;
     - cast-pair off -> v12;
-    - все блоки on -> candidate v13.
+    - dual-role off -> v13;
+    - все блоки on -> candidate v14.
 
-    V13 описывает историю совместной работы всех unordered actor↔actor пар
-    principal cast, не заменяя прозрачные pair-агрегаты единым cohesion score.
+    V14 добавляет историю человека именно в фильмах, где он одновременно имел
+    director- и writer-credit. Для режиссёрской стороны используется весь
+    multi-director target team, а не только primary director.
     """
     creative_enabled = creative_team_features_enabled()
     writer_pair_enabled = creative_enabled and director_writer_pair_features_enabled()
@@ -80,6 +87,7 @@ def get_batches(
     director_team_enabled = trend_enabled and director_team_features_enabled()
     full_cast_enabled = director_team_enabled and full_cast_features_enabled()
     cast_pair_enabled = full_cast_enabled and cast_pair_features_enabled()
+    dual_role_enabled = cast_pair_enabled and dual_role_features_enabled()
 
     if not creative_enabled:
         yield from base_get_batches(
@@ -105,6 +113,8 @@ def get_batches(
         logger.info("Full-cast features включены: %s", ", ".join(FULL_CAST_FEATURE_NAMES))
     if cast_pair_enabled:
         logger.info("Cast-pair features включены: %s", ", ".join(CAST_PAIR_FEATURE_NAMES))
+    if dual_role_enabled:
+        logger.info("Dual-role features включены: %s", ", ".join(DUAL_ROLE_FEATURE_NAMES))
 
     conn = duckdb.connect(str(config.IMDB_DB_PATH))
     conn.execute("SET memory_limit = '256MB'")
@@ -200,6 +210,19 @@ def get_batches(
                     default = 6.5 if feature_name in rating_defaults else 0.0
                     enriched[feature_name] = np.asarray(
                         [cast_pair_context.get(tconst, {}).get(feature_name, default) for tconst in tconsts],
+                        dtype=np.float32,
+                    )
+
+            if dual_role_enabled:
+                dual_context = fetch_batch_dual_role_context(conn, tconsts)
+                rating_defaults = {
+                    "director_team_dual_role_avg_rating",
+                    "writer_dual_role_avg_rating",
+                }
+                for feature_name in DUAL_ROLE_FEATURE_NAMES:
+                    default = 6.5 if feature_name in rating_defaults else 0.0
+                    enriched[feature_name] = np.asarray(
+                        [dual_context.get(tconst, {}).get(feature_name, default) for tconst in tconsts],
                         dtype=np.float32,
                     )
 
