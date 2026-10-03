@@ -12,6 +12,7 @@ from src.adaptation_analysis import (
     AdaptationValidationError,
     load_case_seed_from_enrichment,
 )
+from src.story_diff import StoryDiffAnalyzer, StoryMap
 
 
 def _dump(payload: dict) -> None:
@@ -57,6 +58,34 @@ def cmd_bootstrap(args) -> int:
             ),
         }
     )
+    return 0
+
+
+def cmd_diff(args) -> int:
+    source_payload = json.loads(Path(args.source_map).read_text(encoding="utf-8"))
+    adaptation_payload = json.loads(
+        Path(args.adaptation_map).read_text(encoding="utf-8")
+    )
+    source_map = StoryMap.from_dict(source_payload)
+    adaptation_map = StoryMap.from_dict(adaptation_payload)
+    annotations = StoryDiffAnalyzer.compare(source_map, adaptation_map)
+
+    result = {
+        "ok": True,
+        "source_map": source_map.map_id,
+        "adaptation_map": adaptation_map.map_id,
+        "annotations": annotations,
+    }
+    if args.output:
+        target = Path(args.output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        result["output"] = str(target)
+
+    _dump(result)
     return 0
 
 
@@ -144,6 +173,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bootstrap_parser.add_argument("--output", required=True)
     bootstrap_parser.set_defaults(func=cmd_bootstrap)
+
+    diff_parser = subparsers.add_parser(
+        "diff",
+        help=(
+            "Сравнить канонические story maps первоисточника и экранизации "
+            "и получить observation/structural_consequence annotations"
+        ),
+    )
+    diff_parser.add_argument("--source-map", required=True)
+    diff_parser.add_argument("--adaptation-map", required=True)
+    diff_parser.add_argument("--output")
+    diff_parser.set_defaults(func=cmd_diff)
 
     import_parser = subparsers.add_parser(
         "import",
