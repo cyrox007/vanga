@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.production_changes import ProductionChangeContext
+from src.production_consultancies import ProductionConsultancyContext
 from src.production_context import (
     ProductionContextStore,
     ProductionContextValidationError,
@@ -54,7 +55,6 @@ def _apply_bundle(
         "consultancies": 0,
         "dependencies": 0,
     }
-    # Порядок важен: projects/provenance должны существовать до links/dependencies.
     operations = (
         ("sources", store.upsert_source),
         ("groups", identity.upsert_group),
@@ -94,14 +94,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("init", help="создать/проверить схему registry/identity/continuity")
+    sub.add_parser("init", help="создать/проверить схему Production Context")
 
     import_parser = sub.add_parser("import", help="импортировать воспроизводимый JSON bundle")
     import_parser.add_argument("bundle", type=Path)
 
     snapshot = sub.add_parser(
         "snapshot",
-        help="показать factual + historical + continuity + change features as-of",
+        help="показать factual + historical + continuity + changes + consultancy features as-of",
     )
     snapshot.add_argument("project_id")
     snapshot.add_argument("cutoff", help="ISO datetime, например 2026-01-15T00:00:00Z")
@@ -123,6 +123,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     changes_parser.add_argument("project_id")
     changes_parser.add_argument("cutoff", help="ISO datetime")
+
+    consultancies_parser = sub.add_parser(
+        "consultancies",
+        help="показать neutral consultancy scope/stage/history context as-of",
+    )
+    consultancies_parser.add_argument("project_id")
+    consultancies_parser.add_argument("cutoff", help="ISO datetime")
 
     outcomes = sub.add_parser(
         "outcomes",
@@ -162,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     identity = ProductionIdentityHistory(store)
     continuity = ProductionContinuityContext(store)
     changes = ProductionChangeContext(store)
+    consultancies = ProductionConsultancyContext(store)
     try:
         if args.command == "init":
             _json_dump({"ok": True, "database": str(store.path)})
@@ -180,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
             features.update(identity.history_features_as_of(args.project_id, args.cutoff))
             features.update(continuity.features_as_of(args.project_id, args.cutoff))
             features.update(changes.features_as_of(args.project_id, args.cutoff))
+            features.update(consultancies.features_as_of(args.project_id, args.cutoff))
             _json_dump(
                 {
                     "ok": True,
@@ -218,6 +227,17 @@ def main(argv: list[str] | None = None) -> int:
                     "cutoff": args.cutoff,
                     "features": changes.features_as_of(args.project_id, args.cutoff),
                     "events": changes.changes_as_of(args.project_id, args.cutoff),
+                }
+            )
+            return 0
+        if args.command == "consultancies":
+            _json_dump(
+                {
+                    "ok": True,
+                    "project_id": args.project_id,
+                    "cutoff": args.cutoff,
+                    "features": consultancies.features_as_of(args.project_id, args.cutoff),
+                    "engagements": consultancies.engagements_as_of(args.project_id, args.cutoff),
                 }
             )
             return 0
