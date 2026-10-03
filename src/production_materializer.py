@@ -9,7 +9,10 @@ import duckdb
 
 from settings import config
 from src.production_context import ProductionContextStore
-from src.production_identity import ProductionIdentityHistory
+from src.production_identity import (
+    ProductionIdentityHistory,
+    normalize_identity_alias,
+)
 
 
 class ProductionContextMaterializer:
@@ -147,14 +150,34 @@ class ProductionContextMaterializer:
             ("production_projects", "project_id", "identity_known_at"),
             ("project_entity_links", "link_id", "known_at"),
             ("project_group_links", "link_id", "known_at"),
-            ("production_entity_aliases", "alias_key", "known_at"),
-            ("production_group_aliases", "alias_key", "known_at"),
         }
         if (table, id_column, timestamp_column) not in allowed:
             raise ValueError("Недопустимая таблица для temporal merge")
         row = self.store.conn.execute(
             f"SELECT {timestamp_column} FROM {table} WHERE {id_column} = ? LIMIT 1",
             [id_value],
+        ).fetchone()
+        existing = row[0] if row else None
+        return min(existing, observed_at) if existing is not None else observed_at
+
+    def _earliest_alias_timestamp(
+        self,
+        *,
+        table: str,
+        target_column: str,
+        target_id: str,
+        alias_key: str,
+        observed_at: datetime,
+    ) -> datetime:
+        allowed = {
+            ("production_entity_aliases", "entity_id"),
+            ("production_group_aliases", "group_id"),
+        }
+        if (table, target_column) not in allowed:
+            raise ValueError("Недопустимая alias-таблица для temporal merge")
+        row = self.store.conn.execute(
+            f"SELECT known_at FROM {table} WHERE alias_key = ? AND {target_column} = ? LIMIT 1",
+            [alias_key, target_id],
         ).fetchone()
         existing = row[0] if row else None
         return min(existing, observed_at) if existing is not None else observed_at
@@ -177,15 +200,13 @@ class ProductionContextMaterializer:
         for alias in names:
             if alias == canonical:
                 continue
+            alias_key = normalize_identity_alias(alias)
             if target_kind == "entity":
-                from src.production_identity import normalize_identity_alias
-
-                alias_key = normalize_identity_alias(alias)
-                known_at = self._earliest_timestamp(
+                known_at = self._earliest_alias_timestamp(
                     table="production_entity_aliases",
-                    id_column="alias_key",
-                    id_value=alias_key,
-                    timestamp_column="known_at",
+                    target_column="entity_id",
+                    target_id=target_id,
+                    alias_key=alias_key,
                     observed_at=observed_at,
                 )
                 self.identity.add_entity_alias(
@@ -197,14 +218,11 @@ class ProductionContextMaterializer:
                     }
                 )
             else:
-                from src.production_identity import normalize_identity_alias
-
-                alias_key = normalize_identity_alias(alias)
-                known_at = self._earliest_timestamp(
+                known_at = self._earliest_alias_timestamp(
                     table="production_group_aliases",
-                    id_column="alias_key",
-                    id_value=alias_key,
-                    timestamp_column="known_at",
+                    target_column="group_id",
+                    target_id=target_id,
+                    alias_key=alias_key,
                     observed_at=observed_at,
                 )
                 self.identity.add_group_alias(
@@ -342,7 +360,11 @@ class ProductionContextMaterializer:
             "SELECT release_at, identity_known_at FROM production_projects WHERE project_id = ?",
             [imdb_id],
         ).fetchone()
-        release_at = existing[0] if existing and existing[0] is not None else self._parse_release_at(row["wikidata"])
+        release_at = (
+            existing[0]
+            if existing and existing[0] is not None
+            else self._parse_release_at(row["wikidata"])
+        )
         identity_known_at = self._earliest_timestamp(
             table="production_projects",
             id_column="project_id",
@@ -395,7 +417,12 @@ class ProductionContextMaterializer:
                 counts["series"] += 1
         return counts
 
-    def materialize_batch(self, *, after_imdb: str, limit: int) -> tuple[int, dict[str, int], str]:
+    def materialize_batch(
+        self,
+        *,
+        after_imdb: str,
+        limit: int,
+    ) -> tuple[int, dict[str, int], str]:
         rows = self.load_rows(after_imdb=after_imdb, limit=limit)
         totals = {"production_companies": 0, "producers": 0, "series": 0}
         cursor = after_imdb
