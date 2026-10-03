@@ -165,6 +165,9 @@ class ProductionMaterializerTests(unittest.TestCase):
     def test_repeated_later_sync_preserves_earliest_relation_and_alias_observation(self):
         self.materializer.materialize_batch(after_imdb="", limit=10)
 
+        # DuckDB не разрешает одновременно read-only и read-write connections
+        # к одному файлу с разной конфигурацией. Закрываем materializer перед refresh.
+        self.materializer.close()
         cache = ProductionWikidataCache(self.enrichment_path)
         try:
             cache.upsert(
@@ -186,8 +189,6 @@ class ProductionMaterializerTests(unittest.TestCase):
         finally:
             cache.close()
 
-        # Materializer держит read-only connection: обновлённую строку читаем новым instance.
-        self.materializer.close()
         self.materializer = ProductionContextMaterializer(
             enrichment_db=self.enrichment_path,
             production_store=self.store,
@@ -204,8 +205,12 @@ class ProductionMaterializerTests(unittest.TestCase):
             WHERE entity_id='wikidata:Q100' AND alias='Студия Пример'
             """
         ).fetchone()[0]
+        link_source = self.store.conn.execute(
+            "SELECT source_id FROM project_entity_links WHERE link_id='wikidata:tt0001:production_company:Q100'"
+        ).fetchone()[0]
         self.assertEqual(link_known, datetime(2024, 1, 10, tzinfo=timezone.utc))
         self.assertEqual(alias_known, datetime(2024, 1, 10, tzinfo=timezone.utc))
+        self.assertEqual(link_source, "wikidata:Q1:20240110T000000Z")
 
     def test_same_alias_on_different_entities_does_not_leak_earlier_known_at(self):
         # Сначала материализуем Q100 alias в 2024.
