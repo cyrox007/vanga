@@ -4,9 +4,12 @@
 
 Source Context хранит только факты о первоисточнике и формате адаптации, которые могут быть известны **до релиза** проекта.
 
+Основные слои:
+
 - `src/source_context.py` — canonical source/creator/project registry и base as-of features;
-- `src/source_team_history.py` — опыт текущей creative team именно на прошлых адаптациях;
+- `src/source_team_history.py` — опыт current creative team именно на прошлых адаптациях;
 - `src/source_format_pressure.py` — прозрачные source-age/series/runtime proxies;
+- `src/source_complexity.py` — versioned research measurements сложности первоисточника;
 - `scripts/source_context.py` — CLI;
 - отдельная `source_context.duckdb` (`VANGA_SOURCE_CONTEXT_DB`).
 
@@ -14,9 +17,9 @@ Source Context хранит только факты о первоисточни�
 
 ## Temporal/provenance контракт
 
-Project↔source link видим только при `known_at <= cutoff`. Creator-link также имеет собственный `known_at`.
+Project↔source link видим только при `known_at <= cutoff`. Creator-link и complexity measurement также имеют собственный `known_at`.
 
-Книга/игра может существовать десятилетиями, но если связь будущего фильма с ней была объявлена позже, ранний прогноз её не использует.
+Книга, игра или комикс могут существовать десятилетиями, но если связь будущего фильма с ними была объявлена позже, ранний прогноз эту связь не использует.
 
 Для adaptation-team history prior project учитывается только если:
 
@@ -30,7 +33,7 @@ Project↔source link видим только при `known_at <= cutoff`. Creat
 
 `source_works` хранит work ID, title, source type, first publication date, optional series ID/position/size и external ID.
 
-Source types: novel/novel series/short story/comic/graphic novel/manga/game/play/musical/TV/film/remake/real events/biography/mythology/other.
+Source types включают novel/novel series/short story/comic/graphic novel/manga/game/play/musical/TV/film/remake/real events/biography/mythology/other.
 
 ## Creators
 
@@ -42,7 +45,7 @@ Raw creator ID пока не является ML feature; base snapshot возв
 
 `source_context_projects` хранит adaptation format, planned runtime, episode count/runtime, release date и `format_known_at`.
 
-Если формат стал известен позже cutoff, ранний snapshot получает `source_format_known=0` и явные numeric placeholders.
+Если формат стал известен позже cutoff, ранний snapshot получает `source_format_known=0` и numeric placeholders.
 
 ## Project ↔ source relations
 
@@ -68,83 +71,58 @@ Raw creator ID пока не является ML feature; base snapshot возв
 
 ## Source Format Pressure
 
-`SourceFormatPressureContext.features_as_of` добавляет прозрачные pre-release proxies, рассчитанные только из уже известных source/series/project-format facts.
+`SourceFormatPressureContext.features_as_of` добавляет прозрачные pre-release proxies из уже известных source/series/project-format facts.
 
-Это **не настоящий `adaptation_compression_ratio`**. Без структурированного понимания сюжетных арок нельзя честно утверждать, что фильм «сжал 70% материала».
+Это **не настоящий `adaptation_compression_ratio`**. Без структурированного понимания сюжетных арок нельзя честно утверждать, что фильм «сжал N% материала».
 
-### Возраст первоисточника к target release
+Слой считает:
 
-Если release/format metadata уже известны на cutoff, считаются:
+- source age at target release и coverage;
+- data-quality counter publication-after-release;
+- series count/progress;
+- planned runtime/episodes на linked/primary source work;
+- source-type diversity;
+- relation diversity.
 
-- `source_age_at_release_known_ratio`;
-- `source_age_at_release_years_mean/min/max`;
-- `source_publication_after_release_count`.
-
-Source с publication date после target release не получает отрицательный возраст. Он исключается из age aggregate и увеличивает отдельный data-quality counter.
-
-### Series context
-
-По видимым source works считаются:
-
-- `source_series_count`;
-- `source_series_progress_known_ratio`;
-- `source_series_progress_ratio_mean/max`.
-
-`series_progress = series_position / series_size` используется только при известных position и size. Это положение source work внутри серии, а не оценка сюжетной сложности.
-
-### Runtime / episode pressure proxies
-
-При заранее известном planned runtime считаются:
-
-- `source_format_pressure_runtime_known`;
-- `source_runtime_per_linked_work_known`;
-- `source_runtime_per_linked_work_minutes`;
-- `source_runtime_per_primary_work_known`;
-- `source_runtime_per_primary_work_minutes`;
-- `source_episodes_per_linked_work_known`;
-- `source_episodes_per_linked_work`.
-
-Дополнительно возвращаются `source_type_diversity` и `source_relation_diversity`.
-
-Эти признаки означают только «сколько запланированного экранного времени приходится на известное число связанных works». Они не утверждают, что каждая книга/игра/комикс имеет одинаковый объём содержания.
+Эти признаки означают только доступный формат/объём планируемого экранного времени на известное число works.
 
 ## Adaptation-specific team history
 
-`SourceTeamHistory.features_as_of` использует Source Context + локальную IMDb БД и отвечает на отдельный вопрос: **какой опыт текущая creative team уже имела именно на более ранних адаптациях**.
+`SourceTeamHistory.features_as_of` использует Source Context + локальную IMDb БД и отвечает на вопрос: **какой опыт current creative team уже имела именно на более ранних адаптациях**.
 
 ### Режиссёрская команда
 
 Несколько режиссёров учитываются как нормальный случай. Для каждого current director отдельно считаются:
 
 - число prior adaptations;
-- число prior adaptations с совпадающим source type;
-- число prior adaptations с genre overlap target-фильма.
+- prior adaptations с совпадающим source type;
+- prior adaptations с genre overlap target-фильма.
 
-Затем возвращаются `known_ratio`, count mean и count max по всей режиссёрской команде. Explicit `Unknown` остаётся в denominator как ноль.
+Затем возвращаются `known_ratio`, count mean и count max по всей director team. Explicit `Unknown` остаётся в denominator как ноль.
 
-### Сценарист
+### Сценарист и director↔writer pair
 
-Для current writer:
+Для writer считаются adaptation count, same-source-type count и same-genre count.
 
-- `source_writer_adaptation_count`;
-- `source_writer_adaptation_known`;
-- same-source-type adaptation count;
-- same-genre adaptation count.
+Для каждой current director × writer пары отдельно считается previous adaptation collaboration, затем агрегируется по director team. Это не общий cohesion score и не рейтинг качества.
 
-### Director↔writer pair
+P3 team history пока использует counts/coverage, а не IMDb rating прошлых адаптаций.
 
-Для каждой пары current director × current writer отдельно считается previous adaptation collaboration, затем агрегируется по director team:
+## Source Complexity research foundation
 
-- pair known ratio;
-- count mean/max;
-- same-source-type pair mean/max;
-- same-genre pair mean/max.
+`SourceComplexityContext` хранит measurements первоисточника как **versioned snapshots**.
 
-Это не общий cohesion score и не рейтинг качества.
+Каждый snapshot содержит точные `method + method_version`, `measured_at`, `known_at`, provenance source, coverage и raw metrics. Разные методики не смешиваются автоматически.
 
-### Почему пока только counts
+Разрешены воспроизводимые raw counts/lengths: words/pages/minutes, chapters, characters, major characters, plotlines, major arcs, locations, factions, worldbuilding entities/relations.
 
-P3 team history намеренно не использует IMDb rating прошлых адаптаций. Сначала проверяется factual experience/coverage signal без дополнительной temporal неоднозначности outcome rating.
+Произвольный «complexity score» schema не принимает.
+
+Density вычисляется только внутри одного snapshot, например characters/10k words. Нельзя объединять count из method A с length из method B.
+
+Для проекта с несколькими source works непокрытые works остаются в denominator и снижают coverage, но не получают fallback.
+
+Подробный контракт: `docs/SOURCE_COMPLEXITY.md`.
 
 ## CLI
 
@@ -155,31 +133,35 @@ python scripts/source_context.py snapshot PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/source_context.py links PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/source_context.py format-pressure PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/source_context.py team-history PROJECT_ID 2026-01-15T00:00:00Z
+python scripts/source_context.py complexity-methods PROJECT_ID 2026-01-15T00:00:00Z
+python scripts/source_context.py complexity-features PROJECT_ID 2026-01-15T00:00:00Z \
+  --method manual-structural-counts --version 1
+python scripts/source_context.py complexity-snapshots WORK_ID 2026-01-15T00:00:00Z
 ```
 
-Обычный `snapshot` объединяет base Source Context и Source Format Pressure. `format-pressure` выводит тот же derived блок отдельно и явно возвращает `compression_ratio: null`, чтобы proxy не путали с измеренной степенью сжатия.
+Обычный `snapshot` объединяет base Source Context и Source Format Pressure. Complexity остаётся отдельным research-only вызовом и требует явной method/version.
 
-При необходимости resolved IDs можно передать явно:
+При необходимости resolved IDs creative team можно передать явно:
 
 ```bash
 python scripts/source_context.py team-history PROJECT_ID 2026-01-15T00:00:00Z \
   --directors nm0000001,nm0000002 --writer nm0000003 --imdb-db /path/to/imdb.duckdb
 ```
 
-Без override режиссёры и writer разрешаются по IMDb target project.
-
 JSON bundle order:
 
-`sources → works → creators → creator_links → projects → source_links`.
+`sources → works → creators → creator_links → projects → source_links → complexity_snapshots`.
 
 ## Что сознательно отсутствует
 
-Pre-release Source Context не содержит full source text, post-release plot, StoryMap/StoryDiff, expert opinion или post-release adaptation facts.
+Pre-release Source Context не содержит full film plot, post-release StoryMap/StoryDiff, expert opinion или фактические post-release adaptation changes.
 
-Source popularity и содержательная complexity/compression появятся только при воспроизводимом point-in-time источнике/методе. Текущий Format Pressure — лишь transparent factual proxy layer.
+Source Complexity foundation описывает только воспроизводимые measurements первоисточника. Содержательные causal/structural признаки относятся к P4.
 
 ## Путь к ML
 
-Перед включением source/team-history/format-pressure features в CatBoost требуется реальное historical наполнение, coverage analysis, train/inference parity, отдельный temporal ablation, quality gate и проверка VPS.
+Перед включением source/team-history/format-pressure/complexity features в CatBoost требуется реальное historical наполнение, coverage analysis, train/inference parity, отдельный temporal ablation, quality gate и VPS profiling.
 
-Следующий P3-инкремент: research foundation для source complexity/compression, где каждый complexity fact будет явно иметь provenance/method/version и не будет опираться на post-release фильм.
+P3 foundation после Source Complexity считается собранным. Следующий крупный этап — **P4 automatic `text -> StoryMap -> StoryDiff`**.
+
+Перед финальным retrain дополнительно обязателен отдельный **Data Freshness/Backfill guard** для IMDb snapshot: свежесть dump, покрытие 2024–2026, maturity target и воспроизводимый manifest/fingerprint.

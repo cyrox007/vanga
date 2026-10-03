@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.source_complexity import SourceComplexityContext
 from src.source_context import SourceContextStore, SourceContextValidationError
 from src.source_format_pressure import SourceFormatPressureContext
 from src.source_team_history import SourceTeamHistory
@@ -27,7 +28,11 @@ def _load(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _apply_bundle(store: SourceContextStore, payload: dict[str, Any]) -> dict[str, int]:
+def _apply_bundle(
+    store: SourceContextStore,
+    complexity: SourceComplexityContext,
+    payload: dict[str, Any],
+) -> dict[str, int]:
     counters = {
         "sources": 0,
         "works": 0,
@@ -35,6 +40,7 @@ def _apply_bundle(store: SourceContextStore, payload: dict[str, Any]) -> dict[st
         "creator_links": 0,
         "projects": 0,
         "source_links": 0,
+        "complexity_snapshots": 0,
     }
     operations = (
         ("sources", store.upsert_source),
@@ -43,6 +49,7 @@ def _apply_bundle(store: SourceContextStore, payload: dict[str, Any]) -> dict[st
         ("creator_links", store.link_creator),
         ("projects", store.upsert_project),
         ("source_links", store.link_source),
+        ("complexity_snapshots", complexity.add_snapshot),
     )
     for key, handler in operations:
         rows = payload.get(key) or []
@@ -101,6 +108,31 @@ def build_parser() -> argparse.ArgumentParser:
     pressure.add_argument("project_id")
     pressure.add_argument("cutoff", help="ISO datetime")
 
+    complexity_methods = sub.add_parser(
+        "complexity-methods",
+        help="показать доступные versioned complexity protocols и coverage",
+    )
+    complexity_methods.add_argument("project_id")
+    complexity_methods.add_argument("cutoff", help="ISO datetime")
+
+    complexity_features = sub.add_parser(
+        "complexity-features",
+        help="агрегировать complexity только для точного method + version",
+    )
+    complexity_features.add_argument("project_id")
+    complexity_features.add_argument("cutoff", help="ISO datetime")
+    complexity_features.add_argument("--method", required=True)
+    complexity_features.add_argument("--version", required=True)
+
+    complexity_snapshots = sub.add_parser(
+        "complexity-snapshots",
+        help="показать versioned measurements одного source work as-of cutoff",
+    )
+    complexity_snapshots.add_argument("work_id")
+    complexity_snapshots.add_argument("cutoff", help="ISO datetime")
+    complexity_snapshots.add_argument("--method", default=None)
+    complexity_snapshots.add_argument("--version", default=None)
+
     team = sub.add_parser(
         "team-history",
         help="показать adaptation-specific history режиссёров/сценариста",
@@ -130,12 +162,13 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     store = SourceContextStore(args.db)
     pressure = SourceFormatPressureContext(store)
+    complexity = SourceComplexityContext(store)
     try:
         if args.command == "init":
             _dump({"ok": True, "database": str(store.path)})
             return 0
         if args.command == "import":
-            counters = _apply_bundle(store, _load(args.bundle))
+            counters = _apply_bundle(store, complexity, _load(args.bundle))
             _dump({"ok": True, "database": str(store.path), "imported": counters})
             return 0
         if args.command == "snapshot":
@@ -168,6 +201,51 @@ def main(argv: list[str] | None = None) -> int:
                     "cutoff": args.cutoff,
                     "compression_ratio": None,
                     "features": pressure.features_as_of(args.project_id, args.cutoff),
+                }
+            )
+            return 0
+        if args.command == "complexity-methods":
+            _dump(
+                {
+                    "ok": True,
+                    "project_id": args.project_id,
+                    "cutoff": args.cutoff,
+                    "methods": complexity.available_methods_as_of(
+                        args.project_id, args.cutoff
+                    ),
+                }
+            )
+            return 0
+        if args.command == "complexity-features":
+            _dump(
+                {
+                    "ok": True,
+                    "project_id": args.project_id,
+                    "cutoff": args.cutoff,
+                    "method": args.method,
+                    "method_version": args.version,
+                    "research_only": True,
+                    "features": complexity.features_as_of(
+                        args.project_id,
+                        args.cutoff,
+                        method=args.method,
+                        method_version=args.version,
+                    ),
+                }
+            )
+            return 0
+        if args.command == "complexity-snapshots":
+            _dump(
+                {
+                    "ok": True,
+                    "work_id": args.work_id,
+                    "cutoff": args.cutoff,
+                    "snapshots": complexity.snapshots_as_of(
+                        args.work_id,
+                        args.cutoff,
+                        method=args.method,
+                        method_version=args.version,
+                    ),
                 }
             )
             return 0
