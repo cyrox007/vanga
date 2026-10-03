@@ -138,11 +138,7 @@ class InferenceFeatureParityTests(unittest.TestCase):
         )
 
         self.assertEqual(info["Role Switcher"]["nconst"], "nm_same")
-        self.assertAlmostEqual(
-            info["Role Switcher"]["avg_rating"],
-            8.0,
-            places=5,
-        )
+        self.assertAlmostEqual(info["Role Switcher"]["avg_rating"], 8.0, places=5)
         self.assertEqual(info["Role Switcher"]["prior_count"], 1)
         self.assertTrue(info["Role Switcher"]["known"])
 
@@ -154,41 +150,25 @@ class InferenceFeatureParityTests(unittest.TestCase):
         )
 
         self.assertEqual(info["Role Switcher"]["nconst"], "nm_same")
-        self.assertAlmostEqual(
-            info["Role Switcher"]["avg_rating"],
-            4.0,
-            places=5,
-        )
+        self.assertAlmostEqual(info["Role Switcher"]["avg_rating"], 4.0, places=5)
         self.assertEqual(info["Role Switcher"]["prior_count"], 1)
 
     def test_cache_key_keeps_roles_separate(self):
         director = self.engine._get_people_info(
-            ["Role Switcher"],
-            before_year=2024,
-            role="director",
+            ["Role Switcher"], before_year=2024, role="director"
         )
         actor = self.engine._get_people_info(
-            ["Role Switcher"],
-            before_year=2024,
-            role="actor",
+            ["Role Switcher"], before_year=2024, role="actor"
         )
 
         self.assertEqual(director["Role Switcher"]["avg_rating"], 8.0)
         self.assertEqual(actor["Role Switcher"]["avg_rating"], 4.0)
-        self.assertIn(
-            ("director", "role switcher", 2024),
-            self.engine._people_cache,
-        )
-        self.assertIn(
-            ("actor", "role switcher", 2024),
-            self.engine._people_cache,
-        )
+        self.assertIn(("director", "role switcher", 2024), self.engine._people_cache)
+        self.assertIn(("actor", "role switcher", 2024), self.engine._people_cache)
 
     def test_future_credits_do_not_leak_but_resolved_id_is_preserved(self):
         info = self.engine._get_people_info(
-            ["Future Only"],
-            before_year=2024,
-            role="actor",
+            ["Future Only"], before_year=2024, role="actor"
         )
 
         self.assertEqual(info["Future Only"]["nconst"], "nm_future")
@@ -198,17 +178,11 @@ class InferenceFeatureParityTests(unittest.TestCase):
 
     def test_writer_history_uses_only_past_writer_credits(self):
         info = self.engine._get_people_info(
-            ["Writer Person"],
-            before_year=2024,
-            role="writer",
+            ["Writer Person"], before_year=2024, role="writer"
         )
 
         self.assertEqual(info["Writer Person"]["nconst"], "nm_writer")
-        self.assertAlmostEqual(
-            info["Writer Person"]["avg_rating"],
-            8.0,
-            places=5,
-        )
+        self.assertAlmostEqual(info["Writer Person"]["avg_rating"], 8.0, places=5)
         self.assertEqual(info["Writer Person"]["prior_count"], 1)
         self.assertTrue(info["Writer Person"]["known"])
 
@@ -245,12 +219,68 @@ class InferenceFeatureParityTests(unittest.TestCase):
         self.assertEqual(X[0, 6], "nm_same")
         self.assertEqual(X[0, 7], "nm_future")
 
+    def test_schema_v7_emits_genre_recent_and_role_combination_features(self):
+        self.engine.metadata = {
+            "feature_names": [
+                "director_genre_avg_rating",
+                "director_genre_prior_count",
+                "director_genre_known",
+                "director_recent_avg_rating",
+                "director_recent_count",
+                "director_recent_known",
+                "writer_genre_avg_rating",
+                "writer_genre_prior_count",
+                "writer_genre_known",
+                "writer_recent_avg_rating",
+                "writer_recent_count",
+                "writer_recent_known",
+                "director_is_writer",
+                "director_id",
+                "writer_id",
+            ],
+            "categorical_features": ["director_id", "writer_id"],
+        }
+
+        X = self.engine._prepare_features(
+            2024,
+            120,
+            ["Drama"],
+            director="Role Switcher",
+            writer="Writer Person",
+        )
+
+        expected = [8.0, 1.0, 1.0, 8.0, 1.0, 1.0, 8.0, 1.0, 1.0, 8.0, 1.0, 1.0, 0.0]
+        for index, value in enumerate(expected):
+            self.assertAlmostEqual(float(X[0, index]), value, places=5)
+        self.assertEqual(X[0, 13], "nm_same")
+        self.assertEqual(X[0, 14], "nm_writer")
+
+    def test_schema_v7_detects_director_is_writer_from_resolved_id(self):
+        self.engine.metadata = {
+            "feature_names": [
+                "director_is_writer",
+                "director_id",
+                "writer_id",
+            ],
+            "categorical_features": ["director_id", "writer_id"],
+        }
+
+        X = self.engine._prepare_features(
+            2024,
+            120,
+            ["Drama"],
+            director="Role Switcher",
+            writer="Role Switcher",
+        )
+
+        self.assertEqual(float(X[0, 0]), 1.0)
+        self.assertEqual(X[0, 1], "nm_same")
+        self.assertEqual(X[0, 2], "nm_same")
+
     def test_invalid_role_is_rejected(self):
         with self.assertRaises(ValueError):
             self.engine._get_people_info(
-                ["Role Switcher"],
-                before_year=2024,
-                role="producer",
+                ["Role Switcher"], before_year=2024, role="producer"
             )
 
 
