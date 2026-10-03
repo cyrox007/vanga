@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from settings import config
-from src.proxy_ablation_gate import ProxyAblationResultGate
+from src.proxy_ablation_gate import ProxyAblationResultRegistry
 from src.proxy_hypotheses import ProxyHypothesisStore, ProxyHypothesisValidationError
 
 
@@ -20,12 +20,15 @@ def _write(payload: object, output: Path | None) -> None:
     temporary = output.with_suffix(output.suffix + ".tmp")
     temporary.write_text(text, encoding="utf-8")
     temporary.replace(output)
-    print(f"P6 ablation report сохранён: {output}")
+    print(f"P6 ablation result сохранён: {output}")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="P6 gate: проверить/зафиксировать результат preregistered proxy ablation"
+        description=(
+            "P6 persistence: проверить fingerprint отчёта GenericProxyAblationGate "
+            "и сохранить immutable history"
+        )
     )
     parser.add_argument(
         "--db",
@@ -35,16 +38,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    evaluate = subparsers.add_parser("evaluate", help="Проверить JSON результата ablation")
-    evaluate.add_argument("result", type=Path)
-    evaluate.add_argument(
-        "--record",
-        action="store_true",
-        help="Зафиксировать verdict в registry и перевести hypothesis в accepted/rejected",
+    verify = subparsers.add_parser(
+        "verify", help="Проверить result envelope без записи в registry"
     )
-    evaluate.add_argument("--output", type=Path, default=None)
+    verify.add_argument("result", type=Path)
+    verify.add_argument("--output", type=Path, default=None)
 
-    history = subparsers.add_parser("history", help="Показать историю ablation hypothesis")
+    record = subparsers.add_parser(
+        "record", help="Проверить и сохранить immutable generic-gate result"
+    )
+    record.add_argument("result", type=Path)
+    record.add_argument("--output", type=Path, default=None)
+
+    history = subparsers.add_parser("history", help="Показать историю gate runs hypothesis")
     history.add_argument("hypothesis_id")
     history.add_argument("--output", type=Path, default=None)
     return parser
@@ -54,18 +60,22 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         with ProxyHypothesisStore(args.db) as store:
-            gate = ProxyAblationResultGate(store)
-            if args.command == "evaluate":
+            registry = ProxyAblationResultRegistry(store)
+            if args.command in {"verify", "record"}:
                 payload = json.loads(args.result.read_text(encoding="utf-8"))
-                report = gate.evaluate(payload, record=args.record)
+                report = (
+                    registry.prepare(payload)
+                    if args.command == "verify"
+                    else registry.record(payload)
+                )
                 _write(report, args.output)
-                return 0 if report["passed"] else 3
+                return 0
             if args.command == "history":
-                _write(gate.result_history(args.hypothesis_id), args.output)
+                _write(registry.history(args.hypothesis_id), args.output)
                 return 0
             raise ProxyHypothesisValidationError("Неизвестная команда")
     except (OSError, json.JSONDecodeError, ProxyHypothesisValidationError) as exc:
-        print(f"Ошибка P6 ablation gate: {exc}", file=sys.stderr)
+        print(f"Ошибка P6 ablation result registry: {exc}", file=sys.stderr)
         return 2
 
 
