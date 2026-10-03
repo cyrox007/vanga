@@ -144,15 +144,22 @@ class ProxyHypothesisTests(unittest.TestCase):
         hypothesis_id = self._complete_valid_hypothesis()
         ready = self.store.mark_ablation_ready(hypothesis_id)
         plan = self.store.export_ablation_plan(hypothesis_id)
-        serialized = json.dumps(plan, ensure_ascii=False, default=str)
 
         self.assertTrue(ready["ready_for_ablation"])
         self.assertEqual(ready["status"], "ablation_ready")
         self.assertFalse(plan["post_release_features_allowed"])
         self.assertFalse(plan["expert_interpretation_as_feature"])
         self.assertFalse(plan["automatic_catboost_inclusion"])
-        self.assertIn("expert-claim:red-cynic", serialized)
-        self.assertNotIn("expert_interpretation", serialized)
+        evidence = plan["retrospective_signal"]["evidence"]
+        self.assertTrue(
+            any(
+                item["reference_id"].startswith("expert-claim:red-cynic")
+                for item in evidence
+            )
+        )
+        self.assertTrue(
+            all("expert_interpretation" not in item for item in evidence)
+        )
         feature_names = {
             item["feature_name"] for item in plan["candidate_pre_release_features"]
         }
