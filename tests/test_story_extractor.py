@@ -30,11 +30,17 @@ class StoryExtractorTests(unittest.TestCase):
         self.assertTrue(
             any(node.kind == "character" and node.label == "Бориса Иванова" for node in nodes)
         )
+        self.assertFalse(
+            any(
+                node.kind == "character" and node.label.startswith("Поэтому ")
+                for node in nodes
+            )
+        )
         self.assertTrue(any(node.kind == "motivation" for node in nodes))
         self.assertTrue(any(rel.kind == "causes" for rel in relations))
         self.assertTrue(any(rel.kind == "motivates" for rel in relations))
 
-    def test_english_summary_is_deterministic(self):
+    def test_english_summary_is_deterministic_and_transition_is_not_name(self):
         text = (
             "Alice Carter meets Robert Stone in London. "
             "Alice Carter wants to find her missing brother. "
@@ -45,6 +51,12 @@ class StoryExtractorTests(unittest.TestCase):
         second = extractor.extract(text, source_id="en-summary", language="en")
         self.assertEqual(first.as_dict(), second.as_dict())
         self.assertEqual(first.story_map.map_id, second.story_map.map_id)
+        self.assertFalse(
+            any(
+                node.kind == "character" and node.label.startswith("Therefore ")
+                for node in first.story_map.nodes
+            )
+        )
 
     def test_every_node_has_evidence_and_hash_not_raw_excerpt(self):
         text = (
