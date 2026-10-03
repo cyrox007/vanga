@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Переопросить уже cached фильмы, чтобы обнаружить новые Wikidata relations. "
-            "Использует отдельный refresh cursor."
+            "Использует отдельный циклический refresh cursor."
         ),
     )
     return parser
@@ -100,12 +100,16 @@ def main(argv: list[str] | None = None) -> int:
                 refresh_known=args.refresh_known,
             )
             if not candidates:
-                logging.info(
-                    "Production metadata кандидатов нет (режим=%s).",
-                    "refresh" if args.refresh_known else (
-                        "retry" if args.retry_errors else "new"
-                    ),
+                mode = "refresh" if args.refresh_known else (
+                    "retry" if args.retry_errors else "new"
                 )
+                logging.info("Production metadata кандидатов нет (режим=%s).", mode)
+                if args.refresh_known:
+                    cache.reset_state(state_key)
+                    cursor = ""
+                    logging.info(
+                        "Полный refresh-cycle завершён; cursor сброшен для следующего запуска."
+                    )
                 break
 
             ok, failed = enrich_production_batch(candidates, client=client, cache=cache)
