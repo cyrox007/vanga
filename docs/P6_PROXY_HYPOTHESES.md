@@ -4,7 +4,7 @@
 
 Retrospective Analyzer может обнаружить полезную закономерность уже после выхода фильма, но такой результат нельзя напрямую передать в pre-release Vanga.
 
-P6 вводит промежуточный обязательный слой:
+P6 вводит обязательную цепочку:
 
 ```text
 retrospective structural finding
@@ -12,41 +12,15 @@ retrospective structural finding
 proxy hypothesis
         ↓ только заранее доступные candidate features
 preregistered temporal ablation
-        ↓ exact plan/dataset/holdout result gate
-accepted/rejected после проверки на данных
+        ↓
+TemporalProxyAvailabilityAuditor
+        ↓
+GenericProxyAblationGate
+        ↓
+immutable result history
 ```
 
-Registry физически хранится отдельно в `proxy_hypotheses.duckdb` и **не подключается к CatBoost автоматически**.
-
-## Пример
-
-Retrospective наблюдение:
-
-```text
-StoryDiff/экспертный корпус:
-сложный worldbuilding был сильно compressed в экранизации
-```
-
-Недопустимо:
-
-```text
-retro_adapt_worldbuilding_severity
-storydiff_removed_count
-expert_red_cynic_signal
-```
-
-Это пострелизные знания.
-
-Допустимая гипотеза может предложить только заранее известные proxies:
-
-```text
-source_worldbuilding_entity_count
-planned_runtime_minutes
-writer_adaptation_count
-source_complexity_coverage
-```
-
-При этом каждый proxy обязан иметь явный temporal contract.
+Registry живёт отдельно в `proxy_hypotheses.duckdb` и **не подключается к CatBoost автоматически**.
 
 ## Retrospective evidence
 
@@ -58,248 +32,153 @@ source_complexity_coverage
 - `adaptation_analysis`;
 - `production_context_outcome`.
 
-Evidence хранится как:
-
-- kind;
-- `reference_id`;
-- наша краткая observation summary;
-- confidence.
-
-Registry не хранит полный сторонний текст, transcript или `expert_interpretation`.
-
-Retrospective evidence объясняет, **почему гипотеза появилась**, но никогда не является входным feature.
+Evidence хранится как kind, `reference_id`, краткая observation summary и confidence. Полный сторонний текст, transcript и `expert_interpretation` здесь не хранятся и никогда не являются model feature.
 
 ## Pre-release proxy sources
 
-Foundation разрешает четыре source layer.
+Foundation разрешает:
 
-### `imdb_history`
+- `imdb_history` → `history_before_target_year`;
+- `source_context` → `known_at_lte_cutoff`, `published_at_lte_cutoff`, `planned_before_release`;
+- `production_context` → `known_at_lte_cutoff`;
+- `pre_release_public_signal` → `known_at_lte_cutoff`/`published_at_lte_cutoff`.
 
-Только:
-
-```text
-history_before_target_year
-```
-
-То есть историческая работа человека/команды должна иметь год строго меньше target year.
-
-### `source_context`
-
-Допустимы:
-
-- `known_at_lte_cutoff`;
-- `published_at_lte_cutoff`;
-- `planned_before_release`.
-
-### `production_context`
-
-Только:
-
-```text
-known_at_lte_cutoff
-```
-
-Событие может произойти раньше, но prediction имеет право увидеть его только после публичного `known_at`.
-
-### `pre_release_public_signal`
-
-Только датированные публичные сигналы:
-
-- `known_at_lte_cutoff`;
-- `published_at_lte_cutoff`.
-
-Этот source layer не разрешает пострелизные audience/review signals.
+Proxy обязан иметь `available_before_release=true` и явный temporal contract.
 
 ## Forbidden feature guard
 
-Registry отвергает feature names с retrospective namespaces:
+Запрещены retrospective namespaces:
 
 - `retro_adapt_*`;
-- `storydiff_*`;
-- `story_diff_*`;
+- `storydiff_*` / `story_diff_*`;
 - `story_transform_*`;
 - `expert_*`;
 - `post_release_*`.
 
-Также явно запрещены target/post-release values вроде:
-
-- `averageRating` как текущий target;
-- `current_imdb_rating`;
-- `actual_rating`;
-- `future_rating`;
-- `expert_score`;
-- `critic_score`.
-
-Исторические признаки типа `director_avg_rating`, рассчитанные только по прошлым фильмам, остаются допустимыми через `imdb_history/history_before_target_year`.
+Также запрещены current/actual/future rating targets и expert/critic scores. Исторические рейтинговые признаки допустимы только через прошлые работы с `history_before_target_year`.
 
 ## Coverage и missingness
 
-Proxy может указать отдельный `coverage_feature`.
-
-Это важно: отсутствие source complexity или production context не должно превращаться в нейтральное значение и выглядеть как реальное наблюдение.
+Отсутствие source/production данных не является нейтральным качеством. Proxy может иметь отдельный `coverage_feature`; materialization обязана явно различать available и missing rows.
 
 ## Готовность к ablation
 
-Hypothesis не может получить `ablation_ready`, пока отсутствует хотя бы один из трёх элементов:
+Hypothesis получает `ablation_ready` только если есть:
 
 1. retrospective evidence;
-2. pre-release proxy feature;
+2. хотя бы один pre-release proxy;
 3. preregistered ablation spec.
 
-`validation_report()` возвращает причины блокировки:
+Ablation spec заранее фиксирует baseline schema, candidate label, stable temporal holdout, MAE rule, допустимую regression и обязательность dataset fingerprint.
 
-- `retrospective_evidence_missing`;
-- `pre_release_proxy_missing`;
-- `ablation_spec_missing`;
-- `hypothesis_rejected`.
+Экспортированный plan получает SHA-256 fingerprint.
 
-## Preregistered ablation
+## Единственный quality gate
 
-Foundation фиксирует до запуска:
-
-- baseline schema;
-- candidate label;
-- `holdout_policy = stable_temporal_last_two_years`;
-- `primary_metric = mae`;
-- допустимую MAE regression;
-- нужен ли строгий improvement;
-- обязательность dataset fingerprint.
-
-Другой split или training-fit metric registry отвергает.
-
-Экспортированный plan имеет SHA-256 fingerprint. Это не позволяет после просмотра результата незаметно изменить candidate features или acceptance contract и назвать эксперимент тем же самым.
-
-## Ablation Result Gate
-
-`src/proxy_ablation_gate.py` проверяет результат эксперимента **после** выполнения baseline/candidate training, но до изменения статуса гипотезы.
-
-Gate не доверяет одному числу MAE. Result обязан содержать:
-
-- точный `plan_fingerprint_sha256`;
-- `dataset_fingerprint_sha256`;
-- одинаковый dataset fingerprint для baseline и candidate;
-- preregistered holdout policy;
-- годы и размер holdout;
-- точный список `candidate_features` из plan;
-- baseline/candidate MAE;
-- runner ID/version;
-- timezone-aware `executed_at`.
-
-Любой drift plan/dataset/holdout/features останавливает проверку как invalid result, а не как «плохую модель».
-
-### Verdict
-
-Если `require_improvement=true`, candidate обязан иметь строго меньший MAE baseline.
-
-Если MAE-регрессия превышает preregistered `max_mae_regression`, verdict:
+Quality comparison выполняет только:
 
 ```text
-rejected_mae_regression
+src/proxy_ablation.py::GenericProxyAblationGate
 ```
 
-Если regression budget соблюдён, но обязательного improvement нет:
+Перед ним обязателен:
 
 ```text
-rejected_no_improvement
+TemporalProxyAvailabilityAuditor
 ```
 
-Успешный результат:
+Именно этот путь проверяет:
 
-```text
-accepted_ablation
-```
+- materialized facts относительно target cutoff;
+- explicit missingness;
+- plan fingerprint;
+- audit fingerprint;
+- один dataset fingerprint baseline/candidate;
+- одинаковый temporal holdout;
+- чистый feature delta;
+- preregistered MAE rule.
 
-При записи результата hypothesis переводится из `ablation_ready` в `accepted` или `rejected`.
+Подробный протокол описан в `docs/P6_PROXY_ABLATION.md`.
 
-Даже `accepted` **не означает автоматическую публикацию**:
+**Второго независимого MAE gate нет.** Это принципиально: нельзя получить другой verdict, обойдя temporal audit.
 
-```json
-{
-  "automatic_catboost_inclusion": false,
-  "production_publication_allowed": false
-}
-```
+## Immutable result history
 
-Для production всё равно нужен отдельный ML-инкремент с train/inference parity и обычным quality gate Vanga.
+`src/proxy_ablation_gate.py` после cleanup — это только persistence-слой над уже готовым отчётом `GenericProxyAblationGate`.
 
-Каждый записанный результат имеет собственный SHA-256 fingerprint и хранится в `proxy_ablation_results` внутри той же research DB.
+`ProxyAblationResultRegistry`:
+
+- пересчитывает `gate_fingerprint_sha256` и отвергает изменённый отчёт;
+- проверяет binding к текущим hypothesis/plan/audit/dataset fingerprints;
+- сохраняет baseline/candidate MAE, delta, verdict и runner metadata;
+- делает запись идемпотентной;
+- не позволяет один gate report записать под двумя result IDs;
+- **не пересчитывает MAE rule повторно**;
+- **не переводит hypothesis автоматически в accepted/rejected**;
+- не публикует модель.
+
+Один успешный temporal holdout ещё не считается достаточным доказательством для production. Hypothesis остаётся `ablation_ready`, пока отдельная будущая policy не потребует нужный набор повторных окон/external-transfer проверок и явную финализацию.
+
+Результаты хранятся в `proxy_ablation_run_results`.
 
 ## CLI
 
-Инициализация registry:
+Registry гипотез:
 
 ```bash
 python scripts/proxy_hypotheses.py init
-```
-
-Импорт bundle:
-
-```bash
-python scripts/proxy_hypotheses.py import-bundle \
-  hypothesis.json \
-  --mark-ready \
-  --output temp/proxy-import.json
-```
-
-Проверка:
-
-```bash
 python scripts/proxy_hypotheses.py validate worldbuilding-compression
-```
-
-Перевод в `ablation_ready`:
-
-```bash
 python scripts/proxy_hypotheses.py mark-ready worldbuilding-compression
-```
-
-Экспорт preregistered plan:
-
-```bash
 python scripts/proxy_hypotheses.py export-plan \
   worldbuilding-compression \
   --output temp/worldbuilding-compression-ablation.json
 ```
 
-Проверить полученный ablation result без изменения registry:
+Temporal audit и единственный generic gate:
 
 ```bash
-python scripts/proxy_ablation_gate.py evaluate \
-  temp/worldbuilding-compression-result.json \
-  --output temp/worldbuilding-compression-verdict.json
+python scripts/proxy_ablation.py audit \
+  temp/worldbuilding-compression-ablation.json \
+  temp/materialization.json \
+  --output temp/audit.json
+
+python scripts/proxy_ablation.py gate \
+  temp/worldbuilding-compression-ablation.json \
+  temp/audit.json \
+  temp/baseline-result.json \
+  temp/candidate-result.json \
+  --output temp/gate.json
 ```
 
-После проверки зафиксировать verdict:
+Проверить result envelope перед записью:
 
 ```bash
-python scripts/proxy_ablation_gate.py evaluate \
-  temp/worldbuilding-compression-result.json \
-  --record \
-  --output temp/worldbuilding-compression-verdict.json
+python scripts/proxy_ablation_gate.py verify temp/result-envelope.json
 ```
 
-История результатов:
+Записать immutable history:
+
+```bash
+python scripts/proxy_ablation_gate.py record \
+  temp/result-envelope.json \
+  --output temp/recorded-result.json
+```
+
+История:
 
 ```bash
 python scripts/proxy_ablation_gate.py history worldbuilding-compression
 ```
 
-Exit codes CLI:
+## Что P6 намеренно не делает
 
-- `0` — gate passed;
-- `2` — invalid input/contract;
-- `3` — корректный эксперимент, но quality verdict fail.
+Он не:
 
-## Что registry/gate намеренно не делают
+- считает retrospective correlation причинностью;
+- делает мнение эксперта model feature;
+- автоматически публикует accepted candidate;
+- позволяет менять plan после просмотра результата;
+- принимает отсутствие данных за ноль;
+- создаёт второй training pipeline.
 
-Они не:
-
-- включают feature в production model;
-- считают retrospective correlation доказательством причинности;
-- решают автоматически, что мнение эксперта верно;
-- используют expert interpretation как число;
-- материализуют произвольные feature из post-release данных;
-- публикуют CatBoost candidate;
-- принимают hypothesis после одного retrospective кейса.
-
-Следующий P6-инкремент — **temporal availability auditor + controlled ablation runner**. Он должен материализовать только уже реализованные pre-release feature providers строго as-of target cutoff и запускать baseline/candidate на одном dataset fingerprint/holdout; result затем обязан пройти описанный выше gate.
+Следующий P6-инкремент — **source-specific materializers/adapters** для уже существующих pre-release хранилищ: Source Context, Production Context и IMDb historical features. Они должны автоматически выдавать materialization protocol для обязательного `TemporalProxyAvailabilityAuditor`, не меняя audit/gate contract.
