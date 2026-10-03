@@ -65,9 +65,9 @@ def _train_variant(
     os.environ["VANGA_TRAIN_DIRECTOR_WRITER_PAIR_FEATURES"] = "1"
     os.environ["VANGA_TRAIN_DIRECTOR_ACTOR_PAIR_FEATURES"] = "1"
     os.environ["VANGA_TRAIN_CREATIVE_TREND_FEATURES"] = "1"
-    os.environ["VANGA_TRAIN_DIRECTOR_TEAM_FEATURES"] = (
-        "1" if director_team_enabled else "0"
-    )
+    os.environ["VANGA_TRAIN_DIRECTOR_TEAM_FEATURES"] = "1" if director_team_enabled else "0"
+    # v12 должен быть выключен, иначе исторический v10→v11 эксперимент загрязняется.
+    os.environ["VANGA_TRAIN_FULL_CAST_FEATURES"] = "0"
 
     logger.info("=" * 60)
     logger.info(
@@ -75,7 +75,6 @@ def _train_variant(
         label,
         "on" if director_team_enabled else "off",
     )
-
     model, metadata = train_catboost_model(
         genres,
         batch_size=batch_size,
@@ -83,7 +82,6 @@ def _train_variant(
         iterations=iterations,
     )
     _assert_database_unchanged(db_path, db_signature)
-
     try:
         size_bytes = _serialize_size(model, artifact_root, label)
         result = _result_from_metadata(
@@ -98,15 +96,7 @@ def _train_variant(
         result["director_actor_pair_features_version"] = 1
         result["creative_trend_features_version"] = 1
         result["director_team_features_version"] = 1 if director_team_enabled else 0
-        logger.info(
-            "ABLATION %s: MAE=%.6f RMSE=%.6f R²=%.6f features=%s size=%.2f МБ",
-            label,
-            result["test_mae"],
-            result["test_rmse"],
-            result["test_r2"],
-            result["feature_count"],
-            size_bytes / 1024 / 1024,
-        )
+        result["full_cast_features_version"] = 0
         return result
     finally:
         del model
@@ -126,7 +116,6 @@ def main(argv: list[str] | None = None) -> int:
     db_path = Path(config.IMDB_DB_PATH)
     if not db_path.is_file():
         raise SystemExit(f"IMDb БД не найдена: {db_path}")
-
     signature = database_signature(db_path)
     genres = get_all_genres()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -144,7 +133,6 @@ def main(argv: list[str] | None = None) -> int:
         db_signature=signature,
     )
     _assert_database_unchanged(db_path, signature)
-
     candidate = _train_variant(
         label="candidate-v11",
         director_team_enabled=True,
@@ -157,7 +145,6 @@ def main(argv: list[str] | None = None) -> int:
         db_signature=signature,
     )
     _assert_database_unchanged(db_path, signature)
-
     comparison = compare_results(
         baseline,
         candidate,
@@ -174,31 +161,13 @@ def main(argv: list[str] | None = None) -> int:
         "comparison": comparison,
         "published": False,
     }
-
-    output = args.output
-    if output is None:
-        output = (
-            Path(config.ABSPATH)
-            / "temp"
-            / "ablation-reports"
-            / f"director-team-{stamp}.json"
-        )
+    output = args.output or (
+        Path(config.ABSPATH) / "temp" / "ablation-reports" / f"director-team-{stamp}.json"
+    )
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-    logger.info("=" * 60)
-    logger.info("DIRECTOR TEAM ABLATION ЗАВЕРШЁН")
-    logger.info("Baseline v10 MAE: %.6f", baseline["test_mae"])
-    logger.info("Candidate v11 MAE: %.6f", candidate["test_mae"])
-    logger.info("Δ MAE: %+.6f", comparison["delta_mae"])
-    logger.info(
-        "Non-regression: %s",
-        "ПРОЙДЕН" if comparison["non_regression_passed"] else "НЕ ПРОЙДЕН",
-    )
-    logger.info("Отчёт: %s", output)
-    logger.info("Активная модель НЕ ИЗМЕНЕНА")
-    logger.info("=" * 60)
+    logger.info("DIRECTOR TEAM ABLATION ЗАВЕРШЁН; активная модель НЕ ИЗМЕНЕНА")
     return 0 if comparison["non_regression_passed"] else 2
 
 
