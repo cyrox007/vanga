@@ -19,6 +19,8 @@
 6. **Ограничения VPS обязательны.** Не возвращать тяжёлые ансамбли и двойную загрузку CatBoost; inference должен переживать неудачный retrain.
 7. **Сторонние обзоры не копируются целиком без подходящей лицензии/разрешения.** По умолчанию сохраняются ссылка, автор, таймкод/раздел и наша структурированная аннотация.
 8. **Экспертные профили не смешиваются в единую вкусовую шкалу.** Согласие и расхождение экспертов анализируются как отдельные сигналы, а не усредняются в «правильную оценку».
+9. **Студия, консультант, франшиза или культурное движение не являются автоматическим плюсом/минусом.** В модель допускаются только измеримые производственные факты и их temporal-валидированные proxy.
+10. **Несколько режиссёров — нормальный случай, а не исключение.** Нельзя без отдельного признака сводить полноценную режиссёрскую команду к одному человеку.
 
 ## Уже реализовано
 
@@ -52,13 +54,13 @@
 - [ ] Обновить серверную Vanga до текущего `main` безопасным updater.
 - [ ] Пересобрать IMDb DuckDB с `title.crew/title_writers`.
 - [ ] Выполнить smoke retrain.
-- [ ] Выполнить полный retrain schema с writer features.
+- [ ] Выполнить полный retrain актуальной schema.
 - [ ] Проверить quality gate и фактическую publication generation.
 - [ ] Проверить `/health`, `/model-info`, `/search/movies`, `/search/people`, `/predict`, `/catalog/ratings`.
 - [ ] Обновить `jsint-site` до актуального `dev`.
 - [ ] Применить миграции Vanga snapshots/actual ratings.
 - [ ] Проверить Celery worker/beat и автоматическую сверку ratings.
-- [ ] Выполнить production smoke русского fuzzy поиска, writer input, uncertainty, snapshot, share, what-if и methodology.
+- [ ] Выполнить production smoke русского fuzzy поиска, multi-director input, writer input, uncertainty, snapshot, share, what-if и methodology.
 
 ## P1. Data coverage и честная уверенность
 
@@ -79,24 +81,46 @@
 
 ## P2. Creative Team Model
 
-Цель — моделировать не «известные фамилии», а роли, контекст и совместимость творческой команды. Нумерация ML schema независима от номера roadmap-фазы: P1 дал schema v6, контекст роли/жанра — v7, director↔writer pair — v8, director↔actor pair — v9, recent trend — candidate v10.
+Цель — моделировать не «известные фамилии», а роли, контекст и совместимость творческой команды. Нумерация ML schema независима от номера roadmap-фазы: P1 дал schema v6, контекст роли/жанра — v7, director↔writer pair — v8, director↔actor pair — v9, recent trend — v10, multi-director context — candidate v11.
 
 - [~] `director_genre_avg_rating` и `writer_genre_avg_rating` — реализованы в schema v7, требуется полный ablation.
 - [~] `director_genre_prior_count` и `writer_genre_prior_count` — явное состояние отсутствия жанровой истории.
 - [~] `director_recent_avg_rating` и `writer_recent_avg_rating` по последним 5 прошлым работам — реализованы в schema v7, требуется полный ablation.
-- [~] `director_recent_trend`, `writer_recent_trend` и `*_trend_known` — реализованы в candidate v10 как разница среднего последних 3 и предыдущих 3 прошлых работ; нужен temporal v9→v10 ablation.
+- [~] `director_recent_trend`, `writer_recent_trend` и `*_trend_known` — реализованы в schema v10 как разница среднего последних 3 и предыдущих 3 прошлых работ; нужен temporal v9→v10 ablation.
 - [~] `director_is_writer` — реализован в schema v7, требуется полный ablation.
 - [ ] История человека отдельно как director, writer и director+writer.
 - [~] `director_writer_pair_avg_rating`, `director_writer_pair_count`, `director_writer_pair_known` — реализованы в schema v8; нужен полный temporal v7→v8 ablation перед публикацией.
 - [~] `director_actor_N_pair_avg_rating`, `director_actor_N_pair_count`, `director_actor_N_pair_known` для первых трёх актёров — реализованы в schema v9; нужен полный temporal v8→v9 ablation.
+- [~] API `directors: [...]` + backward-compatible `director` — реализуется в candidate v11.
+- [~] `director_team_size`, `director_team_known_ratio`, `director_team_avg_rating`, `director_team_prior_count_mean` — candidate v11.
+- [~] `director_team_prior_collaboration_count`, `director_team_prior_collaboration_avg_rating`, `director_team_collaboration_known` — candidate v11; учитывается весь набор режиссёров, а не только первый credit.
+- [R] Исследовать team-wide director↔writer и director↔actor aggregation после v11, не смешивая с primary-director baseline.
 - [ ] Число предыдущих совместных работ ключевой команды как отдельный агрегат.
 - [R] Ensemble/team cohesion признаки без утечки из будущего.
 - [R] Проверить, какие pair/cohesion features реально улучшают temporal MAE.
 - [~] Для первого P2-блока добавлен отдельный ablation `baseline v6 → candidate v7`, более поздние P2-блоки исключены.
 - [~] Для director↔writer pair добавлен отдельный ablation `baseline v7 → candidate v8`, последующие блоки принудительно исключены.
 - [~] Для director↔actor pair добавлен отдельный ablation `baseline v8 → candidate v9`, trend принудительно исключён.
-- [~] Для recent trend добавлен отдельный ablation `baseline v9 → candidate v10`, который не публикует модель.
+- [~] Для recent trend добавлен отдельный ablation `baseline v9 → candidate v10`.
+- [~] Для multi-director context добавлен отдельный ablation `baseline v10 → candidate v11`.
 - [ ] Для каждого следующего блока проводить отдельный ablation и не публиковать ухудшающие признаки.
+
+## P2.5. Production Context
+
+Цель — учесть производство фильма как систему: студию, продюсеров, франшизу, shared universe, изменения команды и внешнее творческое влияние. Полный контракт описан в `docs/PRODUCTION_CONTEXT.md`.
+
+- [ ] Нормализовать `production_company` / `production_label` с provenance.
+- [ ] Нормализовать producer IDs / creative lead там, где источник воспроизводим.
+- [ ] Ввести `franchise_id`, installment index и `shared_universe_id`.
+- [R] Проверить исторические studio/producer/franchise aggregates строго по более ранним релизам.
+- [R] Исследовать `continuity_load` / cross-project dependency как proxy сложности shared-universe производства.
+- [ ] Создать timestamped registry production changes: смена режиссёра, сценариста, creative lead, release date, format.
+- [R] Исследовать pre-release `rewrite_count`, `director_change_count`, `writer_change_count`, `release_delay_count`.
+- [R] Исследовать публично подтверждённые reshoot/additional-photography и major recut только если событие было известно до даты прогноза.
+- [ ] Ввести общий registry внешних story/script/character/worldbuilding/authenticity/sensitivity consultants.
+- [R] Проверять влияние consultancy scope статистически; название конкретной компании не считать причинным признаком само по себе.
+- [ ] Любое утверждение эксперта о «веянии», корпоративном или культурном влиянии хранить как `expert_interpretation`; в pre-release модель переносить только измеримый proxy.
+- [ ] Не использовать политическую позицию, культурную идентичность, расу, этничность и иные чувствительные характеристики людей как признаки качества фильма.
 
 ## P3. Первоисточник и адаптация как pre-release признаки
 
@@ -141,7 +165,8 @@
 
 - [ ] Сформировать список публичных разборов, где есть явное сравнение с первоисточником.
 - [ ] Размечать потерю контекста, причинных связей, мотиваций, персонажей, worldbuilding, тем, финала, merge/compression/rewrite.
-- [ ] Проверять, какие выводы подтверждаются автоматическим StoryMap/StoryDiff.
+- [ ] Размечать производственные вмешательства/переписывания/смены creative direction только как утверждения эксперта с evidence и provenance.
+- [ ] Проверять, какие выводы подтверждаются автоматическим StoryMap/StoryDiff и production-context facts.
 
 ### Профиль: BadComedian
 
@@ -208,7 +233,7 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 Официальные IMDb datasets могут плохо покрывать далёкие будущие проекты. Нужен отдельный discovery/enrichment слой.
 
 - [ ] Каталог будущих релизов с source provenance и датой последнего обновления.
-- [ ] Нормализовать фильм, режиссёра, сценариста, актёров, source material, franchise и release date.
+- [ ] Нормализовать фильм, режиссёров, сценаристов, актёров, source material, franchise, production label и release date.
 - [ ] Не делать inference зависимым от сетевого API: найденные данные кешировать локально.
 - [ ] При конфликте источников хранить provenance/confidence, а не молча выбирать значение.
 
@@ -218,7 +243,8 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 - [x] Snapshots, share URLs, browser history, what-if compare.
 - [x] «Vanga против реальности» и methodology.
 - [x] Показ `data_coverage` и причин низкой обеспеченности данными.
-- [ ] Понятный grouped SHAP: сценарий/режиссура/актёры/жанр/командная совместимость/нехватка данных.
+- [ ] UI для нескольких режиссёров с autocomplete/chips и сохранением порядка.
+- [ ] Понятный grouped SHAP: сценарий/режиссура/режиссёрская команда/актёры/жанр/командная совместимость/production context/нехватка данных.
 - [ ] Страница накопленной точности: число сверенных snapshots, MAE по поколениям/периодам/coverage bins.
 - [ ] Каталог будущих релизов и последние прогнозы.
 - [ ] Share/OG-картинка для конкретного snapshot.
@@ -228,12 +254,13 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 
 1. **Production rollout текущего Vanga + jsint-site и retrain с актуальной схемой.**
 2. **Завершить серверную валидацию P1 schema v6.**
-3. **Creative Team: полный v6→v7→v8→v9→v10 ablation; затем director+writer/team-cohesion только отдельными инкрементами.**
-4. **Text → StoryMap extractor для RU/EN summaries.**
-5. **Пилот Expert Analysis Corpus: Красный Циник + BadComedian + blind validation.**
-6. **Source/adaptation pre-release features, выведенные из ретроспективных закономерностей.**
-7. **Накопление временной истории IMDb ratings.**
-8. **Future-release discovery и дальнейший публичный UX.**
+3. **Creative Team: полный v6→v7→v8→v9→v10→v11 ablation; затем director+writer/team-cohesion только отдельными инкрементами.**
+4. **Production Context: studio/producer/franchise registry и timestamped production-change facts.**
+5. **Text → StoryMap extractor для RU/EN summaries.**
+6. **Пилот Expert Analysis Corpus: Красный Циник + BadComedian + blind validation.**
+7. **Source/adaptation pre-release features, выведенные из ретроспективных закономерностей.**
+8. **Накопление временной истории IMDb ratings.**
+9. **Future-release discovery и дальнейший публичный UX.**
 
 ## Критерии готовности любого ML-инкремента
 
@@ -255,6 +282,7 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 - `README.md` — текущее состояние Vanga и эксплуатация.
 - `docs/ADAPTATION_ANALYZER.md` — архитектура ретроспективного анализа адаптаций.
 - `docs/DATA_COVERAGE.md` и `docs/P1_STATUS.md` — контракт и статус P1.
-- `docs/P2_STATUS.md` — Creative Team schema v7/v8/v9/v10 и безопасные поэтапные ablation.
+- `docs/P2_STATUS.md` — Creative Team schema v7-v11 и безопасные поэтапные ablation.
+- `docs/PRODUCTION_CONTEXT.md` — multi-director, studio/franchise/producer context и внешний creative influence.
 - `docs/EXPERT_ANALYSIS_CORPUS.md` — многопрофильный экспертный корпус, blind validation и переносимые методы анализа.
 - Этот `docs/ROADMAP.md` — источник истины по согласованным планам дальнейшего развития.
