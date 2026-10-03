@@ -2,13 +2,14 @@
 
 ## Статус реализации
 
-Фундамент registry реализован отдельно от IMDb и CatBoost:
+Фундамент Production Context реализован отдельно от IMDb и CatBoost:
 
-- `src/production_context.py` — schema/validation/temporal snapshots;
-- `scripts/production_context.py` — init/import/snapshot/timeline CLI;
+- `src/production_context.py` — factual registry, validation и temporal snapshots;
+- `src/production_identity.py` — canonical identity/aliases и historical `as-of` aggregates;
+- `scripts/production_context.py` — init/import/snapshot/history/timeline/resolve CLI;
 - отдельная `production_context.duckdb` через `VANGA_PRODUCTION_CONTEXT_DB`;
-- каждый факт требует provenance и `known_at`;
-- ML-интеграции пока **нет**: registry сначала наполняется и проверяется, а candidate-признаки допускаются в модель только отдельным temporal ablation.
+- каждый факт, alias и project-group link имеет provenance и `known_at`;
+- ML-интеграции пока **нет**: сначала собирается воспроизводимый factual dataset, затем каждый candidate proxy проверяется отдельным temporal ablation.
 
 ## Зачем нужен отдельный слой
 
@@ -24,9 +25,9 @@
 - `known_at` — когда информация стала доступна наблюдателю/публичному источнику;
 - `source_id` — источник с URL, publisher, датой публикации/получения и confidence.
 
-Pre-release snapshot использует **только `known_at <= cutoff`**. Например, смена режиссёра могла произойти в январе, но если о ней достоверно сообщили только после релиза, январский прогноз не имеет права использовать этот факт.
+Pre-release snapshot использует **только `known_at <= cutoff`**. Событие могло произойти в январе, но если о нём достоверно сообщили только после релиза, более ранний прогноз не имеет права его использовать.
 
-`features_as_of(project_id, cutoff)` и `timeline_as_of(project_id, cutoff)` реализуют именно этот контракт.
+Для historical aggregates действует дополнительное правило: проект должен быть **уже выпущен к cutoff**. Будущий фильм той же студии/франшизы не считается историческим опытом, даже если его production identity уже публично известна.
 
 ## Registry
 
@@ -36,25 +37,58 @@ Pre-release snapshot использует **только `known_at <= cutoff`**.
 
 - внутренний `project_id` и необязательный IMDb ID;
 - название и release date;
-- `franchise_id`;
-- `shared_universe_id`;
-- `installment_index`;
-- `identity_known_at` — когда эти identity-факты были известны.
+- legacy `franchise_id` / `shared_universe_id` / `installment_index` для обратной совместимости;
+- `identity_known_at`;
+- время обновления записи.
 
-### Сущности и роли
+Canonical franchise/shared-universe identity теперь дополнительно хранится через `production_groups` + `project_group_links`, где есть отдельный `source_id` и `known_at`.
 
-`production_entities` — нейтральный справочник:
+### Production entities
+
+`production_entities` — нейтральный canonical-справочник:
 
 - studio;
-- production company / production label;
+- production company;
+- production label;
 - producer;
 - creative lead;
 - consultancy;
 - other.
 
-`project_entity_links` связывает сущность с фильмом, ролью, стадией производства, `known_at` и provenance.
+`project_entity_links` связывает canonical entity с фильмом, ролью, стадией производства, `known_at` и provenance.
 
 Название компании или человека само по себе не является положительным/отрицательным признаком.
+
+### Canonical aliases
+
+`production_entity_aliases` и `production_group_aliases` решают проблему разных написаний одной и той же сущности.
+
+Контракт намеренно строгий:
+
+- alias добавляется **явно**;
+- alias требует `source_id` и `known_at`;
+- техническая нормализация делает Unicode NFKC/casefold и убирает пунктуационные различия;
+- fuzzy matching не выполняется;
+- похожие названия автоматически не склеиваются;
+- неоднозначный alias возвращает ошибку и требует уточнить kind/canonical ID.
+
+То есть `Marvel Studios`, `Marvel Studios, LLC` и другой вариант могут указывать на один canonical ID только после явной регистрации alias. Система не должна сама решать, что две похожие строки — одна компания.
+
+### Franchise/shared universe groups
+
+`production_groups` хранит canonical группы двух типов:
+
+- `franchise`;
+- `shared_universe`.
+
+`project_group_links` связывает фильм с группой и хранит:
+
+- `known_at`;
+- `source_id`;
+- необязательный `installment_index`;
+- note.
+
+Legacy поля в `production_projects` остаются fallback для старых bundle, но новое наполнение должно использовать canonical group links.
 
 ### Production events
 
@@ -84,11 +118,11 @@ Pre-release snapshot использует **только `known_at <= cutoff`**.
 - `known_at`;
 - source/provenance.
 
-Таким образом условная внешняя narrative/sensitivity компания фиксируется как обычная consultancy entity и набор scope, а не как заранее отрицательный коэффициент.
+Таким образом внешняя narrative/sensitivity consultancy фиксируется как обычная entity и набор scope, а не как заранее отрицательный коэффициент.
 
 ## Neutral snapshot features
 
-Registry уже умеет строить нейтральный pre-release snapshot, например:
+`features_as_of(project_id, cutoff)` строит factual snapshot из известных на дату фактов:
 
 - `production_franchise_known`;
 - `production_shared_universe_known`;
@@ -96,21 +130,48 @@ Registry уже умеет строить нейтральный pre-release sna
 - `production_studio_count`;
 - `production_producer_count`;
 - `production_creative_lead_count`;
-- `production_change_count`;
-- `production_director_change_count`;
-- `production_writer_change_count`;
-- `production_rewrite_count`;
-- `production_reshoot_count`;
-- `production_recut_count`;
-- `production_consultancy_count`;
-- `production_consultancy_story_count`;
-- `production_consultancy_script_count`;
-- `production_consultancy_character_count`;
-- `production_consultancy_worldbuilding_count`;
-- `production_consultancy_authenticity_count`;
-- `production_consultancy_sensitivity_count`.
+- `production_change_count` и event-type counts;
+- `production_consultancy_count` и scope counts.
 
-Это **candidate proxy set**, а не доказанные факторы качества. Наличие feature в snapshot не означает, что он будет включён в CatBoost.
+Это **candidate proxy set**, а не доказанные факторы качества.
+
+## Historical identity features
+
+`ProductionIdentityHistory.history_features_as_of(project_id, cutoff)` добавляет нейтральную историю production identity только по ранее выпущенным и уже известным проектам.
+
+### Franchise / shared universe
+
+- `production_franchise_prior_project_count`;
+- `production_shared_universe_prior_project_count`.
+
+Это пока чистый объём ранее выпущенного контекста. `shared_universe_prior_project_count` можно исследовать как один из proxy continuity load, но нельзя заранее объявлять его отрицательным или положительным.
+
+### Studio / producer / creative lead history
+
+Для `studio`, `production_company`, `production_label`, `producer`, `creative_lead` считаются:
+
+- `production_<role>_history_known_ratio`;
+- `production_<role>_prior_project_count_mean`;
+- `production_<role>_prior_project_count_max`.
+
+Нулевая история остаётся нулём и влияет на coverage. Никакого фиктивного среднего рейтинга нет.
+
+### Повторное пересечение production-команды
+
+- `production_entity_history_known_ratio`;
+- `production_prior_shared_entity_project_count` — сколько прошлых проектов разделяют хотя бы одну текущую canonical entity;
+- `production_key_team_repeat_project_count` — сколько прошлых проектов разделяют минимум две текущие production entities;
+- `production_prior_shared_entity_max` — максимальное число текущих production entities, встретившихся вместе на одном прошлом проекте.
+
+Это прозрачные raw-history признаки. Единый `production cohesion score` пока не вводится.
+
+## Почему пока нет studio/producer rating
+
+На этом этапе намеренно не вычисляется «средний рейтинг Marvel/студии/продюсера».
+
+Чтобы такой признак был честным, нужен отдельный temporal outcome contract: какой rating был доступен на конкретную дату или какая целевая long-term rating используется одинаково для всех исторических проектов. Текущая IMDb выгрузка содержит актуальное состояние рейтинга, а не историческую кривую.
+
+Поэтому сначала используются только counts/coverage/repeat-history. Rating-based production reputation допускается после появления P7 rating history или отдельного доказанного temporal-протокола.
 
 ## CLI
 
@@ -126,9 +187,11 @@ python scripts/production_context.py init
 python scripts/production_context.py import data/production-context/example.json
 ```
 
-Bundle применяется в безопасном порядке: `sources → projects → entities → links → events → consultancies`.
+Новый порядок bundle:
 
-Минимальный пример:
+`sources → groups → projects → entities → entity_aliases → group_aliases → group_links → links → events → consultancies`.
+
+Пример canonical identity:
 
 ```json
 {
@@ -140,54 +203,87 @@ Bundle применяется в безопасном порядке: `sources �
       "confidence": 0.9
     }
   ],
+  "groups": [
+    {
+      "group_id": "mcu",
+      "kind": "shared_universe",
+      "name": "Marvel Cinematic Universe"
+    }
+  ],
   "projects": [
     {
       "project_id": "tt1234567",
       "imdb_id": "tt1234567",
       "title": "Example Film",
-      "franchise_id": "example-franchise",
-      "shared_universe_id": "example-universe",
-      "installment_index": 3,
+      "release_at": "2026-07-01T00:00:00Z",
       "identity_known_at": "2025-06-01T00:00:00Z"
     }
   ],
   "entities": [
     {
-      "entity_id": "consultancy-example",
-      "kind": "consultancy",
-      "name": "Example Narrative Consultancy"
+      "entity_id": "marvel-studios",
+      "kind": "studio",
+      "name": "Marvel Studios",
+      "external_id": "wikidata:Q434841"
     }
   ],
-  "events": [
+  "entity_aliases": [
     {
-      "event_id": "rewrite-1",
+      "entity_id": "marvel-studios",
+      "alias": "Marvel Studios, LLC",
+      "known_at": "2025-06-01T00:00:00Z",
+      "source_id": "src-1"
+    }
+  ],
+  "group_aliases": [
+    {
+      "group_id": "mcu",
+      "alias": "MCU",
+      "known_at": "2025-06-01T00:00:00Z",
+      "source_id": "src-1"
+    }
+  ],
+  "group_links": [
+    {
+      "link_id": "tt1234567:mcu",
       "project_id": "tt1234567",
-      "event_type": "rewrite",
-      "event_at": "2025-12-01T00:00:00Z",
-      "known_at": "2026-01-10T12:00:00Z",
-      "stage": "writing",
+      "group_id": "mcu",
+      "known_at": "2025-06-01T00:00:00Z",
       "source_id": "src-1",
-      "details": {"summary": "Публично подтверждённое переписывание"}
+      "installment_index": 3
     }
   ],
-  "consultancies": [
+  "links": [
     {
-      "engagement_id": "engagement-1",
+      "link_id": "tt1234567:marvel-studios",
       "project_id": "tt1234567",
-      "entity_id": "consultancy-example",
-      "scope": "story",
-      "stage": "writing",
-      "known_at": "2026-01-10T12:00:00Z",
+      "entity_id": "marvel-studios",
+      "role": "studio",
+      "stage": "production",
+      "known_at": "2025-06-01T00:00:00Z",
       "source_id": "src-1"
     }
   ]
 }
 ```
 
-Snapshot на конкретную дату:
+Combined factual + historical snapshot:
 
 ```bash
 python scripts/production_context.py snapshot tt1234567 2026-01-15T00:00:00Z
+```
+
+Только historical aggregates:
+
+```bash
+python scripts/production_context.py history tt1234567 2026-01-15T00:00:00Z
+```
+
+Canonical resolution:
+
+```bash
+python scripts/production_context.py resolve-entity "Marvel Studios, LLC" --kind studio --cutoff 2026-01-15T00:00:00Z
+python scripts/production_context.py resolve-group MCU --kind shared_universe --cutoff 2026-01-15T00:00:00Z
 ```
 
 Доказательная timeline:
@@ -204,17 +300,9 @@ Schema v15 дополнительно считает team-wide director↔writer
 
 ## Студийная и франшизная модель производства
 
-Для крупных франшиз и shared-universe проектов индивидуальный режиссёр может иметь меньше фактической автономии, чем в независимом кино. Это не означает автоматического ухудшения качества. Vanga должна проверять отдельные измеримые признаки:
+Для крупных франшиз и shared-universe проектов индивидуальный режиссёр может иметь меньше фактической автономии, чем в независимом кино. Это не означает автоматического ухудшения качества. Vanga проверяет только измеримые признаки: canonical production identity, объём прошлых проектов, повторное пересечение команды, изменения производства и внешние consultancies.
 
-- `production_label` / студия / production company;
-- `franchise_id` и номер фильма внутри франшизы;
-- `shared_universe_id`;
-- producer IDs / creative lead, если источник воспроизводим;
-- исторический результат продюсера/студии только по более ранним работам;
-- число одновременно связанных проектов франшизы как исследовательский proxy сложности координации;
-- зависимость от continuity предыдущих фильмов/сериалов как отдельный исследовательский признак.
-
-Marvel и другие крупные shared-universe студии должны быть обычными значениями этого общего контракта, а не специальным штрафом или исключением.
+Marvel и другие крупные shared-universe студии должны быть обычными значениями общего контракта, а не специальным штрафом или исключением.
 
 ## «Тенденции», движения и культурные веяния
 
@@ -222,7 +310,7 @@ Vanga не должна кодировать политическую или к�
 
 Вместо этого допустимо измерять конкретные производственные последствия, если они наблюдаемы и датированы:
 
-- число внешних creative mandates/consultancies, когда оно документировано;
+- число внешних creative consultancies, когда оно документировано;
 - количество крупных переписываний;
 - конфликтующие публичные creative directions;
 - смены команды;
@@ -251,9 +339,10 @@ Vanga не должна кодировать политическую или к�
 ## Порядок реализации
 
 1. [x] Multi-director foundation и Creative Team schema v11-v15.
-2. [~] Factual Production Context registry: projects/entities/provenance/events/consultancies + as-of snapshots.
-3. [ ] Нормализованный producer/studio/franchise history и строго исторические агрегаты.
+2. [x] Factual Production Context registry: projects/entities/provenance/events/consultancies + as-of snapshots.
+3. [~] Canonical studio/producer/franchise/shared-universe identity + aliases + neutral historical counts реализованы; требуется реальное наполнение и проверка покрытия.
 4. [~] Timestamped production-change registry — schema/store готовы, требуется наполнение воспроизводимыми данными.
 5. [~] External creative consultancy registry — schema/store готовы, требуется наполнение воспроизводимыми данными.
-6. [R] Исследование production-pressure proxies на temporal holdout.
-7. [ ] Только после отдельных ablation — решение, какие признаки остаются в production model.
+6. [R] Исследование production-pressure / continuity proxies на temporal holdout.
+7. [R] Rating-based studio/producer reputation — только после temporal outcome history.
+8. [ ] Только после отдельных ablation — решение, какие Production Context признаки остаются в production model.
