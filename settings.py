@@ -13,6 +13,13 @@ class Config:
         "VANGA_ENRICHMENT_DB",
         str(Path(ABSPATH) / "enrichment.duckdb"),
     )
+    # Ретроспективный анализ адаптаций физически отделён от inference/training.
+    # В этой БД могут храниться признаки, извлечённые уже после премьеры, поэтому
+    # их нельзя случайно подмешивать в pre-release модель Vanga.
+    ADAPTATION_DB_PATH = os.getenv(
+        "VANGA_ADAPTATION_DB",
+        str(Path(ABSPATH) / "adaptation.duckdb"),
+    )
     TRAIN_MIN_FREE_DISK_GB = max(
         1.0,
         float(os.getenv("VANGA_TRAIN_MIN_FREE_DISK_GB", "3")),

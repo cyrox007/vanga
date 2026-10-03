@@ -1,0 +1,78 @@
+{
+  "case_id": "tt1234567:default",
+  "imdb_id": "tt1234567",
+  "film_title": "Demo Adaptation",
+  "film_year": 2024,
+  "source_work_id": "Q100",
+  "source_title": "Demo Novel",
+  "source_type": "novel",
+  "adaptation_format": "film",
+  "sources": [
+    {
+      "source_id": "film-ru",
+      "kind": "film_summary",
+      "language": "ru",
+      "title": "Пересказ фильма",
+      "text": "Краткий пересказ фильма.",
+      "copyright_mode": "summary"
+    },
+    {
+      "source_id": "source-en",
+      "kind": "source_summary",
+      "language": "en",
+      "title": "Source summary",
+      "text": "A short summary of the source work.",
+      "copyright_mode": "summary"
+    },
+    {
+      "source_id": "critic-reference",
+      "kind": "expert_review",
+      "language": "ru",
+      "title": "Экспертный разбор",
+      "creator": "Автор обзора",
+      "url": "https://example.test/review",
+      "locator": "12:30-13:10",
+      "copyright_mode": "reference"
+    }
+  ],
+  "annotations": [
+    {
+      "annotation_id": "obs-lore",
+      "layer": "observation",
+      "dimension": "worldbuilding",
+      "change_type": "removed",
+      "claim": "Из экранизации удалён важный блок устройства мира.",
+      "severity": 0.8,
+      "confidence": 0.95,
+      "polarity": 0.0,
+      "source_id": "film-ru",
+      "tags": ["lore_cut"]
+    },
+    {
+      "annotation_id": "consequence-motivation",
+      "layer": "structural_consequence",
+      "dimension": "motivation",
+      "change_type": "removed",
+      "claim": "После удаления контекста мотивация героя объяснена хуже.",
+      "severity": 0.7,
+      "confidence": 0.8,
+      "polarity": -0.5,
+      "parent_id": "obs-lore",
+      "tags": ["motivation_loss"]
+    },
+    {
+      "annotation_id": "expert-harm",
+      "layer": "expert_interpretation",
+      "dimension": "worldbuilding",
+      "change_type": "removed",
+      "claim": "Эксперт считает сокращение мира неудачным.",
+      "severity": 0.75,
+      "confidence": 0.9,
+      "polarity": -0.9,
+      "source_id": "critic-reference",
+      "evidence_locator": "12:30-13:10",
+      "parent_id": "obs-lore",
+      "tags": ["expert_negative"]
+    }
+  ]
+}
