@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.source_context import SourceContextStore, SourceContextValidationError
+from src.source_format_pressure import SourceFormatPressureContext
 from src.source_team_history import SourceTeamHistory
 
 
@@ -79,13 +80,26 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser = sub.add_parser("import", help="импортировать JSON bundle")
     import_parser.add_argument("bundle", type=Path)
 
-    snapshot = sub.add_parser("snapshot", help="показать pre-release source features as-of cutoff")
+    snapshot = sub.add_parser(
+        "snapshot",
+        help="показать pre-release source + format-pressure features as-of cutoff",
+    )
     snapshot.add_argument("project_id")
     snapshot.add_argument("cutoff", help="ISO datetime")
 
     links = sub.add_parser("links", help="показать source links, известные на cutoff")
     links.add_argument("project_id")
     links.add_argument("cutoff", help="ISO datetime")
+
+    pressure = sub.add_parser(
+        "format-pressure",
+        help=(
+            "показать прозрачные source age/series/runtime proxies; "
+            "это не фактический adaptation compression ratio"
+        ),
+    )
+    pressure.add_argument("project_id")
+    pressure.add_argument("cutoff", help="ISO datetime")
 
     team = sub.add_parser(
         "team-history",
@@ -115,6 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     store = SourceContextStore(args.db)
+    pressure = SourceFormatPressureContext(store)
     try:
         if args.command == "init":
             _dump({"ok": True, "database": str(store.path)})
@@ -124,12 +139,14 @@ def main(argv: list[str] | None = None) -> int:
             _dump({"ok": True, "database": str(store.path), "imported": counters})
             return 0
         if args.command == "snapshot":
+            features = store.features_as_of(args.project_id, args.cutoff)
+            features.update(pressure.features_as_of(args.project_id, args.cutoff))
             _dump(
                 {
                     "ok": True,
                     "project_id": args.project_id,
                     "cutoff": args.cutoff,
-                    "features": store.features_as_of(args.project_id, args.cutoff),
+                    "features": features,
                 }
             )
             return 0
@@ -140,6 +157,17 @@ def main(argv: list[str] | None = None) -> int:
                     "project_id": args.project_id,
                     "cutoff": args.cutoff,
                     "links": store.links_as_of(args.project_id, args.cutoff),
+                }
+            )
+            return 0
+        if args.command == "format-pressure":
+            _dump(
+                {
+                    "ok": True,
+                    "project_id": args.project_id,
+                    "cutoff": args.cutoff,
+                    "compression_ratio": None,
+                    "features": pressure.features_as_of(args.project_id, args.cutoff),
                 }
             )
             return 0

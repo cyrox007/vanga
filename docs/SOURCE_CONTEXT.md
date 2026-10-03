@@ -6,6 +6,7 @@ Source Context хранит только факты о первоисточни�
 
 - `src/source_context.py` — canonical source/creator/project registry и base as-of features;
 - `src/source_team_history.py` — опыт текущей creative team именно на прошлых адаптациях;
+- `src/source_format_pressure.py` — прозрачные source-age/series/runtime proxies;
 - `scripts/source_context.py` — CLI;
 - отдельная `source_context.duckdb` (`VANGA_SOURCE_CONTEXT_DB`).
 
@@ -55,7 +56,7 @@ Raw creator ID пока не является ML feature; base snapshot возв
 
 - source-known/work/primary-work counts;
 - creator count;
-- source age coverage + mean/min/max;
+- source age coverage + mean/min/max относительно cutoff;
 - series-size coverage + mean/max;
 - series-position mean;
 - planned runtime/episodes/total runtime;
@@ -64,6 +65,48 @@ Raw creator ID пока не является ML feature; base snapshot возв
 - adaptation-format one-hot.
 
 Неизвестная publication date снижает coverage, но не становится фиктивным нулём внутри mean.
+
+## Source Format Pressure
+
+`SourceFormatPressureContext.features_as_of` добавляет прозрачные pre-release proxies, рассчитанные только из уже известных source/series/project-format facts.
+
+Это **не настоящий `adaptation_compression_ratio`**. Без структурированного понимания сюжетных арок нельзя честно утверждать, что фильм «сжал 70% материала».
+
+### Возраст первоисточника к target release
+
+Если release/format metadata уже известны на cutoff, считаются:
+
+- `source_age_at_release_known_ratio`;
+- `source_age_at_release_years_mean/min/max`;
+- `source_publication_after_release_count`.
+
+Source с publication date после target release не получает отрицательный возраст. Он исключается из age aggregate и увеличивает отдельный data-quality counter.
+
+### Series context
+
+По видимым source works считаются:
+
+- `source_series_count`;
+- `source_series_progress_known_ratio`;
+- `source_series_progress_ratio_mean/max`.
+
+`series_progress = series_position / series_size` используется только при известных position и size. Это положение source work внутри серии, а не оценка сюжетной сложности.
+
+### Runtime / episode pressure proxies
+
+При заранее известном planned runtime считаются:
+
+- `source_format_pressure_runtime_known`;
+- `source_runtime_per_linked_work_known`;
+- `source_runtime_per_linked_work_minutes`;
+- `source_runtime_per_primary_work_known`;
+- `source_runtime_per_primary_work_minutes`;
+- `source_episodes_per_linked_work_known`;
+- `source_episodes_per_linked_work`.
+
+Дополнительно возвращаются `source_type_diversity` и `source_relation_diversity`.
+
+Эти признаки означают только «сколько запланированного экранного времени приходится на известное число связанных works». Они не утверждают, что каждая книга/игра/комикс имеет одинаковый объём содержания.
 
 ## Adaptation-specific team history
 
@@ -101,7 +144,7 @@ Raw creator ID пока не является ML feature; base snapshot возв
 
 ### Почему пока только counts
 
-P3 team history намеренно не использует IMDb rating прошлых адаптаций. Сначала проверяется сам factual experience/coverage signal без дополнительной temporal неоднозначности outcome rating.
+P3 team history намеренно не использует IMDb rating прошлых адаптаций. Сначала проверяется factual experience/coverage signal без дополнительной temporal неоднозначности outcome rating.
 
 ## CLI
 
@@ -110,8 +153,11 @@ python scripts/source_context.py init
 python scripts/source_context.py import data/source-context/example.json
 python scripts/source_context.py snapshot PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/source_context.py links PROJECT_ID 2026-01-15T00:00:00Z
+python scripts/source_context.py format-pressure PROJECT_ID 2026-01-15T00:00:00Z
 python scripts/source_context.py team-history PROJECT_ID 2026-01-15T00:00:00Z
 ```
+
+Обычный `snapshot` объединяет base Source Context и Source Format Pressure. `format-pressure` выводит тот же derived блок отдельно и явно возвращает `compression_ratio: null`, чтобы proxy не путали с измеренной степенью сжатия.
 
 При необходимости resolved IDs можно передать явно:
 
@@ -130,10 +176,10 @@ JSON bundle order:
 
 Pre-release Source Context не содержит full source text, post-release plot, StoryMap/StoryDiff, expert opinion или post-release adaptation facts.
 
-Source popularity и complexity/compression proxies появятся только при воспроизводимом point-in-time источнике/методе.
+Source popularity и содержательная complexity/compression появятся только при воспроизводимом point-in-time источнике/методе. Текущий Format Pressure — лишь transparent factual proxy layer.
 
 ## Путь к ML
 
-Перед включением source/team-history features в CatBoost требуется реальное historical наполнение, coverage analysis, train/inference parity, отдельный temporal ablation, quality gate и проверка VPS.
+Перед включением source/team-history/format-pressure features в CatBoost требуется реальное historical наполнение, coverage analysis, train/inference parity, отдельный temporal ablation, quality gate и проверка VPS.
 
-Следующие P3-инкременты: source age at adaptation/release и исследовательские complexity/compression proxies без post-release leakage.
+Следующий P3-инкремент: research foundation для source complexity/compression, где каждый complexity fact будет явно иметь provenance/method/version и не будет опираться на post-release фильм.
