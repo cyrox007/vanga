@@ -143,6 +143,8 @@ class InferenceFeatureParityTests(unittest.TestCase):
             8.0,
             places=5,
         )
+        self.assertEqual(info["Role Switcher"]["prior_count"], 1)
+        self.assertTrue(info["Role Switcher"]["known"])
 
     def test_actor_history_uses_only_actor_actress_credits(self):
         info = self.engine._get_people_info(
@@ -157,6 +159,7 @@ class InferenceFeatureParityTests(unittest.TestCase):
             4.0,
             places=5,
         )
+        self.assertEqual(info["Role Switcher"]["prior_count"], 1)
 
     def test_cache_key_keeps_roles_separate(self):
         director = self.engine._get_people_info(
@@ -181,15 +184,17 @@ class InferenceFeatureParityTests(unittest.TestCase):
             self.engine._people_cache,
         )
 
-    def test_future_credits_do_not_leak_into_history(self):
+    def test_future_credits_do_not_leak_but_resolved_id_is_preserved(self):
         info = self.engine._get_people_info(
             ["Future Only"],
             before_year=2024,
             role="actor",
         )
 
-        self.assertIsNone(info["Future Only"]["nconst"])
+        self.assertEqual(info["Future Only"]["nconst"], "nm_future")
         self.assertEqual(info["Future Only"]["avg_rating"], 6.5)
+        self.assertEqual(info["Future Only"]["prior_count"], 0)
+        self.assertFalse(info["Future Only"]["known"])
 
     def test_writer_history_uses_only_past_writer_credits(self):
         info = self.engine._get_people_info(
@@ -204,6 +209,41 @@ class InferenceFeatureParityTests(unittest.TestCase):
             8.0,
             places=5,
         )
+        self.assertEqual(info["Writer Person"]["prior_count"], 1)
+        self.assertTrue(info["Writer Person"]["known"])
+
+    def test_schema_v6_emits_known_and_prior_count_features(self):
+        self.engine.metadata = {
+            "feature_names": [
+                "director_avg_rating",
+                "director_prior_count",
+                "director_known",
+                "actor_1_avg_rating",
+                "actor_1_prior_count",
+                "actor_1_known",
+                "director_id",
+                "actor_1_id",
+            ],
+            "categorical_features": ["director_id", "actor_1_id"],
+        }
+
+        X = self.engine._prepare_features(
+            2024,
+            120,
+            ["Drama"],
+            director="Role Switcher",
+            actors=["Future Only"],
+        )
+
+        self.assertEqual(X.shape, (1, 8))
+        self.assertEqual(float(X[0, 0]), 8.0)
+        self.assertEqual(float(X[0, 1]), 1.0)
+        self.assertEqual(float(X[0, 2]), 1.0)
+        self.assertEqual(float(X[0, 3]), 6.5)
+        self.assertEqual(float(X[0, 4]), 0.0)
+        self.assertEqual(float(X[0, 5]), 0.0)
+        self.assertEqual(X[0, 6], "nm_same")
+        self.assertEqual(X[0, 7], "nm_future")
 
     def test_invalid_role_is_rejected(self):
         with self.assertRaises(ValueError):
