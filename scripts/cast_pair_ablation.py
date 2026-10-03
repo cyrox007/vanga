@@ -71,10 +71,12 @@ def _train_variant(
     ):
         os.environ[name] = "1"
     os.environ["VANGA_TRAIN_CAST_PAIR_FEATURES"] = "1" if cast_pair_enabled else "0"
+    # Исторический v12→v13 эксперимент не должен незаметно включить schema v14.
+    os.environ["VANGA_TRAIN_DUAL_ROLE_FEATURES"] = "0"
 
     logger.info("=" * 60)
     logger.info(
-        "CAST PAIR ABLATION: старт %s; cast_pair=%s",
+        "CAST PAIR ABLATION: старт %s; cast_pair=%s; dual_role=off",
         label,
         "on" if cast_pair_enabled else "off",
     )
@@ -101,6 +103,7 @@ def _train_variant(
         result["director_team_features_version"] = 1
         result["full_cast_features_version"] = 1
         result["cast_pair_features_version"] = 1 if cast_pair_enabled else 0
+        result["dual_role_features_version"] = 0
         return result
     finally:
         del model
