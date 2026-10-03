@@ -83,7 +83,7 @@ def fetch_batch_director_writer_pair_context(
               AND c.writers <> '\\N'
         ),
         pair_history AS (
-            SELECT
+            SELECT DISTINCT
                 bm.tconst AS target_tconst,
                 hp.tconst AS prior_tconst,
                 TRY_CAST(r.averageRating AS DOUBLE) AS rating
@@ -106,7 +106,7 @@ def fetch_batch_director_writer_pair_context(
             SELECT
                 target_tconst,
                 AVG(rating) AS avg_rating,
-                COUNT(DISTINCT prior_tconst) AS prior_count
+                COUNT(*) AS prior_count
             FROM pair_history
             GROUP BY target_tconst
         )
@@ -149,20 +149,26 @@ def fetch_director_writer_pair_context(
         return empty_director_writer_pair_context()
 
     query = """
+        WITH pair_history AS (
+            SELECT DISTINCT
+                p.tconst,
+                TRY_CAST(r.averageRating AS DOUBLE) AS rating
+            FROM title_principals p
+            JOIN title_writers w
+              ON w.tconst = p.tconst
+             AND w.nconst = ?
+            JOIN title_basics b ON b.tconst = p.tconst
+            JOIN title_ratings r ON r.tconst = p.tconst
+            WHERE p.nconst = ?
+              AND p.category = 'director'
+              AND b.titleType = 'movie'
+              AND TRY_CAST(b.startYear AS INTEGER) < ?
+              AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
+        )
         SELECT
-            COALESCE(AVG(TRY_CAST(r.averageRating AS DOUBLE)), 6.5) AS avg_rating,
-            COUNT(DISTINCT p.tconst) AS prior_count
-        FROM title_principals p
-        JOIN title_writers w
-          ON w.tconst = p.tconst
-         AND w.nconst = ?
-        JOIN title_basics b ON b.tconst = p.tconst
-        JOIN title_ratings r ON r.tconst = p.tconst
-        WHERE p.nconst = ?
-          AND p.category = 'director'
-          AND b.titleType = 'movie'
-          AND TRY_CAST(b.startYear AS INTEGER) < ?
-          AND TRY_CAST(r.averageRating AS DOUBLE) IS NOT NULL
+            COALESCE(AVG(rating), 6.5) AS avg_rating,
+            COUNT(*) AS prior_count
+        FROM pair_history
     """
     row = conn.execute(
         query,
