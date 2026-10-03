@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import unittest
 
 
@@ -9,6 +10,16 @@ SCRIPT = ROOT / "deploy" / "update-vanga.sh"
 
 
 class SafeServerUpdateTests(unittest.TestCase):
+    def test_script_has_valid_bash_syntax(self):
+        result = subprocess.run(
+            ["bash", "-n", str(SCRIPT)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_script_keeps_heavy_retrain_opt_in(self):
         source = SCRIPT.read_text(encoding="utf-8")
 
