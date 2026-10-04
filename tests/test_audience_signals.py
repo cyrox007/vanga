@@ -141,17 +141,17 @@ class AudienceSignalStoreTests(unittest.TestCase):
         self.assertEqual(features["audience_trailer_views"], 150000.0)
         self.assertEqual(features["audience_signal_known_ratio"], 1.0)
 
-    def test_release_date_at_inference_excludes_signal_that_is_no_longer_pre_release(self):
+    def test_cutoff_after_release_is_rejected_fail_closed(self):
         self._observe(
             observed_at="2026-06-20T10:00:00Z",
             known_at="2026-06-20T12:00:00Z",
         )
-        visible = self.store.observations_as_of(
-            "film-1",
-            "2026-06-21T00:00:00Z",
-            release_at="2026-06-15T00:00:00Z",
-        )
-        self.assertEqual(visible, [])
+        with self.assertRaises(AudienceSignalError):
+            self.store.observations_as_of(
+                "film-1",
+                "2026-06-21T00:00:00Z",
+                release_at="2026-06-15T00:00:00Z",
+            )
 
     def test_registry_contains_only_aggregate_numeric_payload(self):
         self._observe()
