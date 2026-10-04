@@ -70,6 +70,16 @@ class _FakeRegionalBuilder:
         }
 
 
+class _BlockedRegionalBuilder(_FakeRegionalBuilder):
+    def build(self, project_id, cutoff, *, territory, **kwargs):
+        result = super().build(project_id, cutoff, territory=territory, **kwargs)
+        result["prediction_ready"] = False
+        result["blockers"] = ["regional_release_date_conflict"]
+        result["request"] = None
+        result["regional_release_snapshot"]["conflict"] = True
+        return result
+
+
 class FutureHttpApiTests(unittest.TestCase):
     def setUp(self):
         self.client = api.app.test_client()
@@ -139,20 +149,9 @@ class FutureHttpApiTests(unittest.TestCase):
         self.assertEqual(body["regional_release_snapshot"]["canonical_territory"], "iso3166:de")
 
     def test_prediction_payload_can_return_blocked_state_as_200(self):
-        blocked = _FakeRegionalBuilder()
-
-        def build(*args, **kwargs):
-            result = blocked.build(*args, **kwargs)
-            result["prediction_ready"] = False
-            result["blockers"] = ["regional_release_date_conflict"]
-            result["request"] = None
-            result["regional_release_snapshot"]["conflict"] = True
-            return result
-
-        blocked.build = build
         with patch(
             "src.future_http_api.RegionalTemporalFuturePredictionPayloadBuilder",
-            return_value=blocked,
+            return_value=_BlockedRegionalBuilder(),
         ):
             response = self.client.post(
                 "/future/prediction-payload",
