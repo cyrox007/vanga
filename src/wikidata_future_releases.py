@@ -15,7 +15,7 @@ from settings import config
 
 
 WDQS_ENDPOINT = "https://query.wikidata.org/sparql"
-COLLECTOR_VERSION = 1
+COLLECTOR_VERSION = 2
 
 
 class WikidataFutureReleaseError(RuntimeError):
@@ -250,6 +250,7 @@ LIMIT {limit}
         aliases: dict[str, dict[str, Any]] = {}
         releases: dict[str, dict[str, Any]] = {}
         warnings: list[dict[str, Any]] = []
+        retrieval_key = retrieved_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
         for index, binding in enumerate(cls._bindings(raw)):
             qid = _qid(_binding(binding, "film"))
@@ -290,32 +291,41 @@ LIMIT {limit}
                 "canonical_title": title,
             }
             statement_key = _safe_statement_key(statement or f"{qid}:{release_value}:{precision}")
-            source_id = f"wikidata:{qid}:release:{statement_key}"
+
+            # Source — это конкретный retrieval snapshot, а не вечный ID
+            # Wikidata statement. Иначе следующий sync переписывает retrieved_at
+            # вчерашнего evidence и разрушает point-in-time provenance.
+            source_id = f"wikidata:{qid}:release:{statement_key}:{retrieval_key}"
             sources[source_id] = {
                 "source_id": source_id,
                 "provider": "Wikidata",
                 "url": f"https://www.wikidata.org/wiki/{qid}",
                 "usage_basis": "public_record",
-                "retrieved_at": retrieved_at.isoformat(),
+                "retrieved_at": retrieved_at.astimezone(timezone.utc).isoformat(),
             }
-            alias_id = f"wikidata-alias:{qid}:{hashlib.sha256(title.casefold().encode('utf-8')).hexdigest()[:12]}"
+
+            # Alias evidence также retrieval-specific. Повтор следующего дня не
+            # конфликтует с PRIMARY KEY, а temporal resolver всё равно дедуплицирует
+            # один project_id. Старое evidence при этом остаётся неизменяемым.
+            title_key = hashlib.sha256(title.casefold().encode("utf-8")).hexdigest()[:12]
+            alias_id = f"wikidata-alias:{qid}:{title_key}:{retrieval_key}"
             aliases[alias_id] = {
                 "alias_id": alias_id,
                 "project_id": project_id,
                 "alias": title,
-                "known_at": retrieved_at.isoformat(),
+                "known_at": retrieved_at.astimezone(timezone.utc).isoformat(),
                 "source_id": source_id,
                 "confidence": 0.9,
             }
-            observation_id = f"wikidata-release:{qid}:{statement_key}:{retrieved_at.strftime('%Y%m%dT%H%M%SZ')}"
+            observation_id = f"wikidata-release:{qid}:{statement_key}:{retrieval_key}"
             releases[observation_id] = {
                 "observation_id": observation_id,
                 "project_id": project_id,
                 "territory": "worldwide",
-                "release_start_at": start.isoformat(),
-                "release_end_at": end.isoformat(),
+                "release_start_at": start.astimezone(timezone.utc).isoformat(),
+                "release_end_at": end.astimezone(timezone.utc).isoformat(),
                 "precision": precision_name,
-                "known_at": retrieved_at.isoformat(),
+                "known_at": retrieved_at.astimezone(timezone.utc).isoformat(),
                 "source_id": source_id,
                 "confidence": 0.85,
             }
