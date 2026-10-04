@@ -8,7 +8,10 @@ User=vanga
 Group=vanga
 WorkingDirectory=/opt/vanga
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/vanga/.venv/bin/gunicorn --workers 1 --threads 2 --timeout 60 --bind 127.0.0.1:9100 api:app
+# Не запускаем console-script .venv/bin/gunicorn напрямую: pip записывает в него
+# абсолютный shebang candidate venv, а updater затем атомарно переименовывает venv.
+# `python -m gunicorn` остаётся корректным после такого переключения runtime.
+ExecStart=/opt/vanga/.venv/bin/python -m gunicorn --workers 1 --threads 2 --timeout 60 --bind 127.0.0.1:9100 api:app
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
