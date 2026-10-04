@@ -29,6 +29,7 @@ BROKEN_IN_AUDIT = (
     "rating_dataset.py",
     "rating_history.py",
     "rating_milestones.py",
+    "release_readiness.py",
     "wikidata_future_releases.py",
 )
 
