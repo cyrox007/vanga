@@ -15,6 +15,12 @@ class Config:
         "VANGA_RATING_HISTORY_DB",
         str(Path(ABSPATH) / "rating_history.duckdb"),
     )
+    # P8 хранит только агрегатные pre-release audience signals с timestamp,
+    # method/version и provenance. Raw user data/тексты в эту БД не попадают.
+    AUDIENCE_SIGNALS_DB_PATH = os.getenv(
+        "VANGA_AUDIENCE_SIGNALS_DB",
+        str(Path(ABSPATH) / "audience_signals.duckdb"),
+    )
     ENRICHMENT_DB_PATH = os.getenv(
         "VANGA_ENRICHMENT_DB",
         str(Path(ABSPATH) / "enrichment.duckdb"),
