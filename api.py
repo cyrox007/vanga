@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import json
 import logging
 import threading
-from pathlib import Path
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from flask import Flask, jsonify, request
 
-from settings import config
 from src.creative_kinovanga import KinoVanga
 from src.pre_release_analysis import build_pre_release_profile
-from src.train_model import resolve_current_model_path
+from src.runtime_descriptor import resolve_model_runtime_descriptor
 
 
 logger = logging.getLogger(__name__)
@@ -24,28 +22,34 @@ _generation: str | None = None
 _last_reload_error: str | None = None
 
 
-def _generation_key(model_path: Path) -> str:
-    """Возвращает компактный идентификатор активного поколения модели."""
-    pointer = Path(config.ABSPATH) / "models" / "current.json"
-    if pointer.exists():
-        payload = json.loads(pointer.read_text(encoding="utf-8"))
-        generation = str(payload.get("generation") or "").strip()
-        if generation:
-            return generation
-    return f"legacy:{model_path.stat().st_mtime_ns}"
-
-
 def _ensure_engine() -> KinoVanga:
+    """Возвращает активный engine, сохраняя предыдущий при ошибке reload.
+
+    Descriptor поколения читается ровно один раз внутри lifecycle lock. Поэтому
+    путь модели и generation не могут относиться к разным состояниям pointer.
+    Ошибка чтения/разрешения pointer также входит в fallback-контур: если рабочий
+    engine уже загружен, сервис продолжает обслуживать им запросы.
+    """
     global _engine, _generation, _last_reload_error
-    model_path = resolve_current_model_path()
-    generation = _generation_key(model_path)
-    if _engine is not None and _generation == generation:
-        return _engine
+
     with _lock:
-        if _engine is not None and _generation == generation:
-            return _engine
         try:
-            candidate = KinoVanga(model_path)
+            descriptor = resolve_model_runtime_descriptor()
+        except Exception as exc:
+            _last_reload_error = str(exc)
+            logger.exception("Не удалось разрешить активное поколение модели Vanga")
+            if _engine is not None:
+                logger.warning(
+                    "Pointer недоступен; продолжаем обслуживать запросы предыдущей моделью"
+                )
+                return _engine
+            raise
+
+        if _engine is not None and _generation == descriptor.generation:
+            return _engine
+
+        try:
+            candidate = KinoVanga(descriptor.model_path)
         except Exception as exc:
             _last_reload_error = str(exc)
             logger.exception("Не удалось загрузить новое поколение модели Vanga")
@@ -53,18 +57,38 @@ def _ensure_engine() -> KinoVanga:
                 logger.warning("Продолжаем обслуживать запросы предыдущей моделью")
                 return _engine
             raise
+
         previous = _engine
         _engine = candidate
-        _generation = generation
+        _generation = descriptor.generation
         _last_reload_error = None
+
+        # Все API call-sites используют _engine_session(), поэтому пока мы держим
+        # lifecycle lock ни один запрос не может продолжать работу с previous.
         if previous is not None:
             try:
                 with _catalog_lock:
                     previous.close()
             except Exception:
                 logger.exception("Не удалось закрыть старые соединения DuckDB")
-        logger.info("Активировано новое поколение модели Vanga")
+
+        logger.info(
+            "Активировано новое поколение модели Vanga: generation=%s source=%s",
+            descriptor.generation,
+            descriptor.source,
+        )
         return candidate
+
+
+@contextmanager
+def _engine_session() -> Iterator[tuple[KinoVanga, str]]:
+    """Закрепляет согласованные engine+generation на всё время API-операции."""
+    with _lock:
+        engine = _ensure_engine()
+        generation = _generation
+        if generation is None:
+            raise RuntimeError("Engine загружен без generation")
+        yield engine, generation
 
 
 def _json_error(message: str, status: int):
@@ -95,13 +119,17 @@ def search_movies():
         if not (1888 <= year <= 2100):
             return _json_error("year вне допустимого диапазона", 400)
     try:
-        engine = _ensure_engine()
-        with _catalog_lock:
-            items = engine.catalog.search_movies(query, limit=_search_limit(), year=year)
+        with _engine_session() as (engine, generation):
+            with _catalog_lock:
+                items = engine.catalog.search_movies(
+                    query,
+                    limit=_search_limit(),
+                    year=year,
+                )
     except Exception:
         logger.exception("Ошибка поиска фильмов Vanga")
         return _json_error("Поиск фильмов временно недоступен", 503)
-    return jsonify({"ok": True, "items": items, "generation": _generation})
+    return jsonify({"ok": True, "items": items, "generation": generation})
 
 
 @app.get("/search/people")
@@ -115,13 +143,17 @@ def search_people():
     if role not in {"director", "writer", "actor"}:
         return _json_error("role должен быть director, writer или actor", 400)
     try:
-        engine = _ensure_engine()
-        with _catalog_lock:
-            items = engine.catalog.search_people(query, role=role, limit=_search_limit())
+        with _engine_session() as (engine, generation):
+            with _catalog_lock:
+                items = engine.catalog.search_people(
+                    query,
+                    role=role,
+                    limit=_search_limit(),
+                )
     except Exception:
         logger.exception("Ошибка поиска персон Vanga")
         return _json_error("Поиск персон временно недоступен", 503)
-    return jsonify({"ok": True, "items": items, "generation": _generation})
+    return jsonify({"ok": True, "items": items, "generation": generation})
 
 
 @app.post("/catalog/ratings")
@@ -132,59 +164,74 @@ def catalog_ratings():
     if not isinstance(payload, dict):
         return _json_error("Ожидается JSON-объект", 400)
     imdb_ids = payload.get("imdb_ids")
-    if not isinstance(imdb_ids, list) or any(not isinstance(item, str) for item in imdb_ids):
+    if not isinstance(imdb_ids, list) or any(
+        not isinstance(item, str) for item in imdb_ids
+    ):
         return _json_error("imdb_ids должен быть массивом строк", 400)
     if len(imdb_ids) > 100:
         return _json_error("За один запрос можно проверить не больше 100 фильмов", 400)
     try:
-        engine = _ensure_engine()
-        with _catalog_lock:
-            items = engine.catalog.current_ratings(imdb_ids)
+        with _engine_session() as (engine, generation):
+            with _catalog_lock:
+                items = engine.catalog.current_ratings(imdb_ids)
     except Exception:
         logger.exception("Ошибка чтения текущих IMDb ratings")
         return _json_error("Рейтинги временно недоступны", 503)
-    return jsonify({"ok": True, "items": items, "generation": _generation})
+    return jsonify({"ok": True, "items": items, "generation": generation})
 
 
 @app.get("/health")
 def health():
     try:
-        model_path = resolve_current_model_path()
-        engine = _ensure_engine()
-        return jsonify({
-            "ok": True,
-            "status": "ready",
-            "model": str(model_path.name),
-            "generation": _generation,
-            "reload_error": _last_reload_error,
-            "database": str(engine.db_path.name),
-        })
+        with _engine_session() as (engine, generation):
+            reload_error = _last_reload_error
+            model_name = str(engine.model_path.name)
+            database_name = str(engine.db_path.name)
+        return jsonify(
+            {
+                "ok": True,
+                "status": "ready",
+                "model": model_name,
+                "generation": generation,
+                "reload_error": reload_error,
+                "database": database_name,
+            }
+        )
     except Exception as exc:
         logger.exception("Vanga healthcheck: модель недоступна")
-        return jsonify({
-            "ok": False,
-            "status": "degraded",
-            "error": str(exc),
-            "reload_error": _last_reload_error,
-        }), 503
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "status": "degraded",
+                    "error": str(exc),
+                    "reload_error": _last_reload_error,
+                }
+            ),
+            503,
+        )
 
 
 @app.get("/model-info")
 def model_info():
     try:
-        engine = _ensure_engine()
-        metadata = engine.metadata if isinstance(engine.metadata, dict) else {}
-        return jsonify({
-            "ok": True,
-            "generation": _generation,
-            "schema_version": metadata.get("schema_version"),
-            "feature_names": metadata.get("feature_names") or [],
-            "categorical_features": metadata.get("categorical_features") or [],
-            "quality": engine.quality_summary(),
-            "uncertainty_available": bool(metadata.get("test_abs_error_quantiles")),
-            "quality_gate": metadata.get("quality_gate"),
-            "model_size_bytes": metadata.get("model_size_bytes"),
-        })
+        with _engine_session() as (engine, generation):
+            metadata = engine.metadata if isinstance(engine.metadata, dict) else {}
+            response = {
+                "ok": True,
+                "generation": generation,
+                "schema_version": metadata.get("schema_version"),
+                "feature_names": metadata.get("feature_names") or [],
+                "categorical_features": metadata.get("categorical_features") or [],
+                "quality": engine.quality_summary(),
+                "uncertainty_available": bool(
+                    metadata.get("test_abs_error_quantiles")
+                ),
+                "quality_gate": metadata.get("quality_gate"),
+                "model_size_bytes": metadata.get("model_size_bytes"),
+                "reload_error": _last_reload_error,
+            }
+        return jsonify(response)
     except Exception:
         logger.exception("Не удалось получить сведения о модели Vanga")
         return _json_error("Сведения о модели временно недоступны", 503)
@@ -203,7 +250,9 @@ def predict():
     raw_directors = payload.get("directors")
     if raw_directors is None:
         directors = [legacy_director] if legacy_director else []
-    elif isinstance(raw_directors, list) and all(isinstance(item, str) for item in raw_directors):
+    elif isinstance(raw_directors, list) and all(
+        isinstance(item, str) for item in raw_directors
+    ):
         directors = []
         for item in raw_directors:
             clean = item.strip()
@@ -279,8 +328,7 @@ def predict():
         return _json_error("Слишком длинное имя актёра", 400)
 
     try:
-        with _lock:
-            engine = _ensure_engine()
+        with _engine_session() as (engine, generation):
             result: Any = engine.predict(
                 title=title,
                 director=director,
@@ -318,24 +366,30 @@ def predict():
         logger.exception("Ошибка предсказания Vanga")
         return _json_error("Модель временно не смогла выполнить предсказание", 503)
 
-    return jsonify({
-        "ok": True,
-        "title": title,
-        "imdb_id": (
-            imdb_id
-            or (((result.get("input_resolution") or {}).get("title") or {}).get("imdb_id"))
-            or None
-        ),
-        "generation": _generation,
-        "rating": result["rating"],
-        "base": result.get("base"),
-        "uncertainty": result.get("uncertainty"),
-        "quality": result.get("quality") or {},
-        "explanation": result["explanation"],
-        "contributions": result["contributions"],
-        "input_resolution": result.get("input_resolution", {}),
-        "pre_release_profile": profile,
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "title": title,
+            "imdb_id": (
+                imdb_id
+                or (
+                    ((result.get("input_resolution") or {}).get("title") or {}).get(
+                        "imdb_id"
+                    )
+                )
+                or None
+            ),
+            "generation": generation,
+            "rating": result["rating"],
+            "base": result.get("base"),
+            "uncertainty": result.get("uncertainty"),
+            "quality": result.get("quality") or {},
+            "explanation": result["explanation"],
+            "contributions": result["contributions"],
+            "input_resolution": result.get("input_resolution", {}),
+            "pre_release_profile": profile,
+        }
+    )
 
 
 if __name__ == "__main__":
