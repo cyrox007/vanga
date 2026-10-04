@@ -156,15 +156,61 @@ python scripts/future_release_import.py import collector-batch.json
 
 Повтор одного и того же source snapshot остаётся идемпотентным по существующему source/bundle fingerprint contract.
 
-## Что этот инкремент не делает
+## Wikidata runtime/genres collector
 
-Temporal storage и batch-import contract уже готовы для collectors, но конкретный источник данных всё ещё должен быть реализован отдельным adapter-ом.
+Для проектов, у которых в P9 registry уже есть `wikidata_id`, реализован collector `WikidataFutureFactsCollector`.
 
-Следующие P9 инкременты:
+Он получает:
 
-- конкретный воспроизводимый adapter к официальному/публичному future-release источнику;
-- включение adapter-а в refresh pipeline;
-- второй независимый источник release date;
+- `runtime` из Wikidata property `P2047`;
+- `genres` из `P136`;
+- английский label жанра, с fallback на русский.
+
+Collector принципиально **не** использует Wikidata description как `synopsis`: краткое описание сущности не является пересказом сюжета и не должно подменять StoryMap/text-analysis input.
+
+Запуск и атомарный импорт:
+
+```bash
+python scripts/wikidata_future_facts.py \
+  --project-id wikidata:Q123 \
+  --import
+```
+
+Для нескольких проектов `--project-id` можно повторять. Без него берутся проекты из registry в пределах `--limit`.
+
+Raw WDQS JSON кешируется локально и fingerprint входит в collector batch. Inference к сети не обращается.
+
+### Temporal provenance
+
+Для одного фильма используется стабильный source id вида:
+
+```text
+wikidata:Q123:facts
+```
+
+При следующем sync новый runtime/genres получает новый `known_at`, но тот же logical source. Поэтому as-of resolver видит историю одного источника и выбирает его последнее состояние на cutoff, вместо ложного конфликта между ежедневными snapshot одного и того же Wikidata item.
+
+Если сам Wikidata snapshot одновременно содержит несколько разных значений runtime, collector не выбирает одно эвристически: runtime не импортируется, а возвращается warning `runtime_conflict_within_wikidata`.
+
+### WDQS v1 → v2
+
+Collector query написан на SPARQL 1.1 и не использует `SERVICE wikibase:label`/`bd:serviceParam`. Endpoint настраивается через `--endpoint`, поэтому во время миграции WDQS на QLever можно переключить endpoint без изменения P9 bundle contract.
+
+По умолчанию пока используется текущий:
+
+```text
+https://query.wikidata.org/sparql
+```
+
+Release date намеренно не импортируется этим collector-ом. `P577` может содержать несколько дат и территориальные/событийные различия; объявлять такую дату `worldwide exact` без корректного разбора qualifiers небезопасно.
+
+## Следующие P9 инкременты
+
+Temporal storage, batch import и первый реальный runtime/genres collector готовы. Дальше остаются:
+
+- включить Wikidata facts collector в общий refresh orchestration;
+- реализовать безопасный release-date adapter с qualifier/territory semantics и вторым независимым источником;
+- получить датированный synopsis из источника, где действительно публикуется synopsis, а не entity description;
 - публичный future-release каталог в `jsint-site`.
 
-Production CatBoost model этим изменением не переобучается и его feature schema не меняется.
+Production CatBoost model этими изменениями не переобучается и его feature schema не меняется.
