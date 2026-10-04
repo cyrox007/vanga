@@ -45,7 +45,7 @@ Raw response кешируется в `data/future_releases/tmdb/`. Fingerprint r
 
 ## Настройка
 
-TMDb API требует application authentication. Для collector используется Read Access Token:
+TMDb API требует application authentication. Collector использует Read Access Token в Bearer header:
 
 ```bash
 export TMDB_READ_ACCESS_TOKEN='...'
