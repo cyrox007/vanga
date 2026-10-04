@@ -32,10 +32,13 @@ def evaluate_expert_corpus(
     """Проверяет, что P5 готов к содержательному blind/transfer прогону.
 
     Gate проверяет не качество мнений эксперта, а достаточность и структуру
-    корпуса: независимые профили, splits, claim→evidence и отсутствие пустой
-    blind/external выборки. Соединение открывается в обычном режиме DuckDB,
-    чтобы gate можно было запускать рядом с уже открытым ExpertCorpusStore;
-    сам gate выполняет только SELECT-запросы.
+    корпуса: независимые профили, реально размеченные splits, claim→evidence и
+    отсутствие пустой blind/external выборки. Пустой case без claim не считается
+    готовой единицей корпуса.
+
+    Соединение открывается в обычном режиме DuckDB, чтобы gate можно было
+    запускать рядом с уже открытым ExpertCorpusStore; сам gate выполняет только
+    SELECT-запросы.
     """
     db_path = Path(
         path
@@ -76,6 +79,12 @@ def evaluate_expert_corpus(
         def count(sql: str, params: list[Any] | None = None) -> int:
             return int(conn.execute(sql, params or []).fetchone()[0])
 
+        annotated_case_count_sql = """
+            SELECT COUNT(DISTINCT ec.case_id)
+            FROM expert_cases ec
+            JOIN expert_claims c ON c.case_id=ec.case_id
+            WHERE ec.split=?
+        """
         metrics = {
             "experts": count("SELECT COUNT(*) FROM expert_profiles"),
             "cases": count("SELECT COUNT(*) FROM expert_cases"),
@@ -100,8 +109,23 @@ def evaluate_expert_corpus(
             "external_transfer_cases": count(
                 "SELECT COUNT(*) FROM expert_cases WHERE split='external_transfer'"
             ),
+            "annotated_train_cases": count(annotated_case_count_sql, ["train"]),
+            "annotated_development_cases": count(
+                annotated_case_count_sql, ["development"]
+            ),
+            "annotated_blind_cases": count(annotated_case_count_sql, ["blind"]),
+            "annotated_external_transfer_cases": count(
+                annotated_case_count_sql, ["external_transfer"]
+            ),
             "experts_with_materials": count(
                 "SELECT COUNT(DISTINCT expert_id) FROM expert_materials"
+            ),
+            "experts_with_claims": count(
+                """
+                SELECT COUNT(DISTINCT m.expert_id)
+                FROM expert_claims c
+                JOIN expert_materials m ON m.material_id=c.material_id
+                """
             ),
             "claims_with_supporting_evidence": count(
                 """
@@ -122,18 +146,24 @@ def evaluate_expert_corpus(
             blockers.append(
                 "Не у всех обязательных экспертных профилей есть материалы"
             )
-        if metrics["train_cases"] < min_train_cases:
+        if metrics["experts_with_claims"] < required_experts:
             blockers.append(
-                f"Недостаточно train cases: {metrics['train_cases']} < {min_train_cases}"
+                "Не у всех обязательных экспертных профилей есть размеченные claims"
             )
-        if metrics["blind_cases"] < min_blind_cases:
+        if metrics["annotated_train_cases"] < min_train_cases:
             blockers.append(
-                f"Недостаточно blind cases: {metrics['blind_cases']} < {min_blind_cases}"
+                "Недостаточно размеченных train cases: "
+                f"{metrics['annotated_train_cases']} < {min_train_cases}"
             )
-        if metrics["external_transfer_cases"] < min_external_cases:
+        if metrics["annotated_blind_cases"] < min_blind_cases:
             blockers.append(
-                "Недостаточно external_transfer cases: "
-                f"{metrics['external_transfer_cases']} < {min_external_cases}"
+                "Недостаточно размеченных blind cases: "
+                f"{metrics['annotated_blind_cases']} < {min_blind_cases}"
+            )
+        if metrics["annotated_external_transfer_cases"] < min_external_cases:
+            blockers.append(
+                "Недостаточно размеченных external_transfer cases: "
+                f"{metrics['annotated_external_transfer_cases']} < {min_external_cases}"
             )
         if metrics["claims"] < min_claims:
             blockers.append(
@@ -145,8 +175,8 @@ def evaluate_expert_corpus(
             warnings.append(
                 "В корпусе пока нет contradicting evidence; возможен confirmation bias"
             )
-        if metrics["development_cases"] == 0:
-            warnings.append("Development split пуст")
+        if metrics["annotated_development_cases"] == 0:
+            warnings.append("Development split не содержит размеченных cases")
         return ExpertCorpusGateResult(not blockers, blockers, warnings, metrics)
     finally:
         conn.close()
