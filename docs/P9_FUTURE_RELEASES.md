@@ -54,14 +54,30 @@ Release window хранит `release_start_at`, `release_end_at` и `precision`:
 
 `FuturePredictionPayloadBuilder` превращает локальный future-release snapshot в существующий JSON-контракт `/predict` без сетевых запросов.
 
-Он использует:
+По умолчанию builder использует только факты, temporal-доступность которых можно доказать на cutoff:
 
 1. Future Release registry — title, точную release date, director/writer/cast;
-2. Source Context — planned runtime и primary source material, если проект однозначно найден по IMDb ID и факт уже известен к cutoff;
-3. локальный IMDb snapshot — runtime fallback и genres;
+2. Source Context — planned runtime и primary source material, если соответствующий факт уже известен к cutoff;
+3. явные `runtime`/`genre` overrides текущего запроса;
 4. Production Context — только как дополнительный pre-release context/diagnostics, не как автоматически включённые ML-features.
 
-Приоритет runtime: explicit override → Source Context planned runtime → local IMDb. Приоритет genres: explicit override → local IMDb.
+Текущий локальный IMDb `title_basics.runtimeMinutes/genres` является snapshot без point-in-time timestamp. Поэтому он **не используется по умолчанию** для исторического cutoff: сегодняшнее значение нельзя доказуемо переносить назад во времени.
+
+Для интерактивного сценария «что известно сейчас» fallback можно включить явно:
+
+```bash
+python scripts/future_prediction_payload.py project-123 \
+  --cutoff 2026-10-04T00:00:00Z \
+  --allow-current-imdb-snapshot
+```
+
+Если runtime или genres реально взяты из этого fallback, payload возвращает:
+
+- warning `current_imdb_snapshot_not_point_in_time`;
+- `temporal_contract.current_imdb_snapshot_used=true`;
+- `temporal_contract.historical_backtest_safe=false`.
+
+Без opt-in при отсутствии датированного runtime/genres builder оставляет соответствующий blocker (`runtime_missing` / `genres_missing`) вместо подстановки недатированного snapshot.
 
 Builder работает fail-closed. `request=null` и `prediction_ready=false`, если:
 
@@ -74,9 +90,12 @@ Builder работает fail-closed. `request=null` и `prediction_ready=false`
 
 Неоднозначный Source/Production Context project не выбирается молча и отмечается в diagnostics. Несколько writers не блокируют request, но действующий API-контракт использует первого writer и возвращает warning.
 
+Temporal-safe пример с явным genre:
+
 ```bash
 python scripts/future_prediction_payload.py project-123 \
-  --cutoff 2026-10-01T00:00:00Z
+  --cutoff 2026-10-01T00:00:00Z \
+  --genre Drama
 ```
 
 Команда завершится с кодом `0`, если payload готов к `/predict`, и `2`, если остались blockers.
