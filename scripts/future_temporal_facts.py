@@ -53,7 +53,7 @@ def main() -> int:
         return 0
 
     value = _value(args)
-    if value in {None, []}:
+    if value is None or value == []:
         parser.error(
             "Для runtime_minutes нужен --runtime, для genres хотя бы один --genre, "
             "для synopsis --synopsis"

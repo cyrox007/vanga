@@ -58,7 +58,7 @@ def _normalize_fact_value(fact_type: str, value: Any) -> Any:
         genres = _clean_genres(value)
         if not genres:
             raise FutureTemporalFactError("genres не должен быть пустым")
-        return genres
+        return sorted(genres, key=str.casefold)
     if fact_type == "synopsis":
         text = " ".join(str(value or "").strip().split())
         if not text:
@@ -241,36 +241,28 @@ class TemporalFuturePredictionPayloadBuilder(FuturePredictionPayloadBuilder):
         input_sources = result.setdefault("input_sources", {})
 
         runtime_source = input_sources.get("runtime")
+        temporal_runtime: int | None = None
         if runtime_source in {None, "imdb_current_snapshot"}:
             if "runtime_minutes" in conflicts:
                 blockers = [item for item in blockers if item != "runtime_missing"]
                 if "runtime_fact_conflict" not in blockers:
                     blockers.append("runtime_fact_conflict")
-                runtime = None
             elif facts.get("runtime_minutes") is not None:
-                runtime = int(facts["runtime_minutes"])
+                temporal_runtime = int(facts["runtime_minutes"])
                 blockers = [item for item in blockers if item != "runtime_missing"]
                 input_sources["runtime"] = "p9_temporal_fact"
-            else:
-                runtime = None
-        else:
-            runtime = None
 
         genres_source = input_sources.get("genres")
+        temporal_genres: list[str] = []
         if genres_source in {None, "imdb_current_snapshot"}:
             if "genres" in conflicts:
                 blockers = [item for item in blockers if item != "genres_missing"]
                 if "genres_fact_conflict" not in blockers:
                     blockers.append("genres_fact_conflict")
-                genres = []
             elif facts.get("genres"):
-                genres = list(facts["genres"])
+                temporal_genres = list(facts["genres"])
                 blockers = [item for item in blockers if item != "genres_missing"]
                 input_sources["genres"] = "p9_temporal_fact"
-            else:
-                genres = []
-        else:
-            genres = []
 
         synopsis_override = kwargs.get("synopsis")
         synopsis = " ".join(str(synopsis_override or "").strip().split())
@@ -294,19 +286,35 @@ class TemporalFuturePredictionPayloadBuilder(FuturePredictionPayloadBuilder):
             release_at = datetime.fromisoformat(
                 str(snapshot["release_at"]).replace("Z", "+00:00")
             )
-            resolved_runtime = (
-                runtime
-                if input_sources.get("runtime") == "p9_temporal_fact"
-                else existing_request.get("runtime")
-            )
+
+            final_runtime_source = input_sources.get("runtime")
+            if final_runtime_source == "p9_temporal_fact":
+                resolved_runtime = temporal_runtime
+            elif final_runtime_source == "override":
+                resolved_runtime = _runtime(kwargs.get("runtime_override"))
+            elif final_runtime_source == "source_context":
+                resolved_runtime = (result.get("source_context") or {}).get("planned_runtime")
+            elif final_runtime_source == "imdb_current_snapshot":
+                resolved_runtime = (result.get("imdb_current_snapshot") or {}).get("runtime")
+            else:
+                resolved_runtime = existing_request.get("runtime")
+
+            final_genres_source = input_sources.get("genres")
+            if final_genres_source == "p9_temporal_fact":
+                resolved_genres = temporal_genres
+            elif final_genres_source == "override":
+                resolved_genres = _clean_genres(kwargs.get("genres_override"))
+            elif final_genres_source == "imdb_current_snapshot":
+                resolved_genres = list(
+                    (result.get("imdb_current_snapshot") or {}).get("genres") or []
+                )
+            else:
+                resolved_genres = list(existing_request.get("genres") or [])
+
             if resolved_runtime is None:
-                source_runtime = (result.get("source_context") or {}).get("planned_runtime")
-                resolved_runtime = source_runtime
-            resolved_genres = (
-                genres
-                if input_sources.get("genres") == "p9_temporal_fact"
-                else existing_request.get("genres")
-            )
+                raise FuturePredictionPayloadError(
+                    "prediction_ready без разрешённого runtime нарушает контракт"
+                )
             if not resolved_genres:
                 raise FuturePredictionPayloadError(
                     "prediction_ready без разрешённых genres нарушает контракт"
@@ -332,9 +340,16 @@ class TemporalFuturePredictionPayloadBuilder(FuturePredictionPayloadBuilder):
         else:
             result["request"] = None
 
-        result.setdefault("temporal_contract", {})["p9_temporal_facts_used"] = bool(
+        temporal_contract = result.setdefault("temporal_contract", {})
+        temporal_contract["p9_temporal_facts_used"] = bool(
             input_sources.get("runtime") == "p9_temporal_fact"
             or input_sources.get("genres") == "p9_temporal_fact"
             or input_sources.get("synopsis") == "p9_temporal_fact"
         )
+        current_snapshot_used = bool(
+            input_sources.get("runtime") == "imdb_current_snapshot"
+            or input_sources.get("genres") == "imdb_current_snapshot"
+        )
+        temporal_contract["current_imdb_snapshot_used"] = current_snapshot_used
+        temporal_contract["historical_backtest_safe"] = not current_snapshot_used
         return result
