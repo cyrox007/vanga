@@ -123,13 +123,13 @@ class WikidataFutureReleaseCollectorTests(unittest.TestCase):
         }
         exact = windows["wikidata:Q100"]
         self.assertEqual(exact["precision"], "exact")
-        self.assertEqual(exact["territory"], "wikidata:q30")
+        self.assertEqual(exact["territory"], "wikidata:Q30")
         self.assertEqual(exact["release_start_at"], "2027-05-20T00:00:00+00:00")
         self.assertEqual(exact["release_start_at"], exact["release_end_at"])
 
         month = windows["wikidata:Q200"]
         self.assertEqual(month["precision"], "month")
-        self.assertEqual(month["territory"], "wikidata:q145")
+        self.assertEqual(month["territory"], "wikidata:Q145")
         self.assertEqual(month["release_start_at"], "2027-08-01T00:00:00+00:00")
         self.assertEqual(month["release_end_at"], "2027-08-31T23:59:59+00:00")
 
