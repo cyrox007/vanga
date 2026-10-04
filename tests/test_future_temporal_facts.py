@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import duckdb
+
 from src.future_releases import FutureReleaseStore
 from src.future_temporal_facts import (
     FutureTemporalFactStore,
@@ -78,19 +80,21 @@ class FutureTemporalFactsTests(unittest.TestCase):
         source="source-a",
         known_at="2026-10-02T00:00:00Z",
         observation_id=None,
+        source_stream_id=None,
     ):
         with FutureTemporalFactStore(self.db) as store:
-            return store.add_fact(
-                {
-                    "observation_id": observation_id,
-                    "project_id": "film-a",
-                    "fact_type": fact_type,
-                    "value": value,
-                    "known_at": known_at,
-                    "source_id": source,
-                    "confidence": 0.9,
-                }
-            )
+            payload = {
+                "observation_id": observation_id,
+                "project_id": "film-a",
+                "fact_type": fact_type,
+                "value": value,
+                "known_at": known_at,
+                "source_id": source,
+                "confidence": 0.9,
+            }
+            if source_stream_id is not None:
+                payload["source_stream_id"] = source_stream_id
+            return store.add_fact(payload)
 
     def _builder(self) -> TemporalFuturePredictionPayloadBuilder:
         return TemporalFuturePredictionPayloadBuilder(
@@ -156,6 +160,98 @@ class FutureTemporalFactsTests(unittest.TestCase):
             late = store.snapshot_as_of("film-a", "2026-10-05T00:00:00Z")
         self.assertEqual(mid["facts"]["runtime_minutes"], 120)
         self.assertEqual(late["facts"]["runtime_minutes"], 130)
+
+    def test_different_snapshot_sources_in_same_stream_replace_each_other(self) -> None:
+        with FutureReleaseStore(self.db) as store:
+            store.upsert_source(
+                {
+                    "source_id": "snapshot-late",
+                    "provider": "Test",
+                    "usage_basis": "public_record",
+                    "retrieved_at": "2026-10-04T00:00:00Z",
+                }
+            )
+        self._add(
+            "runtime_minutes",
+            120,
+            source="source-a",
+            source_stream_id="provider:film-a:runtime",
+            known_at="2026-10-02T00:00:00Z",
+            observation_id="stream-old",
+        )
+        self._add(
+            "runtime_minutes",
+            130,
+            source="snapshot-late",
+            source_stream_id="provider:film-a:runtime",
+            known_at="2026-10-04T00:00:00Z",
+            observation_id="stream-new",
+        )
+        with FutureTemporalFactStore(self.db) as store:
+            snapshot = store.snapshot_as_of("film-a", "2026-10-05T00:00:00Z")
+        self.assertEqual(snapshot["facts"]["runtime_minutes"], 130)
+        self.assertEqual(snapshot["conflicts"], [])
+        evidence = snapshot["candidates"]["runtime_minutes"][0]["evidence"][0]
+        self.assertEqual(evidence["source_id"], "snapshot-late")
+        self.assertEqual(evidence["source_stream_id"], "provider:film-a:runtime")
+
+    def test_old_seven_column_table_is_migrated_without_losing_history(self) -> None:
+        old_db = Path(self.temp.name) / "old-temporal.duckdb"
+        with FutureReleaseStore(old_db) as store:
+            store.upsert_source(
+                {
+                    "source_id": "old-source",
+                    "provider": "Legacy",
+                    "usage_basis": "public_record",
+                    "retrieved_at": "2026-10-01T00:00:00Z",
+                }
+            )
+            store.upsert_project(
+                {
+                    "project_id": "old-film",
+                    "canonical_title": "Old Film",
+                }
+            )
+        conn = duckdb.connect(str(old_db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE future_release_temporal_facts(
+                    observation_id VARCHAR PRIMARY KEY,
+                    project_id VARCHAR NOT NULL,
+                    fact_type VARCHAR NOT NULL,
+                    value_json VARCHAR NOT NULL,
+                    known_at TIMESTAMPTZ NOT NULL,
+                    source_id VARCHAR NOT NULL,
+                    confidence DOUBLE NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO future_release_temporal_facts
+                VALUES ('legacy-runtime', 'old-film', 'runtime_minutes', '111',
+                        '2026-10-01T00:00:00Z', 'old-source', 0.8)
+                """
+            )
+        finally:
+            conn.close()
+
+        with FutureTemporalFactStore(old_db) as store:
+            columns = {
+                str(row[0])
+                for row in store.conn.execute(
+                    "DESCRIBE future_release_temporal_facts"
+                ).fetchall()
+            }
+            snapshot = store.snapshot_as_of(
+                "old-film",
+                "2026-10-02T00:00:00Z",
+            )
+        self.assertIn("source_stream_id", columns)
+        self.assertEqual(snapshot["facts"]["runtime_minutes"], 111)
+        evidence = snapshot["candidates"]["runtime_minutes"][0]["evidence"][0]
+        self.assertEqual(evidence["source_stream_id"], "old-source")
 
     def test_temporal_runtime_and_genres_make_payload_prediction_ready(self) -> None:
         self._add("runtime_minutes", 124, observation_id="runtime")

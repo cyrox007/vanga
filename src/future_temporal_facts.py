@@ -73,12 +73,23 @@ def _canonical_value(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _clean_stream_id(value: Any, *, fallback: str) -> str:
+    stream_id = " ".join(str(value or "").strip().split()) or fallback
+    if len(stream_id) > 180:
+        raise FutureTemporalFactError("source_stream_id длиннее 180 символов")
+    return stream_id
+
+
 class FutureTemporalFactStore:
     """Temporal-safe факты будущего фильма поверх P9 registry.
 
-    Каждое наблюдение имеет ``known_at`` и ``source_id``. На cutoff берётся
-    последнее наблюдение каждого источника. Если актуальные источники расходятся,
-    значение не выбирается эвристически: возвращается conflict.
+    ``source_id`` указывает на immutable snapshot источника. Для повторных снимков
+    одного логического источника можно передать стабильный ``source_stream_id``.
+    Тогда as-of resolver выбирает последнее наблюдение внутри stream, не нарушая
+    immutable provenance исходных snapshot.
+
+    Если ``source_stream_id`` не задан, stream совпадает с ``source_id`` и старый
+    контракт полностью сохраняется.
 
     Store может работать поверх уже открытого ``FutureReleaseStore``. Это нужно
     batch importer-у, чтобы temporal facts участвовали в той же транзакции, что и
@@ -120,8 +131,15 @@ class FutureTemporalFactStore:
                 value_json VARCHAR NOT NULL,
                 known_at TIMESTAMPTZ NOT NULL,
                 source_id VARCHAR NOT NULL,
-                confidence DOUBLE NOT NULL
+                confidence DOUBLE NOT NULL,
+                source_stream_id VARCHAR
             )
+            """
+        )
+        self.conn.execute(
+            """
+            ALTER TABLE future_release_temporal_facts
+            ADD COLUMN IF NOT EXISTS source_stream_id VARCHAR
             """
         )
         self.conn.execute(
@@ -153,10 +171,16 @@ class FutureTemporalFactStore:
             raise FutureTemporalFactError("observation_id не должен быть пустым")
         if len(observation_id) > 180:
             raise FutureTemporalFactError("observation_id длиннее 180 символов")
+        source_stream_id = _clean_stream_id(
+            payload.get("source_stream_id"),
+            fallback=source_id,
+        )
         self.conn.execute(
             """
-            INSERT INTO future_release_temporal_facts
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO future_release_temporal_facts(
+                observation_id, project_id, fact_type, value_json, known_at,
+                source_id, confidence, source_stream_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 observation_id,
@@ -166,6 +190,7 @@ class FutureTemporalFactStore:
                 _dt(payload.get("known_at"), field_name="known_at"),
                 source_id,
                 _confidence(payload.get("confidence", 1.0)),
+                source_stream_id,
             ],
         )
         return observation_id
@@ -185,17 +210,18 @@ class FutureTemporalFactStore:
             raise FutureTemporalFactError(str(exc)) from exc
         rows = self.conn.execute(
             """
-            SELECT observation_id, value_json, known_at, source_id, confidence
+            SELECT observation_id, value_json, known_at, source_id,
+                   source_stream_id, confidence
             FROM (
                 SELECT *, ROW_NUMBER() OVER (
-                    PARTITION BY source_id
+                    PARTITION BY COALESCE(NULLIF(source_stream_id, ''), source_id)
                     ORDER BY known_at DESC, observation_id DESC
                 ) AS rn
                 FROM future_release_temporal_facts
                 WHERE project_id = ? AND fact_type = ? AND known_at <= ?
             ) ranked
             WHERE rn = 1
-            ORDER BY source_id
+            ORDER BY COALESCE(NULLIF(source_stream_id, ''), source_id), source_id
             """,
             [project_id, fact_type, cutoff_dt],
         ).fetchall()
@@ -209,7 +235,8 @@ class FutureTemporalFactStore:
                     "observation_id": str(row[0]),
                     "known_at": row[2].isoformat(),
                     "source_id": str(row[3]),
-                    "confidence": float(row[4]),
+                    "source_stream_id": str(row[4] or row[3]),
+                    "confidence": float(row[5]),
                 }
             )
         result = list(grouped.values())

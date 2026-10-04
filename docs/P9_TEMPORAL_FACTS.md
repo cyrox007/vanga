@@ -10,9 +10,12 @@
 - `fact_type` — `runtime_minutes`, `genres` или `synopsis`;
 - `value` — нормализованное значение;
 - `known_at` — когда факт уже был известен;
-- `source_id` — источник из `future_release_sources`;
+- `source_id` — immutable snapshot источника из `future_release_sources`;
+- `source_stream_id` — необязательный стабильный идентификатор логического потока повторных snapshot одного источника;
 - `confidence` — уверенность `0..1`;
 - `observation_id` — уникальное наблюдение.
+
+Если `source_stream_id` не задан, он логически совпадает с `source_id`, поэтому старые bundles и ручные факты сохраняют прежнюю семантику.
 
 Inference не обращается к сети. Все факты заранее сохраняются в той же DuckDB, где находится `future_releases`.
 
@@ -21,10 +24,12 @@ Inference не обращается к сети. Все факты заране�
 На заданный cutoff система:
 
 1. берёт только наблюдения с `known_at <= cutoff`;
-2. внутри каждого `source_id` оставляет последнее наблюдение;
-3. группирует одинаковые значения разных источников;
+2. внутри каждого `source_stream_id` оставляет последнее наблюдение; если stream не задан — используется `source_id`;
+3. группирует одинаковые значения разных логических источников;
 4. если осталось одно значение — факт считается разрешённым;
 5. если осталось несколько разных значений — фиксируется conflict.
+
+Так immutable provenance не перезаписывается: ежедневные snapshot получают разные `source_id`, но могут принадлежать одному стабильному stream.
 
 Конфликт `runtime` или `genres` блокирует автоматическую сборку `/predict` payload. Система не выбирает источник по confidence и не маскирует расхождение эвристикой.
 
@@ -144,6 +149,8 @@ python scripts/future_prediction_payload.py wikidata:Q123 \
 }
 ```
 
+Если collector регулярно снимает один и тот же источник, каждый snapshot должен иметь новый immutable `source_id`, а temporal facts могут дополнительно содержать общий `source_stream_id`.
+
 Полный collector batch импортируется обычной командой:
 
 ```bash
@@ -156,15 +163,68 @@ python scripts/future_release_import.py import collector-batch.json
 
 Повтор одного и того же source snapshot остаётся идемпотентным по существующему source/bundle fingerprint contract.
 
-## Что этот инкремент не делает
+## Wikidata runtime/genres collector
 
-Temporal storage и batch-import contract уже готовы для collectors, но конкретный источник данных всё ещё должен быть реализован отдельным adapter-ом.
+Для проектов, у которых в P9 registry уже есть `wikidata_id`, реализован collector `WikidataFutureFactsCollector`.
 
-Следующие P9 инкременты:
+Он получает:
 
-- конкретный воспроизводимый adapter к официальному/публичному future-release источнику;
-- включение adapter-а в refresh pipeline;
-- второй независимый источник release date;
+- `runtime` из Wikidata property `P2047`;
+- `genres` из `P136`;
+- английский label жанра, с fallback на русский.
+
+Collector принципиально **не** использует Wikidata description как `synopsis`: краткое описание сущности не является пересказом сюжета и не должно подменять StoryMap/text-analysis input.
+
+Запуск и атомарный импорт:
+
+```bash
+python scripts/wikidata_future_facts.py \
+  --project-id wikidata:Q123 \
+  --import
+```
+
+Для нескольких проектов `--project-id` можно повторять. Без него берутся проекты из registry в пределах `--limit`.
+
+Raw WDQS JSON кешируется локально и fingerprint входит в collector batch. Inference к сети не обращается.
+
+### Temporal provenance
+
+Каждый Wikidata sync создаёт собственный immutable source snapshot, например:
+
+```text
+wikidata:Q123:facts:20261004T090000Z:7e5c1a2b9d11
+```
+
+При этом temporal facts получают стабильный logical stream:
+
+```text
+wikidata:Q123:facts
+```
+
+Следующий sync создаёт другой `source_id` и новый `known_at`, но сохраняет тот же `source_stream_id`. Поэтому исходные snapshot никогда не переписываются, а as-of resolver выбирает последнее состояние Wikidata на конкретный cutoff вместо ложного конфликта между ежедневными снимками.
+
+Если сам Wikidata snapshot одновременно содержит несколько разных значений runtime, collector не выбирает одно эвристически: runtime не импортируется, а возвращается warning `runtime_conflict_within_wikidata`.
+
+### WDQS v1 → v2
+
+Facts collector query написан на SPARQL 1.1 и не использует `SERVICE wikibase:label`/`bd:serviceParam`. Endpoint настраивается через `--endpoint`.
+
+По умолчанию пока используется:
+
+```text
+https://query.wikidata.org/sparql
+```
+
+Существующий team enrichment пока использует текущий WDQS label service; детали и единый atomic refresh описаны в `docs/P9_WIKIDATA_REFRESH.md`.
+
+Release date намеренно не импортируется этим collector-ом. `P577` может содержать несколько дат и территориальные/событийные различия; объявлять такую дату `worldwide exact` без корректного разбора qualifiers небезопасно.
+
+## Следующие P9 инкременты
+
+Temporal storage, batch import, Wikidata runtime/genres collector и единый atomic Wikidata refresh готовы. Дальше остаются:
+
+- реализовать безопасный release-date adapter с qualifier/territory semantics и вторым независимым источником;
+- получить датированный synopsis из источника, где действительно публикуется synopsis, а не entity description;
 - публичный future-release каталог в `jsint-site`.
 
-Production CatBoost model этим изменением не переобучается и его feature schema не меняется.
+Production CatBoost model этими изменениями не переобучается и его feature schema не меняется.
