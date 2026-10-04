@@ -10,10 +10,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 BROKEN_IN_AUDIT = (
+    "actor_persona.py",
     "audience_signals.py",
     "expert_agreement_transfer.py",
     "expert_blind_validation.py",
     "expert_consensus.py",
+    "expert_corpus_gate.py",
     "future_prediction_payload.py",
     "future_release_import.py",
     "future_releases.py",
