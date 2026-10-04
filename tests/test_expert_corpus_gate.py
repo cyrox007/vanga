@@ -86,6 +86,7 @@ class ExpertCorpusGateTests(unittest.TestCase):
                     "polarity": "supporting",
                     "evidence_kind": "storydiff",
                     "description": "Структурированное подтверждение",
+                    "reference_id": f"storydiff-{idx}",
                     "confidence": 0.9,
                 }
             )
