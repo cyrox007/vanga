@@ -54,9 +54,14 @@ def _validate_database(path: Path) -> None:
         conn.close()
 
 
+def _freshness_report(target: Path) -> dict:
+    data_dir = Path(config.ABSPATH) / "data" / "imdb"
+    return build_freshness_report(target, data_dir=data_dir)
+
+
 def _write_freshness_manifest(target: Path) -> dict:
     data_dir = Path(config.ABSPATH) / "data" / "imdb"
-    report = build_freshness_report(target, data_dir=data_dir)
+    report = _freshness_report(target)
     manifest = write_freshness_manifest(
         report,
         data_dir / "freshness-manifest.json",
@@ -74,6 +79,19 @@ def _write_freshness_manifest(target: Path) -> dict:
         )
     logger.info("IMDb freshness manifest записан: %s", manifest)
     return report
+
+
+def _database_is_older_than_downloaded_datasets(target: Path) -> bool:
+    """Проверяет repairable stale-state после неудачной предыдущей materialization.
+
+    HTTP metadata/archive могут уже быть опубликованы локально, хотя rebuild
+    DuckDB завершился ошибкой. В таком случае следующий download честно вернёт
+    ``changed=False``. Сама БД при этом старше скачанных архивов — это достаточная
+    причина повторить materialization независимо от результата текущей загрузки.
+    """
+    report = _freshness_report(target)
+    reasons = set(report.get("blocking_reasons") or [])
+    return "database_older_than_downloaded_datasets" in reasons
 
 
 def _capture_rating_history(target: Path, freshness_report: dict) -> None:
@@ -159,13 +177,19 @@ def main() -> int:
                 exc,
             )
         else:
-            logger.info(
-                "IMDb datasets не изменились и схема актуальна — "
-                "пересборка БД не требуется"
-            )
-            report = _write_freshness_manifest(target)
-            _capture_rating_history(target, report)
-            return 0
+            if _database_is_older_than_downloaded_datasets(target):
+                logger.warning(
+                    "IMDb datasets не изменились на этом запуске, но БД старше "
+                    "уже скачанных архивов — повторяем прерванную materialization"
+                )
+            else:
+                logger.info(
+                    "IMDb datasets не изменились, схема и materialization актуальны — "
+                    "пересборка БД не требуется"
+                )
+                report = _write_freshness_manifest(target)
+                _capture_rating_history(target, report)
+                return 0
 
     logger.info("Собираем новую IMDb БД в staging-файле")
     _build_staged_database(target)
