@@ -16,6 +16,14 @@ def main() -> int:
     parser.add_argument("--runtime", type=int)
     parser.add_argument("--genre", action="append", dest="genres")
     parser.add_argument("--synopsis")
+    parser.add_argument(
+        "--allow-current-imdb-snapshot",
+        action="store_true",
+        help=(
+            "Разрешить недатированный текущий IMDb snapshot как fallback runtime/genres. "
+            "Такой payload помечается historical_backtest_safe=false."
+        ),
+    )
     parser.add_argument("--future-db")
     parser.add_argument("--imdb-db")
     parser.add_argument("--source-db")
@@ -40,6 +48,7 @@ def main() -> int:
         runtime_override=args.runtime,
         genres_override=args.genres,
         synopsis=args.synopsis,
+        allow_current_imdb_snapshot=args.allow_current_imdb_snapshot,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result["prediction_ready"] else 2
