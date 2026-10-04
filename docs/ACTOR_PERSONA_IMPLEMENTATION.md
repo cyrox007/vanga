@@ -15,7 +15,8 @@ Actor Persona реализован как отдельный temporal-safe сл�
 - role function;
 - meta-role type;
 - genres/archetypes;
-- признаки iconic/meta relevance и confidence.
+- признаки iconic/meta relevance и confidence;
+- отдельные temporal links `role appearance → StoryMap → character node`.
 
 Поддерживаемые meta-role типы:
 
@@ -48,6 +49,18 @@ IMDb baseline намеренно **не угадывает**:
 - что два одноимённых персонажа из разных работ являются одной сущностью.
 
 Такие связи добавляются только из подтверждённой структурированной аннотации с provenance.
+
+## Связь со StoryMap
+
+`ActorPersonaStoryMapLinks` хранит связь конкретного appearance с `story_map_id` и `story_node_id`. У связи собственные `known_at`, source provenance и confidence.
+
+Это позволяет сохранять архитектурную цепочку:
+
+```text
+Actor → Historical Persona → Current Character → StoryMap Role
+```
+
+Character identity и StoryMap node намеренно не являются одной сущностью. StoryMap может быть перестроен или уточнён без изменения исторического actor/character credit.
 
 ## CLI
 
