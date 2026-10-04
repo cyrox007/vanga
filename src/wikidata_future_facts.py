@@ -45,6 +45,25 @@ def _observation_id(project_qid: str, fact_type: str, retrieved_at: datetime, va
     )[:180]
 
 
+def _source_snapshot_id(
+    project_qid: str,
+    retrieved_at: datetime,
+    *,
+    runtime_values: list[int],
+    genre_values: list[str],
+) -> str:
+    digest = _fingerprint(
+        {
+            "runtime": runtime_values,
+            "genres": genre_values,
+        }
+    )[:12]
+    return (
+        f"wikidata:{project_qid}:facts:"
+        f"{retrieved_at.strftime('%Y%m%dT%H%M%SZ')}:{digest}"
+    )[:160]
+
+
 class WikidataFutureFactsCollector:
     """Собирает temporal-safe runtime и genres для проектов P9 registry.
 
@@ -52,6 +71,11 @@ class WikidataFutureFactsCollector:
     Запрос использует только SPARQL 1.1 конструкции: без
     ``SERVICE wikibase:label`` и других Blazegraph-only расширений. Endpoint
     задаётся явно, поэтому переход с WDQS v1 на v2 не требует менять контракт.
+
+    Каждый sync создаёт immutable ``source_id`` snapshot, а temporal facts получают
+    стабильный ``source_stream_id`` вида ``wikidata:<QID>:facts``. Поэтому история
+    источника сохраняется без перезаписи provenance, а as-of resolver всё равно
+    понимает последовательные snapshots как один логический поток.
     """
 
     def __init__(
@@ -276,7 +300,15 @@ ORDER BY ?film ?genre
         all_qids = sorted(set(runtimes) | set(genres))
         for film_qid in all_qids:
             project = project_by_qid[film_qid]
-            source_id = f"wikidata:{film_qid}:facts"
+            runtime_values = sorted(runtimes.get(film_qid, set()))
+            genre_values = sorted(genres.get(film_qid, set()), key=str.casefold)
+            source_stream_id = f"wikidata:{film_qid}:facts"
+            source_id = _source_snapshot_id(
+                film_qid,
+                retrieved_at,
+                runtime_values=runtime_values,
+                genre_values=genre_values,
+            )
             sources.append(
                 {
                     "source_id": source_id,
@@ -287,7 +319,6 @@ ORDER BY ?film ?genre
                 }
             )
 
-            runtime_values = sorted(runtimes.get(film_qid, set()))
             if len(runtime_values) == 1:
                 runtime = runtime_values[0]
                 facts.append(
@@ -303,6 +334,7 @@ ORDER BY ?film ?genre
                         "value": runtime,
                         "known_at": observed_iso,
                         "source_id": source_id,
+                        "source_stream_id": source_stream_id,
                         "confidence": 0.9,
                     }
                 )
@@ -315,7 +347,6 @@ ORDER BY ?film ?genre
                     }
                 )
 
-            genre_values = sorted(genres.get(film_qid, set()), key=str.casefold)
             if genre_values:
                 facts.append(
                     {
@@ -330,6 +361,7 @@ ORDER BY ?film ?genre
                         "value": genre_values,
                         "known_at": observed_iso,
                         "source_id": source_id,
+                        "source_stream_id": source_stream_id,
                         "confidence": 0.85,
                     }
                 )
