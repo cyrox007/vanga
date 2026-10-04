@@ -84,7 +84,7 @@ class WikidataFutureFactsTests(unittest.TestCase):
         with self.assertRaises(WikidataFutureFactsError):
             WikidataFutureFactsCollector.build_query(["bad-qid"])
 
-    def test_normalize_emits_runtime_and_sorted_genres(self) -> None:
+    def test_normalize_emits_runtime_sorted_genres_and_source_stream(self) -> None:
         bundle, warnings = WikidataFutureFactsCollector.normalize(
             _facts_raw(),
             projects=[self.project],
@@ -92,12 +92,18 @@ class WikidataFutureFactsTests(unittest.TestCase):
         )
         self.assertEqual(warnings, [])
         self.assertEqual(len(bundle["sources"]), 1)
-        self.assertEqual(bundle["sources"][0]["source_id"], "wikidata:Q100:facts")
+        snapshot_source_id = bundle["sources"][0]["source_id"]
+        self.assertTrue(snapshot_source_id.startswith("wikidata:Q100:facts:20261004T100000Z:"))
         facts = {item["fact_type"]: item for item in bundle["temporal_facts"]}
         self.assertEqual(facts["runtime_minutes"]["value"], 132)
         self.assertEqual(
             facts["genres"]["value"],
             ["drama film", "science fiction film"],
+        )
+        self.assertEqual(facts["runtime_minutes"]["source_id"], snapshot_source_id)
+        self.assertEqual(
+            facts["runtime_minutes"]["source_stream_id"],
+            "wikidata:Q100:facts",
         )
         self.assertEqual(facts["runtime_minutes"]["known_at"], self.retrieved.isoformat())
 
@@ -120,7 +126,7 @@ class WikidataFutureFactsTests(unittest.TestCase):
         self.assertNotIn("runtime_minutes", fact_types)
         self.assertIn("genres", fact_types)
 
-    def test_stable_source_id_allows_latest_sync_to_replace_runtime(self) -> None:
+    def test_immutable_snapshots_share_stream_and_latest_replaces_runtime(self) -> None:
         first_bundle, _ = WikidataFutureFactsCollector.normalize(
             _facts_raw(),
             projects=[self.project],
@@ -134,6 +140,14 @@ class WikidataFutureFactsTests(unittest.TestCase):
             second_raw,
             projects=[self.project],
             retrieved_at=second_at,
+        )
+        self.assertNotEqual(
+            first_bundle["sources"][0]["source_id"],
+            second_bundle["sources"][0]["source_id"],
+        )
+        self.assertEqual(
+            first_bundle["temporal_facts"][0]["source_stream_id"],
+            second_bundle["temporal_facts"][0]["source_stream_id"],
         )
 
         def batch(bundle, batch_id, fingerprint):
@@ -160,6 +174,9 @@ class WikidataFutureFactsTests(unittest.TestCase):
         self.assertEqual(first["facts"]["runtime_minutes"], 132)
         self.assertEqual(second["facts"]["runtime_minutes"], 140)
         self.assertNotIn("runtime_minutes", second["conflicts"])
+        evidence = second["candidates"]["runtime_minutes"][0]["evidence"][0]
+        self.assertEqual(evidence["source_stream_id"], "wikidata:Q100:facts")
+        self.assertEqual(evidence["source_id"], second_bundle["sources"][0]["source_id"])
 
     def test_collect_caches_and_emits_importer_compatible_batch(self) -> None:
         queries: list[str] = []
