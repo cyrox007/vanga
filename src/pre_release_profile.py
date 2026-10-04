@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.pre_release_analysis import (
+    PersonHistory,
     _coverage_level,
     _person_history,
     build_pre_release_profile,
@@ -18,7 +19,32 @@ def _clean_unique(values: list[str] | None) -> list[str]:
     return result
 
 
-def _ratio_known(items: list[Any]) -> float:
+def _history_from_context(item: dict[str, Any] | None, role: str) -> PersonHistory:
+    payload = item if isinstance(item, dict) else {}
+    canonical = " ".join(str(payload.get("canonical_name") or "").strip().split())
+    imdb_id = str(payload.get("imdb_id") or "").strip() or None
+    try:
+        prior_count = int(payload.get("prior_count", payload.get("works_count", 0)) or 0)
+    except (TypeError, ValueError):
+        prior_count = 0
+    try:
+        avg_rating = (
+            float(payload.get("avg_rating"))
+            if payload.get("avg_rating") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        avg_rating = None
+    return PersonHistory(
+        canonical,
+        role,
+        imdb_id,
+        prior_count,
+        avg_rating,
+    )
+
+
+def _ratio_known(items: list[PersonHistory]) -> float:
     if not items:
         return 0.0
     return sum(1 for item in items if item.known) / len(items)
@@ -30,38 +56,66 @@ def build_resolved_pre_release_profile(
     year: int,
     runtime: int,
     requested_directors: list[str],
-    resolved_directors: list[str],
     requested_writer: str | None,
-    resolved_writer: str | None,
     requested_actors: list[str],
-    resolved_actors: list[str],
+    model_people_context: dict[str, Any],
     synopsis: str | None,
     rating: float,
     uncertainty: dict | None,
     contributions: dict,
 ) -> dict:
-    """Строит diagnostic profile из тех же canonical inputs, что и rating model.
+    """Строит diagnostic profile из exact people context rating-модели.
 
-    Legacy profile исторически повторно искал исходные строки и учитывал только
-    primary director + top-3 cast. Из-за этого русское имя могло быть успешно
-    разрешено основной моделью, но отображаться неизвестным в profile. Здесь
-    сначала используем уже resolved canonical inputs, а coverage считаем по всей
-    режиссёрской команде и всему переданному cast.
+    `model_people_context` сформирован через тот же `_get_people_info`, который
+    использует feature builder. Поэтому профиль больше не выполняет независимый
+    выбор кандидата по исходной строке и не расходится с alias-resolution модели.
+    Coverage считается по всей режиссёрской команде и всему переданному cast.
     """
 
     requested_directors = _clean_unique(requested_directors)
-    resolved_directors = _clean_unique(resolved_directors) or requested_directors
     requested_actors = _clean_unique(requested_actors)
-    resolved_actors = _clean_unique(resolved_actors) or requested_actors
-    clean_writer = " ".join(str(resolved_writer or requested_writer or "").strip().split())
+    context = model_people_context if isinstance(model_people_context, dict) else {}
+    director_contexts = [
+        item for item in (context.get("directors") or []) if isinstance(item, dict)
+    ]
+    cast_contexts = [
+        item for item in (context.get("cast") or []) if isinstance(item, dict)
+    ]
+    writer_context = context.get("writer") if isinstance(context.get("writer"), dict) else {}
 
+    director_histories = [
+        _history_from_context(item, "director") for item in director_contexts
+    ]
+    cast_histories = [_history_from_context(item, "actor") for item in cast_contexts]
+    writer_history = _history_from_context(writer_context, "writer")
+
+    # Defensive fallback нужен только для прямых вызовов wrapper вне API.
+    if not director_histories:
+        director_histories = [
+            _person_history(conn, name, "director", year)
+            for name in requested_directors
+        ]
+    if not cast_histories and requested_actors:
+        cast_histories = [
+            _person_history(conn, name, "actor", year)
+            for name in requested_actors
+        ]
+    if not writer_history.input and requested_writer:
+        writer_history = _person_history(conn, requested_writer, "writer", year)
+
+    resolved_directors = [item.input for item in director_histories if item.input]
+    resolved_actors = [item.input for item in cast_histories if item.input]
+    resolved_writer = writer_history.input or None
     primary_director = resolved_directors[0] if resolved_directors else ""
+
+    # Legacy builder сохраняет структуру strengths/weaknesses/synopsis, но получает
+    # canonical names и потому уже не спорит с моделью по primary/top-3.
     profile = build_pre_release_profile(
         conn=conn,
         year=year,
         runtime=runtime,
         director=primary_director,
-        writer=clean_writer or None,
+        writer=resolved_writer,
         actors=resolved_actors,
         synopsis=synopsis,
         rating=rating,
@@ -69,21 +123,10 @@ def build_resolved_pre_release_profile(
         contributions=contributions,
     )
 
-    director_histories = [
-        _person_history(conn, name, "director", year)
-        for name in resolved_directors
-    ]
-    writer_history = _person_history(conn, clean_writer or None, "writer", year)
-    cast_histories = [
-        _person_history(conn, name, "actor", year)
-        for name in resolved_actors
-    ]
-
     director_known_ratio = _ratio_known(director_histories)
     cast_known_ratio = _ratio_known(cast_histories)
     writer_known = 1.0 if writer_history.known else 0.0
 
-    # Этот score отражает полный person context schema v15, а не legacy top-3.
     familiarity = round(
         max(
             0.0,
@@ -175,7 +218,6 @@ def build_resolved_pre_release_profile(
                 else _person_history(conn, None, "director", year).to_dict()
             ),
             "writer": writer_history.to_dict(),
-            # Сохраняем старое поле для UI, но явно это только legacy top-3.
             "actors": [item.to_dict() for item in cast_histories[:3]],
             "director_team": [item.to_dict() for item in director_histories],
             "full_cast": [item.to_dict() for item in cast_histories],
@@ -187,10 +229,11 @@ def build_resolved_pre_release_profile(
     profile["method"] = "pre_release_profile_v3"
     profile["input_parity"] = {
         "uses_prediction_resolution": True,
+        "context_source": context.get("source"),
         "requested_directors": requested_directors,
         "resolved_directors": resolved_directors,
         "requested_writer": str(requested_writer or "") or None,
-        "resolved_writer": clean_writer or None,
+        "resolved_writer": resolved_writer,
         "requested_cast": requested_actors,
         "resolved_cast": resolved_actors,
     }
