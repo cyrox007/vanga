@@ -9,6 +9,12 @@ class Config:
         "VANGA_IMDB_DB",
         str(Path(ABSPATH) / "imdb.duckdb"),
     )
+    # P7 point-in-time история IMDb rating физически отделена от текущего
+    # snapshot IMDb. База append-only: прошлые наблюдения не перезаписываются.
+    RATING_HISTORY_DB_PATH = os.getenv(
+        "VANGA_RATING_HISTORY_DB",
+        str(Path(ABSPATH) / "rating_history.duckdb"),
+    )
     ENRICHMENT_DB_PATH = os.getenv(
         "VANGA_ENRICHMENT_DB",
         str(Path(ABSPATH) / "enrichment.duckdb"),
