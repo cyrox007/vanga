@@ -17,15 +17,18 @@ DEFAULT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 VANGA_DIR="${VANGA_DIR:-${DEFAULT_ROOT}}"
 VANGA_USER="${VANGA_USER:-$(stat -c '%U' "${VANGA_DIR}" 2>/dev/null || printf 'vanga')}"
+VANGA_GROUP="${VANGA_GROUP:-$(stat -c '%G' "${VANGA_DIR}" 2>/dev/null || printf '%s' "${VANGA_USER}")}"
 VANGA_SERVICE="${VANGA_SERVICE:-vanga.service}"
 VANGA_RETRAIN_SERVICE="${VANGA_RETRAIN_SERVICE:-vanga-retrain.service}"
 VANGA_HEALTH_URL="${VANGA_HEALTH_URL:-http://127.0.0.1:9100/health}"
 VANGA_BRANCH="${VANGA_BRANCH:-main}"
+VANGA_ORCHESTRATION_LOCK="${VANGA_ORCHESTRATION_LOCK:-${VANGA_DIR}/data/runtime/orchestration.lock}"
 
 ASSUME_YES=0
 FULL_RETRAIN=0
 SKIP_DB=0
 SKIP_PIP=0
+LOCK_HELD=0
 
 log() {
     printf '[Vanga update] %s\n' "$*"
@@ -77,6 +80,7 @@ command -v git >/dev/null || fail "Не найден git"
 command -v systemctl >/dev/null || fail "Не найден systemctl"
 command -v curl >/dev/null || fail "Не найден curl"
 command -v sudo >/dev/null || fail "Не найден sudo"
+command -v flock >/dev/null || fail "Не найден flock (util-linux)"
 
 run_vanga() {
     sudo -u "${VANGA_USER}" -- "$@"
@@ -86,6 +90,8 @@ run_vanga_env() {
     sudo -u "${VANGA_USER}" -- env \
         PYTHONUNBUFFERED=1 \
         MALLOC_ARENA_MAX=2 \
+        VANGA_ORCHESTRATION_LOCK="${VANGA_ORCHESTRATION_LOCK}" \
+        VANGA_ORCHESTRATION_LOCK_HELD=1 \
         VANGA_TRAIN_MIN_FREE_DISK_GB="${VANGA_TRAIN_MIN_FREE_DISK_GB:-4}" \
         VANGA_TRAIN_MAX_MODEL_SIZE_MB="${VANGA_TRAIN_MAX_MODEL_SIZE_MB:-512}" \
         VANGA_TRAIN_MAX_MAE_REGRESSION="${VANGA_TRAIN_MAX_MAE_REGRESSION:-0.03}" \
@@ -104,6 +110,32 @@ health_check() {
     return 1
 }
 
+acquire_orchestration_lock() {
+    local lock_dir
+    lock_dir="$(dirname -- "${VANGA_ORCHESTRATION_LOCK}")"
+    install -d -o "${VANGA_USER}" -g "${VANGA_GROUP}" -m 0750 "${lock_dir}"
+    touch "${VANGA_ORCHESTRATION_LOCK}"
+    chown "${VANGA_USER}:${VANGA_GROUP}" "${VANGA_ORCHESTRATION_LOCK}"
+    chmod 0640 "${VANGA_ORCHESTRATION_LOCK}"
+    exec 9<>"${VANGA_ORCHESTRATION_LOCK}"
+    if ! flock --exclusive --nonblock 9; then
+        fail "Уже выполняется другой updater/retrain: ${VANGA_ORCHESTRATION_LOCK}"
+    fi
+    LOCK_HELD=1
+    log "Orchestration lock получен: ${VANGA_ORCHESTRATION_LOCK}"
+}
+
+release_orchestration_lock() {
+    if [[ ${LOCK_HELD} -eq 1 ]]; then
+        flock --unlock 9 || true
+        exec 9>&-
+        LOCK_HELD=0
+        log "Orchestration lock освобождён"
+    fi
+}
+
+trap release_orchestration_lock EXIT
+
 log "Каталог: ${VANGA_DIR}"
 log "Пользователь: ${VANGA_USER}"
 log "Ветка: ${VANGA_BRANCH}"
@@ -119,6 +151,10 @@ if [[ ${ASSUME_YES} -ne 1 ]]; then
     read -r answer
     [[ "${answer}" =~ ^[YyДд]$ ]] || fail "Обновление отменено пользователем."
 fi
+
+# С этого места начинаются изменения runtime, поэтому общий lock должен быть
+# получен до git/pip/DB/smoke. Timer использует тот же файл через retrain_job.py.
+acquire_orchestration_lock
 
 log "Получаю актуальный ${VANGA_BRANCH}..."
 run_vanga git -C "${VANGA_DIR}" fetch --prune origin "${VANGA_BRANCH}"
@@ -170,6 +206,11 @@ if [[ ${FULL_RETRAIN} -eq 1 ]]; then
         fail "${VANGA_RETRAIN_SERVICE} уже выполняется. Не запускаю второй retrain."
     fi
 
+    # Полный retrain сам получает тот же lock в retrain_job.py. Освобождаем наш
+    # descriptor непосредственно перед systemctl start. Если другой процесс
+    # успеет забрать lock, service завершится отказом вместо параллельной работы.
+    release_orchestration_lock
+
     log "Запускаю полный retrain через ${VANGA_RETRAIN_SERVICE}..."
     if ! systemctl start "${VANGA_RETRAIN_SERVICE}"; then
         systemctl status "${VANGA_RETRAIN_SERVICE}" --no-pager -l || true
@@ -177,8 +218,7 @@ if [[ ${FULL_RETRAIN} -eq 1 ]]; then
         fail "Полный retrain завершился ошибкой. Активная модель не переключается при неудачной публикации."
     fi
 
-    log "Retrain завершён. Перезапускаю inference, чтобы гарантированно открыть новое поколение и новую DuckDB..."
-    systemctl restart "${VANGA_SERVICE}"
+    log "Retrain завершён. Проверяю inference после обязательного restart из ExecStopPost..."
     if ! health_check; then
         systemctl status "${VANGA_SERVICE}" --no-pager -l || true
         journalctl -u "${VANGA_SERVICE}" --no-pager -n 100 || true
@@ -191,5 +231,6 @@ fi
 log "Проверяю, что API слушает только локальный health endpoint..."
 health_check >/dev/null || fail "Финальный health-check не пройден."
 
+release_orchestration_lock
 log "Обновление завершено успешно."
 log "Порт 9100 не должен публиковаться наружу; скрипт не меняет firewall/nginx."
