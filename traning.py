@@ -59,6 +59,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="отключить team-wide director↔writer/director↔actor и воспроизвести schema v14",
     )
+    parser.add_argument(
+        "--accept-uncomparable-baseline",
+        action="store_true",
+        help=(
+            "одноразово разрешить публикацию при смене snapshot/holdout contract; "
+            "не отключает MAE gate для действительно сопоставимых моделей"
+        ),
+    )
     parser.add_argument("--iterations", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=10000)
     parser.add_argument("--max-batches", type=int, default=None)
@@ -102,10 +110,11 @@ def _log_evaluation_summary(metadata: dict, size_bytes: int) -> None:
     logger.info("RMSE=%s", _metric_text(metadata, "test_rmse"))
     logger.info("R²=%s", _metric_text(metadata, "test_r2"))
     logger.info(
-        "holdout=%s-%s; test_rows=%s",
+        "holdout=%s-%s; test_rows=%s; test_sha256=%s",
         metadata.get("test_year_from"),
         metadata.get("test_year_to"),
         metadata.get("test_rows"),
+        metadata.get("test_dataset_fingerprint_sha256"),
     )
     logger.info("model_size_mb=%.2f", size_bytes / 1024 / 1024)
     logger.info("models/current.json НЕ ИЗМЕНЁН")
@@ -121,6 +130,10 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--batch-size должно быть положительным числом")
     if args.max_batches is not None and args.max_batches < 1:
         raise SystemExit("--max-batches должно быть положительным числом")
+    if args.accept_uncomparable_baseline and (args.smoke or args.evaluation_only):
+        raise SystemExit(
+            "--accept-uncomparable-baseline допустим только для FULL publication mode"
+        )
 
     coverage_enabled = not args.without_coverage_features
     creative_enabled = coverage_enabled and not args.without_creative_team_features
@@ -225,7 +238,7 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("=" * 60)
     logger.info("ЗАПУСК ОБУЧЕНИЯ CATBOOST")
     logger.info(
-        "Режим: %s; schema=%s; full_cast=%s; cast_pair=%s; dual_role=%s; team_collaboration=%s; stable_target_max_year=%s; iterations=%s; batch_size=%s; max_batches=%s",
+        "Режим: %s; schema=%s; full_cast=%s; cast_pair=%s; dual_role=%s; team_collaboration=%s; stable_target_max_year=%s; iterations=%s; batch_size=%s; max_batches=%s; accept_uncomparable_baseline=%s",
         mode,
         schema_label,
         "on" if full_cast_enabled else "off",
@@ -236,6 +249,7 @@ def main(argv: list[str] | None = None) -> None:
         iterations,
         args.batch_size,
         args.max_batches,
+        args.accept_uncomparable_baseline,
     )
     logger.info("=" * 60)
 
@@ -292,6 +306,9 @@ def main(argv: list[str] | None = None) -> None:
     metadata["cast_pair_features_version"] = 1 if cast_pair_enabled else 0
     metadata["dual_role_features_version"] = 1 if dual_role_enabled else 0
     metadata["team_collaboration_features_version"] = 1 if team_collaboration_enabled else 0
+    metadata["quality_gate_allow_uncomparable"] = bool(
+        args.accept_uncomparable_baseline
+    )
     if freshness_report is not None:
         metadata["imdb_data_freshness"] = {
             "as_of": freshness_report.get("as_of"),
@@ -341,9 +358,6 @@ def main(argv: list[str] | None = None) -> None:
     metadata["training_mode"] = "temporal_validation_then_stable_refit"
     metadata["published_metrics_source"] = "separate_temporal_validation_model"
 
-    # На малом VPS нельзя одновременно держать validation и refit CatBoost.
-    # Метрики/feature schema уже сохранены в metadata, поэтому освобождаем модель
-    # до второго disk-first прохода.
     del validation_model
     gc.collect()
     logger.info("Temporal validation model освобождена перед FINAL REFIT")
