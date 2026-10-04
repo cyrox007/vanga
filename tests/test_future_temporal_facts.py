@@ -70,7 +70,15 @@ class FutureTemporalFactsTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def _add(self, fact_type: str, value, *, source="source-a", known_at="2026-10-02T00:00:00Z", observation_id=None):
+    def _add(
+        self,
+        fact_type: str,
+        value,
+        *,
+        source="source-a",
+        known_at="2026-10-02T00:00:00Z",
+        observation_id=None,
+    ):
         with FutureTemporalFactStore(self.db) as store:
             return store.add_fact(
                 {
@@ -83,6 +91,14 @@ class FutureTemporalFactsTests(unittest.TestCase):
                     "confidence": 0.9,
                 }
             )
+
+    def _builder(self) -> TemporalFuturePredictionPayloadBuilder:
+        return TemporalFuturePredictionPayloadBuilder(
+            future_db_path=self.db,
+            imdb_db_path=self.imdb,
+            source_db_path=self.source,
+            production_db_path=self.production,
+        )
 
     def test_fact_is_hidden_before_known_at_and_visible_after(self) -> None:
         self._add("runtime_minutes", 123)
@@ -101,6 +117,24 @@ class FutureTemporalFactsTests(unittest.TestCase):
         self.assertIn("genres", snapshot["conflicts"])
         self.assertNotIn("genres", snapshot["facts"])
         self.assertEqual(len(snapshot["candidates"]["genres"]), 2)
+
+    def test_genre_order_does_not_create_false_conflict(self) -> None:
+        self._add(
+            "genres",
+            ["Sci-Fi", "Drama"],
+            source="source-a",
+            observation_id="genre-a",
+        )
+        self._add(
+            "genres",
+            ["Drama", "Sci-Fi"],
+            source="source-b",
+            observation_id="genre-b",
+        )
+        with FutureTemporalFactStore(self.db) as store:
+            snapshot = store.snapshot_as_of("film-a", "2026-10-03T00:00:00Z")
+        self.assertEqual(snapshot["conflicts"], [])
+        self.assertEqual(snapshot["facts"]["genres"], ["Drama", "Sci-Fi"])
 
     def test_latest_observation_per_source_replaces_older_value(self) -> None:
         self._add(
@@ -127,13 +161,7 @@ class FutureTemporalFactsTests(unittest.TestCase):
         self._add("runtime_minutes", 124, observation_id="runtime")
         self._add("genres", ["Drama", "Sci-Fi"], observation_id="genres")
         self._add("synopsis", "A dated pre-release synopsis.", observation_id="synopsis")
-        builder = TemporalFuturePredictionPayloadBuilder(
-            future_db_path=self.db,
-            imdb_db_path=self.imdb,
-            source_db_path=self.source,
-            production_db_path=self.production,
-        )
-        result = builder.build("film-a", "2026-10-03T00:00:00Z")
+        result = self._builder().build("film-a", "2026-10-03T00:00:00Z")
         self.assertTrue(result["prediction_ready"])
         self.assertEqual(result["blockers"], [])
         self.assertEqual(result["request"]["runtime"], 124)
@@ -144,17 +172,39 @@ class FutureTemporalFactsTests(unittest.TestCase):
         self.assertEqual(result["input_sources"]["synopsis"], "p9_temporal_fact")
         self.assertTrue(result["temporal_contract"]["historical_backtest_safe"])
 
+    def test_explicit_runtime_keeps_priority_over_temporal_runtime(self) -> None:
+        self._add("runtime_minutes", 124, observation_id="runtime")
+        self._add("genres", ["Drama"], observation_id="genres")
+        result = self._builder().build(
+            "film-a",
+            "2026-10-03T00:00:00Z",
+            runtime_override=140,
+        )
+        self.assertTrue(result["prediction_ready"])
+        self.assertEqual(result["request"]["runtime"], 140)
+        self.assertEqual(result["request"]["genres"], ["Drama"])
+        self.assertEqual(result["input_sources"]["runtime"], "override")
+        self.assertEqual(result["input_sources"]["genres"], "p9_temporal_fact")
+
+    def test_explicit_genres_keep_priority_over_temporal_genres(self) -> None:
+        self._add("runtime_minutes", 124, observation_id="runtime")
+        self._add("genres", ["Comedy"], observation_id="genres")
+        result = self._builder().build(
+            "film-a",
+            "2026-10-03T00:00:00Z",
+            genres_override=["Drama"],
+        )
+        self.assertTrue(result["prediction_ready"])
+        self.assertEqual(result["request"]["runtime"], 124)
+        self.assertEqual(result["request"]["genres"], ["Drama"])
+        self.assertEqual(result["input_sources"]["runtime"], "p9_temporal_fact")
+        self.assertEqual(result["input_sources"]["genres"], "override")
+
     def test_genre_conflict_blocks_prediction(self) -> None:
         self._add("runtime_minutes", 124, observation_id="runtime")
         self._add("genres", ["Drama"], source="source-a", observation_id="genre-a")
         self._add("genres", ["Comedy"], source="source-b", observation_id="genre-b")
-        builder = TemporalFuturePredictionPayloadBuilder(
-            future_db_path=self.db,
-            imdb_db_path=self.imdb,
-            source_db_path=self.source,
-            production_db_path=self.production,
-        )
-        result = builder.build("film-a", "2026-10-03T00:00:00Z")
+        result = self._builder().build("film-a", "2026-10-03T00:00:00Z")
         self.assertFalse(result["prediction_ready"])
         self.assertIn("genres_fact_conflict", result["blockers"])
         self.assertIsNone(result["request"])
