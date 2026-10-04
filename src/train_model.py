@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import gc
 import csv
+import hashlib
 import json
+import math
 import os
 import pickle
 import shutil
@@ -51,6 +53,7 @@ class PreparedDataset:
     train_rows: int
     test_rows: int
     batches_processed: int
+    test_dataset_fingerprint_sha256: str
 
     def cleanup(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
@@ -101,6 +104,17 @@ def _write_rows(
         lineterminator="\n",
     )
     return len(frame)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _write_column_description(
@@ -256,10 +270,12 @@ def prepare_training_dataset(
             f"диапазон={min_year}-{max_year}"
         )
 
+    test_fingerprint = _sha256_file(test_path)
     logger.info(
-        "Disk-first dataset готов: train=%s строк, test=%s строк, каталог=%s",
+        "Disk-first dataset готов: train=%s строк, test=%s строк, test_sha256=%s, каталог=%s",
         train_rows,
         test_rows,
+        test_fingerprint,
         root,
     )
 
@@ -279,6 +295,7 @@ def prepare_training_dataset(
         train_rows=train_rows,
         test_rows=test_rows,
         batches_processed=batches_processed,
+        test_dataset_fingerprint_sha256=test_fingerprint,
     )
 
 
@@ -360,9 +377,6 @@ def train_catboost_model(
             verbose=100,
             thread_count=1,
             used_ram_limit="900mb",
-            # Сдерживаем рост CTR-таблиц для высококардинальных персональных ID.
-            # Это критично для VPS с 2 ГБ RAM: модель должна оставаться пригодной
-            # для последующей загрузки inference-процессом.
             model_size_reg=5.0,
             ctr_leaf_count_limit=50_000,
             max_ctr_complexity=1,
@@ -373,8 +387,6 @@ def train_catboost_model(
         model.fit(train_pool)
         logger.info("Обучение завершено")
 
-        # Большой train Pool больше не нужен. На малом сервере удержание его
-        # одновременно с test Pool вызывало активный swap и многоминутный I/O stall.
         del train_pool
         gc.collect()
         logger.info("Тренировочный Pool освобождён перед оценкой")
@@ -393,9 +405,6 @@ def train_catboost_model(
         rmse = float(np.sqrt(mean_squared_error(y_test, y_pred)))
         r2 = float(r2_score(y_test, y_pred))
 
-        # Эмпирическая калибровка неопределённости на временном holdout.
-        # Мы не выдаём её за вероятность конкретного прогноза: это распределение
-        # абсолютной ошибки модели на последних двух календарных годах выборки.
         error_quantiles = calibrate_absolute_error_quantiles(
             y_test,
             y_pred,
@@ -416,8 +425,6 @@ def train_catboost_model(
         )
         logger.info("=" * 60)
 
-        # После расчёта метрик test Pool и массивы прогнозов больше не нужны.
-        # Освобождаем их до интерпретации и публикации модели.
         del test_pool, y_test, y_pred
         gc.collect()
         logger.info("Тестовый Pool освобождён после оценки")
@@ -450,6 +457,7 @@ def train_catboost_model(
             "total_rows": prepared.total_rows,
             "train_rows": prepared.train_rows,
             "test_rows": prepared.test_rows,
+            "test_dataset_fingerprint_sha256": prepared.test_dataset_fingerprint_sha256,
             "batches_processed": prepared.batches_processed,
         }
         return model, metadata
@@ -465,12 +473,7 @@ def _model_root() -> Path:
 
 
 def resolve_current_model_path() -> Path:
-    """Возвращает путь к активной модели.
-
-    Новые обучения публикуются как неизменяемые каталоги releases/<generation>.
-    Переключение происходит атомарной заменой файла current.json. Для старых
-    установок оставлен fallback на models/model.cbm.
-    """
+    """Возвращает путь к активной модели."""
     root = _model_root()
     pointer = root / "current.json"
     if pointer.exists():
@@ -510,26 +513,78 @@ def _read_active_metadata() -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _finite_metric(metadata: dict, name: str) -> float | None:
+    try:
+        value = float(metadata[name])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _freshness_fingerprint(metadata: dict) -> str | None:
+    payload = metadata.get("imdb_data_freshness")
+    if not isinstance(payload, dict):
+        return None
+    value = str(payload.get("logical_fingerprint_sha256") or "").strip().lower()
+    return value or None
+
+
+def _comparison_failure(
+    reason: str,
+    *,
+    candidate_mae: float,
+    active_mae: float | None,
+    candidate: dict,
+    active: dict,
+) -> dict:
+    allow_override = bool(candidate.get("quality_gate_allow_uncomparable"))
+    return {
+        "comparable": False,
+        "passed": allow_override,
+        "reason": (
+            f"operator_override:{reason}" if allow_override else reason
+        ),
+        "operator_override": allow_override,
+        "candidate_mae": candidate_mae,
+        "active_mae": active_mae,
+        "candidate_period": (
+            candidate.get("test_year_from"), candidate.get("test_year_to")
+        ),
+        "active_period": (
+            active.get("test_year_from"), active.get("test_year_to")
+        ),
+        "candidate_test_rows": candidate.get("test_rows"),
+        "active_test_rows": active.get("test_rows"),
+        "candidate_test_fingerprint_sha256": candidate.get(
+            "test_dataset_fingerprint_sha256"
+        ),
+        "active_test_fingerprint_sha256": active.get(
+            "test_dataset_fingerprint_sha256"
+        ),
+        "candidate_imdb_fingerprint_sha256": _freshness_fingerprint(candidate),
+        "active_imdb_fingerprint_sha256": _freshness_fingerprint(active),
+    }
+
+
 def evaluate_candidate_quality(
     candidate: dict,
     active: dict | None,
     *,
     max_mae_regression: float,
 ) -> dict:
-    """Сравнивает candidate с активной моделью на сопоставимом holdout.
+    """Сравнивает candidate и active только на доказанно одинаковом holdout.
 
-    Мы намеренно не загружаем активную CatBoost-модель повторно. Сравнение
-    выполняется только когда обе metadata относятся к одному temporal holdout.
-    Если период изменился, candidate не блокируется: такие MAE нельзя честно
-    интерпретировать как прямое A/B-сравнение.
+    Для автоматической публикации недостаточно совпадения календарных лет:
+    должны совпасть exact disk-backed test dataset, число строк и IMDb snapshot.
+    Смена любого элемента comparison contract требует явного operator override,
+    который сохраняется в metadata и не применяется к реальной MAE-регрессии.
     """
-    try:
-        candidate_mae = float(candidate["test_mae"])
-    except (KeyError, TypeError, ValueError):
+    candidate_mae = _finite_metric(candidate, "test_mae")
+    if candidate_mae is None:
         return {
             "comparable": False,
             "passed": False,
-            "reason": "candidate_mae_missing",
+            "reason": "candidate_mae_missing_or_non_finite",
         }
 
     if active is None:
@@ -540,15 +595,15 @@ def evaluate_candidate_quality(
             "candidate_mae": candidate_mae,
         }
 
-    try:
-        active_mae = float(active["test_mae"])
-    except (KeyError, TypeError, ValueError):
-        return {
-            "comparable": False,
-            "passed": True,
-            "reason": "active_mae_missing",
-            "candidate_mae": candidate_mae,
-        }
+    active_mae = _finite_metric(active, "test_mae")
+    if active_mae is None:
+        return _comparison_failure(
+            "active_mae_missing_or_non_finite",
+            candidate_mae=candidate_mae,
+            active_mae=None,
+            candidate=candidate,
+            active=active,
+        )
 
     candidate_period = (
         candidate.get("test_year_from"),
@@ -563,15 +618,77 @@ def evaluate_candidate_quality(
         or None in active_period
         or candidate_period != active_period
     ):
-        return {
-            "comparable": False,
-            "passed": True,
-            "reason": "different_temporal_holdout",
-            "candidate_mae": candidate_mae,
-            "active_mae": active_mae,
-            "candidate_period": candidate_period,
-            "active_period": active_period,
-        }
+        return _comparison_failure(
+            "different_temporal_holdout",
+            candidate_mae=candidate_mae,
+            active_mae=active_mae,
+            candidate=candidate,
+            active=active,
+        )
+
+    candidate_rows = candidate.get("test_rows")
+    active_rows = active.get("test_rows")
+    try:
+        candidate_rows = int(candidate_rows)
+        active_rows = int(active_rows)
+    except (TypeError, ValueError):
+        return _comparison_failure(
+            "comparison_contract_missing_test_rows",
+            candidate_mae=candidate_mae,
+            active_mae=active_mae,
+            candidate=candidate,
+            active=active,
+        )
+    if candidate_rows <= 0 or active_rows <= 0 or candidate_rows != active_rows:
+        return _comparison_failure(
+            "different_holdout_rows",
+            candidate_mae=candidate_mae,
+            active_mae=active_mae,
+            candidate=candidate,
+            active=active,
+        )
+
+    candidate_test_fingerprint = str(
+        candidate.get("test_dataset_fingerprint_sha256") or ""
+    ).strip().lower()
+    active_test_fingerprint = str(
+        active.get("test_dataset_fingerprint_sha256") or ""
+    ).strip().lower()
+    if not candidate_test_fingerprint or not active_test_fingerprint:
+        return _comparison_failure(
+            "comparison_contract_missing_test_fingerprint",
+            candidate_mae=candidate_mae,
+            active_mae=active_mae,
+            candidate=candidate,
+            active=active,
+        )
+    if candidate_test_fingerprint != active_test_fingerprint:
+        return _comparison_failure(
+            "different_holdout_dataset",
+            candidate_mae=candidate_mae,
+            active_mae=active_mae,
+            candidate=candidate,
+            active=active,
+        )
+
+    candidate_imdb_fingerprint = _freshness_fingerprint(candidate)
+    active_imdb_fingerprint = _freshness_fingerprint(active)
+    if not candidate_imdb_fingerprint or not active_imdb_fingerprint:
+        return _comparison_failure(
+            "comparison_contract_missing_imdb_fingerprint",
+            candidate_mae=candidate_mae,
+            active_mae=active_mae,
+            candidate=candidate,
+            active=active,
+        )
+    if candidate_imdb_fingerprint != active_imdb_fingerprint:
+        return _comparison_failure(
+            "different_imdb_snapshot",
+            candidate_mae=candidate_mae,
+            active_mae=active_mae,
+            candidate=candidate,
+            active=active,
+        )
 
     tolerance = max(0.0, float(max_mae_regression))
     regression = candidate_mae - active_mae
@@ -580,12 +697,16 @@ def evaluate_candidate_quality(
         "comparable": True,
         "passed": passed,
         "reason": "within_mae_gate" if passed else "mae_regression",
+        "operator_override": False,
         "candidate_mae": candidate_mae,
         "active_mae": active_mae,
         "mae_regression": regression,
         "max_mae_regression": tolerance,
         "test_year_from": candidate_period[0],
         "test_year_to": candidate_period[1],
+        "test_rows": candidate_rows,
+        "test_dataset_fingerprint_sha256": candidate_test_fingerprint,
+        "imdb_data_fingerprint_sha256": candidate_imdb_fingerprint,
     }
 
 
@@ -610,10 +731,8 @@ def save_trained_model(model: CatBoostRegressor, metadata: dict) -> None:
     if not gate.get("passed"):
         raise RuntimeError(
             "Новая модель не прошла quality gate: "
-            f"MAE candidate={gate.get('candidate_mae'):.4f}, "
-            f"active={gate.get('active_mae'):.4f}, "
-            f"ухудшение={gate.get('mae_regression'):.4f}, "
-            f"допустимо={gate.get('max_mae_regression'):.4f}"
+            f"reason={gate.get('reason')}; candidate_mae={gate.get('candidate_mae')}; "
+            f"active_mae={gate.get('active_mae')}"
         )
 
     releases_dir = root / "releases"
@@ -644,10 +763,6 @@ def save_trained_model(model: CatBoostRegressor, metadata: dict) -> None:
         with metadata_path.open("wb") as handle:
             pickle.dump(persisted_metadata, handle)
 
-        # Не загружаем model.cbm второй раз в процессе обучения: на малом VPS
-        # это временно удваивает память CatBoost и приводит к swap-thrashing.
-        # Успешный save_model + проверка размера + повторное чтение metadata
-        # дают дешёвую проверку артефактов перед атомарным переключением.
         with metadata_path.open("rb") as handle:
             check_metadata = pickle.load(handle)
         if (
