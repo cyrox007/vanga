@@ -15,6 +15,7 @@ from src.data_freshness import build_freshness_report, write_freshness_manifest
 from src.data_loader import download_imdb_dataset
 from src.database import cleanup_temp
 from src.logger import setup_logger
+from src.rating_history import RatingHistoryStore
 
 
 logger = setup_logger(__name__)
@@ -75,6 +76,40 @@ def _write_freshness_manifest(target: Path) -> dict:
     return report
 
 
+def _capture_rating_history(target: Path, freshness_report: dict) -> None:
+    """Best-effort P7 capture: ошибка истории не ломает публикацию свежей IMDb БД."""
+    try:
+        with RatingHistoryStore() as history:
+            result = history.capture_daily(
+                target,
+                source_fingerprint_sha256=freshness_report.get(
+                    "logical_fingerprint_sha256"
+                ),
+            )
+        if result.get("skipped_no_watchlist"):
+            logger.info(
+                "IMDb Rating History: snapshot пропущен — watchlist пока пуст"
+            )
+        elif result.get("idempotent"):
+            logger.info(
+                "IMDb Rating History: snapshot за %s уже существует; captured=%s",
+                result.get("snapshot_day"),
+                result.get("captured_count"),
+            )
+        else:
+            logger.info(
+                "IMDb Rating History: snapshot %s записан; tracked=%s; captured=%s; missing=%s",
+                result.get("snapshot_day"),
+                result.get("tracked_count"),
+                result.get("captured_count"),
+                result.get("missing_count"),
+            )
+    except Exception as exc:
+        # История рейтинга — накопительный слой. Она не должна откатывать уже
+        # успешно собранную и проверенную IMDb БД; проблема остаётся видна в логах.
+        logger.exception("IMDb Rating History: snapshot не записан: %s", exc)
+
+
 def _build_staged_database(target: Path) -> None:
     staged = target.with_name(target.name + ".next")
     staged_wal = Path(str(staged) + ".wal")
@@ -128,13 +163,15 @@ def main() -> int:
                 "IMDb datasets не изменились и схема актуальна — "
                 "пересборка БД не требуется"
             )
-            _write_freshness_manifest(target)
+            report = _write_freshness_manifest(target)
+            _capture_rating_history(target, report)
             return 0
 
     logger.info("Собираем новую IMDb БД в staging-файле")
     _build_staged_database(target)
     cleanup_temp()
-    _write_freshness_manifest(target)
+    report = _write_freshness_manifest(target)
+    _capture_rating_history(target, report)
     return 0
 
 
