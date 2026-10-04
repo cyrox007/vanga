@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from src.future_prediction_payload import FuturePredictionPayloadBuilder
+from src.future_temporal_facts import TemporalFuturePredictionPayloadBuilder
 
 
 def main() -> int:
@@ -20,8 +20,8 @@ def main() -> int:
         "--allow-current-imdb-snapshot",
         action="store_true",
         help=(
-            "Разрешить недатированный текущий IMDb snapshot как fallback runtime/genres. "
-            "Такой payload помечается historical_backtest_safe=false."
+            "Разрешить недатированный текущий IMDb snapshot только как последний fallback. "
+            "Датированные P9 temporal facts имеют приоритет над ним."
         ),
     )
     parser.add_argument("--future-db")
@@ -40,7 +40,7 @@ def main() -> int:
         if value:
             kwargs[key] = value
 
-    builder = FuturePredictionPayloadBuilder(**kwargs)
+    builder = TemporalFuturePredictionPayloadBuilder(**kwargs)
     result = builder.build(
         args.project_id,
         args.cutoff,
