@@ -15,7 +15,7 @@ from settings import config
 
 
 WDQS_ENDPOINT = "https://query.wikidata.org/sparql"
-COLLECTOR_VERSION = 2
+COLLECTOR_VERSION = 3
 
 
 class WikidataFutureReleaseError(RuntimeError):
@@ -98,12 +98,32 @@ def _release_window(value: str, precision: int) -> tuple[datetime, datetime, str
     return None
 
 
+def _territory(binding: dict[str, Any]) -> tuple[str, str | None]:
+    """Возвращает безопасный territory key и Wikidata QID qualifier-а.
+
+    Отсутствие P291 принципиально не трактуется как worldwide. Такой statement
+    остаётся доступным как ``unspecified``, но не может автоматически разблокировать
+    default worldwide prediction.
+    """
+
+    raw = _binding(binding, "territory")
+    if raw is None:
+        return "unspecified", None
+    qid = _qid(raw)
+    if qid is None:
+        return "unspecified", None
+    return f"wikidata:{qid}", qid
+
+
 class WikidataFutureReleaseCollector:
     """WDQS discovery collector -> P9 fingerprinted batch.
 
     Collector выполняет сеть только на стадии discovery. Результат сначала
     сохраняется в raw cache, затем нормализуется в batch contract. Inference этот
     класс не вызывает и читает только локальный P9 registry.
+
+    Release date читается на уровне P577 statement. Qualifier P291 сохраняется как
+    отдельная территория; отсутствие qualifier не подменяется ``worldwide``.
     """
 
     def __init__(
@@ -115,6 +135,9 @@ class WikidataFutureReleaseCollector:
         sleep_fn: Callable[[float], None] = time.sleep,
         monotonic_fn: Callable[[], float] = time.monotonic,
     ) -> None:
+        endpoint = str(endpoint or "").strip()
+        if not endpoint.startswith(("https://", "http://")):
+            raise WikidataFutureReleaseError("WDQS endpoint должен быть HTTP(S) URL")
         self.endpoint = endpoint
         self.cache_dir = Path(
             cache_dir
@@ -136,12 +159,14 @@ class WikidataFutureReleaseCollector:
 PREFIX wd: <http://www.wikidata.org/entity/>
 PREFIX wdt: <http://www.wikidata.org/prop/direct/>
 PREFIX p: <http://www.wikidata.org/prop/>
+PREFIX pq: <http://www.wikidata.org/prop/qualifier/>
 PREFIX psv: <http://www.wikidata.org/prop/statement/value/>
 PREFIX wikibase: <http://wikiba.se/ontology#>
-PREFIX bd: <http://www.bigdata.com/rdf#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 
-SELECT ?film ?filmLabel ?imdb ?releaseStatement ?releaseDate ?precision WHERE {{
+SELECT ?film ?filmLabelEn ?filmLabelRu ?imdb ?releaseStatement
+       ?releaseDate ?precision ?territory WHERE {{
   ?film wdt:P31/wdt:P279* wd:Q11424 ;
         p:P577 ?releaseStatement .
   ?releaseStatement wikibase:rank ?rank ;
@@ -151,10 +176,18 @@ SELECT ?film ?filmLabel ?imdb ?releaseStatement ?releaseDate ?precision WHERE {{
                 wikibase:timePrecision ?precision .
   FILTER(?releaseDate >= "{from_iso}"^^xsd:dateTime)
   FILTER(?releaseDate < "{to_iso}"^^xsd:dateTime)
+  OPTIONAL {{ ?releaseStatement pq:P291 ?territory . }}
   OPTIONAL {{ ?film wdt:P345 ?imdb . }}
-  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,ru". }}
+  OPTIONAL {{
+    ?film rdfs:label ?filmLabelEn .
+    FILTER(LANG(?filmLabelEn) = "en")
+  }}
+  OPTIONAL {{
+    ?film rdfs:label ?filmLabelRu .
+    FILTER(LANG(?filmLabelRu) = "ru")
+  }}
 }}
-ORDER BY ?releaseDate ?film ?releaseStatement
+ORDER BY ?releaseDate ?film ?releaseStatement ?territory
 LIMIT {limit}
 """.strip()
 
@@ -254,7 +287,11 @@ LIMIT {limit}
 
         for index, binding in enumerate(cls._bindings(raw)):
             qid = _qid(_binding(binding, "film"))
-            title = _binding(binding, "filmLabel")
+            title = (
+                _binding(binding, "filmLabelEn")
+                or _binding(binding, "filmLabelRu")
+                or _binding(binding, "filmLabel")
+            )
             release_value = _binding(binding, "releaseDate")
             precision_raw = _binding(binding, "precision")
             statement = _binding(binding, "releaseStatement")
@@ -283,6 +320,16 @@ LIMIT {limit}
                 warnings.append({"row": index, "qid": qid, "reason": "invalid_imdb_id"})
                 imdb = None
 
+            territory, territory_qid = _territory(binding)
+            if territory == "unspecified":
+                warnings.append(
+                    {
+                        "row": index,
+                        "qid": qid,
+                        "reason": "release_territory_unspecified",
+                    }
+                )
+
             project_id = f"wikidata:{qid}"
             projects[project_id] = {
                 "project_id": project_id,
@@ -292,9 +339,7 @@ LIMIT {limit}
             }
             statement_key = _safe_statement_key(statement or f"{qid}:{release_value}:{precision}")
 
-            # Source — это конкретный retrieval snapshot, а не вечный ID
-            # Wikidata statement. Иначе следующий sync переписывает retrieved_at
-            # вчерашнего evidence и разрушает point-in-time provenance.
+            # Source — конкретный retrieval snapshot, а не вечный ID statement.
             source_id = f"wikidata:{qid}:release:{statement_key}:{retrieval_key}"
             sources[source_id] = {
                 "source_id": source_id,
@@ -304,9 +349,6 @@ LIMIT {limit}
                 "retrieved_at": retrieved_at.astimezone(timezone.utc).isoformat(),
             }
 
-            # Alias evidence также retrieval-specific. Повтор следующего дня не
-            # конфликтует с PRIMARY KEY, а temporal resolver всё равно дедуплицирует
-            # один project_id. Старое evidence при этом остаётся неизменяемым.
             title_key = hashlib.sha256(title.casefold().encode("utf-8")).hexdigest()[:12]
             alias_id = f"wikidata-alias:{qid}:{title_key}:{retrieval_key}"
             aliases[alias_id] = {
@@ -317,17 +359,21 @@ LIMIT {limit}
                 "source_id": source_id,
                 "confidence": 0.9,
             }
-            observation_id = f"wikidata-release:{qid}:{statement_key}:{retrieval_key}"
+
+            territory_key = territory_qid or "unspecified"
+            observation_id = (
+                f"wikidata-release:{qid}:{statement_key}:{territory_key}:{retrieval_key}"
+            )
             releases[observation_id] = {
                 "observation_id": observation_id,
                 "project_id": project_id,
-                "territory": "worldwide",
+                "territory": territory,
                 "release_start_at": start.astimezone(timezone.utc).isoformat(),
                 "release_end_at": end.astimezone(timezone.utc).isoformat(),
                 "precision": precision_name,
                 "known_at": retrieved_at.astimezone(timezone.utc).isoformat(),
                 "source_id": source_id,
-                "confidence": 0.85,
+                "confidence": 0.85 if territory_qid else 0.7,
             }
 
         bundle = {
