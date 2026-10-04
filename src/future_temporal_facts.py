@@ -79,15 +79,30 @@ class FutureTemporalFactStore:
     Каждое наблюдение имеет ``known_at`` и ``source_id``. На cutoff берётся
     последнее наблюдение каждого источника. Если актуальные источники расходятся,
     значение не выбирается эвристически: возвращается conflict.
+
+    Store может работать поверх уже открытого ``FutureReleaseStore``. Это нужно
+    batch importer-у, чтобы temporal facts участвовали в той же транзакции, что и
+    проекты, источники, люди и release windows.
     """
 
-    def __init__(self, path: str | Path | None = None) -> None:
-        self.registry = FutureReleaseStore(path or config.FUTURE_RELEASE_DB_PATH)
+    def __init__(
+        self,
+        store: FutureReleaseStore | str | Path | None = None,
+    ) -> None:
+        if isinstance(store, FutureReleaseStore):
+            self.registry = store
+            self._owns_registry = False
+        else:
+            self.registry = FutureReleaseStore(
+                store or config.FUTURE_RELEASE_DB_PATH
+            )
+            self._owns_registry = True
         self.conn = self.registry.conn
         self._ensure_schema()
 
     def close(self) -> None:
-        self.registry.close()
+        if self._owns_registry:
+            self.registry.close()
 
     def __enter__(self) -> "FutureTemporalFactStore":
         return self

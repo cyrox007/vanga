@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -89,6 +88,35 @@ class FutureReleaseImportTests(unittest.TestCase):
                     }
                 ],
                 "project_entities": [],
+                "temporal_facts": [
+                    {
+                        "observation_id": "runtime-a",
+                        "project_id": "film-a",
+                        "fact_type": "runtime_minutes",
+                        "value": 132,
+                        "known_at": "2026-10-04T07:55:00Z",
+                        "source_id": "official",
+                        "confidence": 0.95,
+                    },
+                    {
+                        "observation_id": "genres-a",
+                        "project_id": "film-a",
+                        "fact_type": "genres",
+                        "value": ["Sci-Fi", "Drama"],
+                        "known_at": "2026-10-04T07:55:00Z",
+                        "source_id": "official",
+                        "confidence": 0.95,
+                    },
+                    {
+                        "observation_id": "synopsis-a",
+                        "project_id": "film-a",
+                        "fact_type": "synopsis",
+                        "value": "A dated pre-release synopsis.",
+                        "known_at": "2026-10-04T07:55:00Z",
+                        "source_id": "official",
+                        "confidence": 0.9,
+                    },
+                ],
             },
         }
 
@@ -97,25 +125,42 @@ class FutureReleaseImportTests(unittest.TestCase):
         self.assertFalse(result["idempotent"])
         self.assertEqual(result["counts"]["projects"], 1)
         self.assertEqual(result["counts"]["release_windows"], 1)
+        self.assertEqual(result["counts"]["temporal_facts"], 3)
 
         snapshot = self.importer.store.snapshot_as_of(
             "film-a", "2026-10-04T08:00:00Z"
         )
         self.assertEqual(snapshot["release_at"], "2027-07-01T00:00:00+00:00")
         self.assertEqual(snapshot["directors"][0]["person_id"], "director-a")
+
+        facts = self.importer.temporal_facts.snapshot_as_of(
+            "film-a", "2026-10-04T08:00:00Z"
+        )
+        self.assertEqual(facts["facts"]["runtime_minutes"], 132)
+        self.assertEqual(facts["facts"]["genres"], ["Drama", "Sci-Fi"])
+        self.assertEqual(
+            facts["facts"]["synopsis"],
+            "A dated pre-release synopsis.",
+        )
+
         history = self.importer.history("official-feed")
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["batch_id"], "batch-1")
+        self.assertEqual(history[0]["counts"]["temporal_facts"], 3)
 
     def test_same_batch_is_idempotent_without_duplicate_observations(self):
         first = self.importer.import_batch(self._batch())
         second = self.importer.import_batch(self._batch())
         self.assertFalse(first["idempotent"])
         self.assertTrue(second["idempotent"])
-        count = self.importer.conn.execute(
+        release_count = self.importer.conn.execute(
             "SELECT COUNT(*) FROM future_release_windows"
         ).fetchone()[0]
-        self.assertEqual(count, 1)
+        fact_count = self.importer.conn.execute(
+            "SELECT COUNT(*) FROM future_release_temporal_facts"
+        ).fetchone()[0]
+        self.assertEqual(release_count, 1)
+        self.assertEqual(fact_count, 3)
 
     def test_same_source_fingerprint_with_new_batch_id_is_idempotent(self):
         self.importer.import_batch(self._batch())
@@ -144,12 +189,45 @@ class FutureReleaseImportTests(unittest.TestCase):
         source_count = self.importer.conn.execute(
             "SELECT COUNT(*) FROM future_release_sources"
         ).fetchone()[0]
+        fact_count = self.importer.conn.execute(
+            "SELECT COUNT(*) FROM future_release_temporal_facts"
+        ).fetchone()[0]
         history_count = self.importer.conn.execute(
             "SELECT COUNT(*) FROM future_release_import_batches"
         ).fetchone()[0]
         self.assertEqual(project_count, 0)
         self.assertEqual(source_count, 0)
+        self.assertEqual(fact_count, 0)
         self.assertEqual(history_count, 0)
+
+    def test_invalid_temporal_fact_rolls_back_whole_bundle(self):
+        payload = self._batch()
+        payload["bundle"]["temporal_facts"][0]["value"] = 0
+        with self.assertRaises(FutureReleaseImportError):
+            self.importer.import_batch(payload)
+
+        project_count = self.importer.conn.execute(
+            "SELECT COUNT(*) FROM future_release_projects"
+        ).fetchone()[0]
+        source_count = self.importer.conn.execute(
+            "SELECT COUNT(*) FROM future_release_sources"
+        ).fetchone()[0]
+        fact_count = self.importer.conn.execute(
+            "SELECT COUNT(*) FROM future_release_temporal_facts"
+        ).fetchone()[0]
+        history_count = self.importer.conn.execute(
+            "SELECT COUNT(*) FROM future_release_import_batches"
+        ).fetchone()[0]
+        self.assertEqual(project_count, 0)
+        self.assertEqual(source_count, 0)
+        self.assertEqual(fact_count, 0)
+        self.assertEqual(history_count, 0)
+
+    def test_temporal_fact_cannot_reference_unknown_source(self):
+        payload = self._batch()
+        payload["bundle"]["temporal_facts"][0]["source_id"] = "missing-source"
+        with self.assertRaises(FutureReleaseImportError):
+            self.importer.import_batch(payload)
 
     def test_source_retrieved_at_cannot_be_after_batch_retrieved_at(self):
         payload = self._batch()
@@ -162,6 +240,13 @@ class FutureReleaseImportTests(unittest.TestCase):
         payload["bundle"]["magic_quality"] = []
         with self.assertRaises(FutureReleaseImportError):
             self.importer.import_batch(payload)
+
+    def test_old_bundle_without_temporal_facts_remains_valid(self):
+        payload = self._batch()
+        payload["bundle"].pop("temporal_facts")
+        result = self.importer.import_batch(payload)
+        self.assertFalse(result["idempotent"])
+        self.assertEqual(result["counts"]["temporal_facts"], 0)
 
     def test_batch_id_mutation_is_rejected(self):
         self.importer.import_batch(self._batch())

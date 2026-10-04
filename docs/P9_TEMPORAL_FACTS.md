@@ -56,7 +56,7 @@ Synopsis пока не является обязательным blocker для 
 
 Если датированный P9 факт заменяет значение, которое базовый builder взял из текущего IMDb snapshot, `historical_backtest_safe` пересчитывается по фактически использованным источникам.
 
-## CLI
+## Ручной CLI
 
 Добавить датированный runtime:
 
@@ -99,14 +99,71 @@ python scripts/future_prediction_payload.py wikidata:Q123 \
 
 сможет использовать датированные факты без `--allow-current-imdb-snapshot`.
 
+## Batch import для collectors
+
+Внешнему adapter/collector не нужно вызывать ручной CLI по одному факту. Массив `temporal_facts` является частью общего P9 bundle и импортируется через `FutureReleaseBatchImporter`.
+
+Минимальный фрагмент bundle:
+
+```json
+{
+  "sources": [
+    {
+      "source_id": "studio-page-20261004",
+      "provider": "Official studio",
+      "usage_basis": "public_record",
+      "retrieved_at": "2026-10-04T09:00:00Z"
+    }
+  ],
+  "projects": [
+    {
+      "project_id": "wikidata:Q123",
+      "canonical_title": "Example Film"
+    }
+  ],
+  "temporal_facts": [
+    {
+      "observation_id": "runtime-20261004",
+      "project_id": "wikidata:Q123",
+      "fact_type": "runtime_minutes",
+      "value": 132,
+      "known_at": "2026-10-04T09:00:00Z",
+      "source_id": "studio-page-20261004",
+      "confidence": 0.95
+    },
+    {
+      "observation_id": "genres-20261004",
+      "project_id": "wikidata:Q123",
+      "fact_type": "genres",
+      "value": ["Drama", "Sci-Fi"],
+      "known_at": "2026-10-04T09:00:00Z",
+      "source_id": "studio-page-20261004",
+      "confidence": 0.95
+    }
+  ]
+}
+```
+
+Полный collector batch импортируется обычной командой:
+
+```bash
+python scripts/future_release_import.py import collector-batch.json
+```
+
+`temporal_facts` остаётся необязательным массивом: старые v1 bundles без него продолжают приниматься.
+
+Импорт атомарный. `sources`, `projects`, release windows, people/entities и `temporal_facts` используют одну DuckDB-транзакцию. Если хотя бы один temporal fact невалиден или ссылается на отсутствующий `project_id`/`source_id`, весь batch откатывается, включая запись в import history.
+
+Повтор одного и того же source snapshot остаётся идемпотентным по существующему source/bundle fingerprint contract.
+
 ## Что этот инкремент не делает
 
-Он не определяет сам по себе, откуда брать runtime/genres/synopsis. Это единый temporal storage/resolution contract для последующих adapters.
+Temporal storage и batch-import contract уже готовы для collectors, но конкретный источник данных всё ещё должен быть реализован отдельным adapter-ом.
 
-Отдельными инкрементами остаются:
+Следующие P9 инкременты:
 
-- конкретные воспроизводимые adapters к официальным/публичным источникам;
-- подключение этих adapters к P9 refresh pipeline;
+- конкретный воспроизводимый adapter к официальному/публичному future-release источнику;
+- включение adapter-а в refresh pipeline;
 - второй независимый источник release date;
 - публичный future-release каталог в `jsint-site`.
 
