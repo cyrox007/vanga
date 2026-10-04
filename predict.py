@@ -1,66 +1,71 @@
-from src.kinovanga import KinoVanga
+from __future__ import annotations
+
+from src.creative_kinovanga import KinoVanga
 from src.train_model import resolve_current_model_path
 
-# Обучение (опционально)
-kino = KinoVanga(resolve_current_model_path())
 
-# Предсказание
-result = kino.predict(
-    title="Superman",
-    director="James Gunn",
-    year=2025,
-    runtime=129,
-    genres="sci-fi,action",
-    actors=["David Corenswet", "Rachel Brosnahan", "Nicholas Hoult"],
-    explain=True  
-)
-print(f"Рейтинг: {result['rating']}")
-print(f"Объяснение: {result['explanation']}")
+EXAMPLES = [
+    {
+        "title": "Superman",
+        "directors": ["James Gunn"],
+        "writer": "James Gunn",
+        "year": 2025,
+        "runtime": 129,
+        "genres": ["sci-fi", "action"],
+        "actors": ["David Corenswet", "Rachel Brosnahan", "Nicholas Hoult"],
+    },
+    {
+        "title": "Supergirl",
+        "directors": ["Craig Gillespie"],
+        "year": 2026,
+        "runtime": 108,
+        "genres": ["sci-fi", "action"],
+        "actors": ["Milly Alcock", "Matthias Schoenaerts", "Eve Ridley"],
+    },
+    {
+        "title": "Spider-Man: Brand New Day",
+        "directors": ["Destin Daniel Cretton"],
+        "year": 2026,
+        "runtime": 145,
+        "genres": ["sci-fi", "action"],
+        "actors": ["Tom Holland", "Zendaya", "Sadie Sink"],
+    },
+    {
+        "title": "The Odyssey",
+        "directors": ["Christopher Nolan"],
+        "writer": "Christopher Nolan",
+        "year": 2026,
+        "runtime": 173,
+        "genres": ["adventure", "drama"],
+        "actors": ["Matt Damon", "Tom Holland", "Anne Hathaway"],
+    },
+]
 
-result = kino.predict(
-    title="Supergirl",
-    director="James Gunn",
-    year=2026,
-    runtime=108,
-    genres="sci-fi,action",
-    actors=[
-        "Milly Alcock",
-        "Matthias Schoenaerts",
-        "Eve Ridley"
-    ],
-    explain=True
-)
-print(f"Рейтинг: {result['rating']}")
-print(f"Объяснение: {result['explanation']}")
 
-result = kino.predict(
-    title="Spider-Man: Brand New Day",
-    director="Destin Daniel Cretton",
-    year=2026,
-    runtime=145,
-    genres="sci-fi,action",
-    actors=[
-        "Tom Holland",
-        "Zendaya",
-        "Sadie Sink"
-    ],
-    explain=True
-)
-print(f"Рейтинг: {result['rating']}")
-print(f"Объяснение: {result['explanation']}")
+def main() -> int:
+    """Локальный пример использует тот же расширенный inference-класс, что API."""
 
-result = kino.predict(
-    title="The Odyssey",
-    director="Christopher Nolan",
-    year=2026,
-    runtime=173,
-    genres="sci-fi,action",
-    actors=[
-        "Matt Damon",
-        "Tom Holland",
-        "Anne Hathaway"
-    ],
-    explain=True
-)
-print(f"Рейтинг: {result['rating']}")
-print(f"Объяснение: {result['explanation']}")
+    kino = KinoVanga(resolve_current_model_path())
+    try:
+        for example in EXAMPLES:
+            directors = list(example["directors"])
+            result = kino.predict(
+                title=str(example["title"]),
+                director=directors[0],
+                directors=directors,
+                writer=example.get("writer"),
+                year=int(example["year"]),
+                runtime=int(example["runtime"]),
+                genres=example["genres"],
+                actors=list(example["actors"]),
+                explain=True,
+            )
+            print(f"{example['title']}: рейтинг {result['rating']}")
+            print(f"Объяснение: {result['explanation']}")
+    finally:
+        kino.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
