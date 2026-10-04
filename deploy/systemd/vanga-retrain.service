@@ -1,6 +1,6 @@
 [Unit]
 Description=Vanga periodic model retraining
-After=network-online.target
+After=network-online.target vanga.service
 Wants=network-online.target
 
 [Service]
@@ -10,8 +10,13 @@ Group=vanga
 WorkingDirectory=/opt/vanga
 Environment=PYTHONUNBUFFERED=1
 Environment=MALLOC_ARENA_MAX=2
-ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/ds_update.py
-ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/traning.py
+Environment=VANGA_ORCHESTRATION_LOCK=/opt/vanga/data/runtime/orchestration.lock
+ExecStart=/opt/vanga/.venv/bin/python /opt/vanga/retrain_job.py
+# После ds_update процесс inference обязан переоткрыть imdb.duckdb. ExecStopPost
+# выполняется и при неудачном retrain, поэтому свежая БД не остаётся скрыта за
+# старым DuckDB connection. Префикс '+' оставляет systemctl root-привилегии,
+# хотя сам тяжёлый job выполняется от непривилегированного пользователя vanga.
+ExecStopPost=+/usr/bin/systemctl restart vanga.service
 Nice=15
 CPUQuota=50%
 MemoryHigh=1G
