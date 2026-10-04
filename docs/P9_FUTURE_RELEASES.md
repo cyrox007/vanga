@@ -49,7 +49,38 @@ Release window хранит `release_start_at`, `release_end_at` и `precision`:
 
 `release_at` в snapshot возвращается только для `precision=exact`. Нельзя выдавать year/month window за точную дату.
 
-## CLI
+## Prediction payload
+
+`FuturePredictionPayloadBuilder` превращает локальный future-release snapshot в существующий JSON-контракт `/predict` без сетевых запросов.
+
+Он использует:
+
+1. Future Release registry — title, точную release date, director/writer/cast;
+2. Source Context — planned runtime и primary source material, если проект однозначно найден по IMDb ID и факт уже известен к cutoff;
+3. локальный IMDb snapshot — runtime fallback и genres;
+4. Production Context — только как дополнительный pre-release context/diagnostics, не как автоматически включённые ML-features.
+
+Приоритет runtime: explicit override → Source Context planned runtime → local IMDb. Приоритет genres: explicit override → local IMDb.
+
+Builder работает fail-closed. `request=null` и `prediction_ready=false`, если:
+
+- есть конфликт release date;
+- нет exact release date;
+- cutoff находится на/после релиза;
+- нет режиссёра;
+- неизвестен runtime;
+- неизвестен genre.
+
+Неоднозначный Source/Production Context project не выбирается молча и отмечается в diagnostics. Несколько writers не блокируют request, но действующий API-контракт использует первого writer и возвращает warning.
+
+```bash
+python scripts/future_prediction_payload.py project-123 \
+  --cutoff 2026-10-01T00:00:00Z
+```
+
+Команда завершится с кодом `0`, если payload готов к `/predict`, и `2`, если остались blockers.
+
+## CLI registry
 
 ```bash
 python scripts/future_releases.py import-bundle future.json
@@ -60,9 +91,7 @@ python scripts/future_releases.py resolve-title "Название фильма" 
 
 Bundle может содержать массивы:
 
-`source`, `projects`, `people`, `entities`, `aliases`, `release_windows`, `statuses`, `project_people`, `project_entities`.
-
-Фактическое имя первого массива в CLI — `sources`.
+`sources`, `projects`, `people`, `entities`, `aliases`, `release_windows`, `statuses`, `project_people`, `project_entities`.
 
 ## Граница ответственности
 
@@ -74,13 +103,12 @@ Bundle может содержать массивы:
 4. нормализовать IDs;
 5. импортировать bundle в P9 registry.
 
-Prediction/catalog используют только локальную БД. `network_required_for_inference=false` является частью snapshot/catalog contract.
+Prediction/catalog используют только локальные БД. `network_required_for_inference=false` / `network_required=false` являются частью snapshot/catalog/payload contract.
 
 ## Дальше
 
 Следующие P9 инкременты:
 
 - source adapters/collectors с rate limiting и cache-only output;
-- cross-registry enrichment из Source Context и Production Context;
-- materializer будущего проекта в pre-release prediction request;
+- cross-registry materialization для дополнительных pre-release facts без дублирования источника истины;
 - публичный каталог на jsint-site.
