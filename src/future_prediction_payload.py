@@ -79,10 +79,12 @@ def _runtime(value: Any) -> int | None:
 class FuturePredictionPayloadBuilder:
     """Собирает cache-only payload будущего фильма для существующего `/predict`.
 
-    Класс не обращается к сети. Он объединяет P9 Future Release registry с уже
-    сохранёнными локальными IMDb, Source Context и Production Context facts.
-    Неоднозначности не разрешаются эвристически: они отражаются в diagnostics и,
-    если поле обязательно для prediction, блокируют создание request.
+    Класс не обращается к сети. По умолчанию используются только temporal facts
+    с доказуемым ``known_at`` и явные overrides запроса. Текущий IMDb snapshot
+    runtime/genres не имеет собственного point-in-time timestamp, поэтому он
+    запрещён по умолчанию и доступен только через явный opt-in для интерактивного
+    сценария «что известно сейчас». Такой fallback нельзя использовать как
+    historical/backtest evidence.
     """
 
     def __init__(
@@ -127,6 +129,8 @@ class FuturePredictionPayloadBuilder:
             "available": False,
             "runtime": None,
             "genres": [],
+            "point_in_time": False,
+            "observation_time": None,
         }
         if not imdb_id or not self.imdb_db_path.exists():
             return result
@@ -264,6 +268,7 @@ class FuturePredictionPayloadBuilder:
         runtime_override: Any = None,
         genres_override: Any = None,
         synopsis: str | None = None,
+        allow_current_imdb_snapshot: bool = False,
     ) -> dict[str, Any]:
         cutoff_dt = _parse_dt(cutoff, field_name="cutoff")
         with FutureReleaseStore(self.future_db_path) as future:
@@ -296,7 +301,18 @@ class FuturePredictionPayloadBuilder:
         if len(writers) > 1:
             warnings.append("multiple_writers_first_writer_contract")
 
-        imdb_context = self._imdb_context(snapshot.get("imdb_id"))
+        imdb_context = (
+            self._imdb_context(snapshot.get("imdb_id"))
+            if allow_current_imdb_snapshot
+            else {
+                "available": False,
+                "runtime": None,
+                "genres": [],
+                "point_in_time": False,
+                "observation_time": None,
+                "disabled_reason": "undated_current_snapshot_requires_explicit_opt_in",
+            }
+        )
         source_context = self._source_context(snapshot.get("imdb_id"), cutoff_dt)
         production_context = self._production_context(snapshot.get("imdb_id"), cutoff_dt)
         if source_context.get("ambiguous"):
@@ -310,9 +326,9 @@ class FuturePredictionPayloadBuilder:
         elif source_context.get("planned_runtime") is not None:
             runtime = int(source_context["planned_runtime"])
             runtime_source = "source_context"
-        elif imdb_context.get("runtime") is not None:
+        elif allow_current_imdb_snapshot and imdb_context.get("runtime") is not None:
             runtime = int(imdb_context["runtime"])
-            runtime_source = "imdb_local"
+            runtime_source = "imdb_current_snapshot"
         else:
             runtime = None
             runtime_source = None
@@ -321,11 +337,21 @@ class FuturePredictionPayloadBuilder:
         if genres_override is not None:
             genres = _clean_genres(genres_override)
             genres_source = "override"
-        else:
+        elif allow_current_imdb_snapshot:
             genres = list(imdb_context.get("genres") or [])
-            genres_source = "imdb_local" if genres else None
+            genres_source = "imdb_current_snapshot" if genres else None
+        else:
+            genres = []
+            genres_source = None
         if not genres:
             blockers.append("genres_missing")
+
+        current_imdb_snapshot_used = bool(
+            runtime_source == "imdb_current_snapshot"
+            or genres_source == "imdb_current_snapshot"
+        )
+        if current_imdb_snapshot_used:
+            warnings.append("current_imdb_snapshot_not_point_in_time")
 
         request_payload: dict[str, Any] | None = None
         if not blockers:
@@ -350,7 +376,7 @@ class FuturePredictionPayloadBuilder:
                 request_payload["synopsis"] = clean_synopsis
 
         result = {
-            "version": 1,
+            "version": 2,
             "project_id": project_id,
             "cutoff_at": cutoff_dt.isoformat(),
             "prediction_ready": not blockers,
@@ -362,6 +388,7 @@ class FuturePredictionPayloadBuilder:
                 "runtime": runtime_source,
                 "genres": genres_source,
                 "imdb_local_available": bool(imdb_context.get("available")),
+                "current_imdb_snapshot_allowed": bool(allow_current_imdb_snapshot),
                 "source_context_available": bool(source_context.get("available")),
                 "production_context_available": bool(
                     production_context.get("available")
@@ -369,6 +396,13 @@ class FuturePredictionPayloadBuilder:
             },
             "source_context": source_context,
             "production_context": production_context,
+            "imdb_current_snapshot": imdb_context,
+            "temporal_contract": {
+                "current_imdb_snapshot_allowed": bool(allow_current_imdb_snapshot),
+                "current_imdb_snapshot_used": current_imdb_snapshot_used,
+                "current_imdb_snapshot_point_in_time": False,
+                "historical_backtest_safe": not current_imdb_snapshot_used,
+            },
             "identity_hints": {
                 "directors": [
                     {
