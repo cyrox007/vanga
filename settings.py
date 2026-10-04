@@ -21,6 +21,12 @@ class Config:
         "VANGA_AUDIENCE_SIGNALS_DB",
         str(Path(ABSPATH) / "audience_signals.duckdb"),
     )
+    # P9 — локальный cache/registry будущих релизов. Inference не должен
+    # обращаться к внешним API: только к уже сохранённым датированным facts.
+    FUTURE_RELEASE_DB_PATH = os.getenv(
+        "VANGA_FUTURE_RELEASE_DB",
+        str(Path(ABSPATH) / "future_releases.duckdb"),
+    )
     ENRICHMENT_DB_PATH = os.getenv(
         "VANGA_ENRICHMENT_DB",
         str(Path(ABSPATH) / "enrichment.duckdb"),
