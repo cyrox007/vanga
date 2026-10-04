@@ -63,9 +63,9 @@ python scripts/wikidata_future_releases.py \
 
 Даже при `--import-db` collector сначала создаёт raw cache и fingerprinted batch, а затем использует `FutureReleaseBatchImporter`. Прямой сетевой write в registry отсутствует.
 
-## Текущий scope
+## Scope discovery-pass
 
-Первый adapter намеренно импортирует только discovery identity + release statements:
+Discovery adapter намеренно импортирует только identity + release statements:
 
 - canonical title;
 - Wikidata QID;
@@ -73,4 +73,15 @@ python scripts/wikidata_future_releases.py \
 - title alias;
 - release window + precision + statement-level provenance.
 
-Director/writer/cast/source/franchise enrichment остаётся отдельным collector-pass. Такой разрез позволяет сначала проверить надёжность discovery/release-date слоя и не превращать один большой SPARQL-запрос в неуправляемую точку отказа.
+Director/writer/cast/source/franchise/production company собираются отдельным `WikidataFutureEnricher`. Это сохраняет release discovery маленьким и проверяемым и не создаёт SPARQL Cartesian explosion.
+
+После discovery можно выполнить второй pass:
+
+```bash
+python scripts/wikidata_future_enrichment.py \
+  --registry-db future_releases.duckdb \
+  --limit 100 \
+  --import
+```
+
+Подробный контракт: `docs/P9_WIKIDATA_ENRICHMENT.md`.
