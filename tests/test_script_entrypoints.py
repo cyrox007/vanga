@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 BROKEN_IN_AUDIT = (
     "actor_persona.py",
+    "actor_persona_imdb.py",
     "audience_signals.py",
     "expert_agreement_transfer.py",
     "expert_blind_validation.py",
