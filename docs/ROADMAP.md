@@ -251,12 +251,23 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 
 ## P9. Future-release discovery
 
-Официальные IMDb datasets могут плохо покрывать далёкие будущие проекты. Нужен отдельный discovery/enrichment слой.
+Официальные IMDb datasets могут плохо покрывать далёкие будущие проекты. Для этого реализован отдельный локальный discovery/enrichment слой; сеть используется только при refresh, а inference читает cache.
 
-- [ ] Каталог будущих релизов с source provenance и датой последнего обновления.
-- [ ] Нормализовать фильм, режиссёров, сценаристов, актёров, source material, franchise, production label и release date.
-- [ ] Не делать inference зависимым от сетевого API: найденные данные кешировать локально.
-- [ ] При конфликте источников хранить provenance/confidence, а не молча выбирать значение.
+- [x] Локальный `future_releases.duckdb`: проекты, aliases, release windows/status, people/entities, source provenance, confidence и temporal `known_at`.
+- [x] Conflict-safe as-of snapshot: разные актуальные release/status источники не разрешаются молча, а возвращаются как candidates с provenance/confidence.
+- [x] Exact-normalized title aliases без fuzzy auto-merge внутри canonical registry.
+- [x] Atomic fingerprinted collector import contract с transaction rollback, idempotency и import history.
+- [x] Wikidata discovery collector: title/QID/IMDb ID и P577 release statements с реальной time precision, raw cache и deprecated-statement guard.
+- [x] Wikidata enrichment: director (`P57`), writer (`P58`), cast (`P161`), source work (`P144`), franchise/series (`P179`), production company (`P272`).
+- [x] Повторный enrichment добавляет provenance, но не раздувает logical director/writer/cast/entity в snapshot.
+- [x] Единый refresh pipeline `discovery → atomic import → enrichment chunks → atomic imports → report`; enrichment ограничен текущим discovery batch и чанками до 200 QID.
+- [x] Cache-only `FuturePredictionPayloadBuilder` с fail-closed blockers для release conflict/missing exact date/director/runtime/genres.
+- [x] Текущий IMDb runtime/genres snapshot запрещён как historical evidence по умолчанию; explicit opt-in помечает payload `historical_backtest_safe=false`.
+- [x] Inference не зависит от сетевого API: `network_required_for_inference=false` является частью P9 contract.
+- [~] Нормализация команды/source/franchise/production company уже автоматизирована; production label/shared universe пока требуют отдельного воспроизводимого adapter.
+- [ ] Добавить датированные pre-release adapters для runtime/genres/synopsis/status, не подменяя missing текущим недатированным snapshot.
+- [ ] Добавить второй независимый источник release date для реального cross-source confirmation/conflict detection.
+- [ ] Подключить публичный каталог будущих релизов и последние прогнозы в `jsint-site`.
 
 ## P10. Публичный продукт на jsint-site
 
@@ -282,7 +293,7 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 6. **Пилот Expert Analysis Corpus: Красный Циник + BadComedian + blind validation.**
 7. **Source/adaptation pre-release features, выведенные из ретроспективных закономерностей.**
 8. **Накопление временной истории IMDb ratings.**
-9. **Future-release discovery и дальнейший публичный UX.**
+9. **P9: датированные runtime/genres/synopsis/status adapters, второй release-date источник и затем публичный future-release UX.**
 
 ## Критерии готовности любого ML-инкремента
 
@@ -307,4 +318,8 @@ Retrospective Analyzer не должен напрямую кормить Vanga �
 - `docs/P2_STATUS.md` — Creative Team schema v7-v15 и безопасные поэтапные ablation.
 - `docs/PRODUCTION_CONTEXT.md` — factual registry, temporal/provenance contract, multi-director, studio/franchise/producer context и внешний creative influence.
 - `docs/EXPERT_ANALYSIS_CORPUS.md` — многопрофильный экспертный корпус, blind validation и переносимые методы анализа.
+- `docs/P9_FUTURE_RELEASES.md` — общий P9 registry/payload/collector contract.
+- `docs/P9_WIKIDATA_COLLECTOR.md` — Wikidata release discovery.
+- `docs/P9_WIKIDATA_ENRICHMENT.md` — Wikidata team/source/franchise/production enrichment.
+- `docs/P9_REFRESH_PIPELINE.md` — единый operational refresh pipeline.
 - Этот `docs/ROADMAP.md` — источник истины по согласованным планам дальнейшего развития.
