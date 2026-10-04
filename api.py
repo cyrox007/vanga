@@ -8,6 +8,7 @@ from typing import Any, Iterator
 from flask import Flask, jsonify, request
 
 from src.creative_kinovanga import KinoVanga
+from src.future_http_api import future_api
 from src.prediction_context import build_prediction_people_context
 from src.pre_release_profile import build_resolved_pre_release_profile
 from src.runtime_descriptor import resolve_model_runtime_descriptor
@@ -17,6 +18,7 @@ from src.runtime_identity import build_runtime_identity
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+app.register_blueprint(future_api)
 _lock = threading.RLock()
 _catalog_lock = threading.RLock()
 _engine: KinoVanga | None = None
