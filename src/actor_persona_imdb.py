@@ -87,6 +87,7 @@ def materialize_imdb_actor_roles(
         rows = conn.execute(sql, params).fetchall()
         appearances = 0
         characters_created = 0
+        skipped_existing = 0
         skipped_without_character = 0
         for work_id, actor_id, raw_characters, year, raw_genres in rows:
             names = _characters(raw_characters)
@@ -97,6 +98,14 @@ def materialize_imdb_actor_roles(
             release_at = f"{int(year):04d}-01-01T00:00:00Z"
             for index, name in enumerate(names):
                 character_id = f"imdb-character:{work_id}:{actor_id}:{index}"
+                appearance_id = f"imdb-role:{work_id}:{actor_id}:{index}"
+                existing = target.conn.execute(
+                    "SELECT 1 FROM actor_persona_role_appearances WHERE appearance_id=?",
+                    [appearance_id],
+                ).fetchone()
+                if existing:
+                    skipped_existing += 1
+                    continue
                 target.upsert_character(
                     {
                         "character_id": character_id,
@@ -107,7 +116,7 @@ def materialize_imdb_actor_roles(
                 characters_created += 1
                 target.add_role_appearance(
                     {
-                        "appearance_id": f"imdb-role:{work_id}:{actor_id}:{index}",
+                        "appearance_id": appearance_id,
                         "actor_id": str(actor_id),
                         "work_id": str(work_id),
                         "character_id": character_id,
@@ -127,6 +136,7 @@ def materialize_imdb_actor_roles(
             "rows_read": len(rows),
             "characters_created": characters_created,
             "appearances_created": appearances,
+            "skipped_existing": skipped_existing,
             "skipped_without_character": skipped_without_character,
         }
     finally:
