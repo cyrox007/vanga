@@ -81,12 +81,14 @@ class ActorPersonaTests(unittest.TestCase):
 
     def test_self_portrayal_and_inversion(self) -> None:
         for idx in range(3):
+            release_year = 2020 + idx
+            known_year = 2019 + idx
             self.store.add_role_appearance(
                 self._appearance(
                     appearance_id=f"a-{idx}",
                     work_id=f"tt-{idx}",
-                    work_release_at=f"202{idx}-01-01T00:00:00Z",
-                    known_at=f"201{9+idx}-01-01T00:00:00Z",
+                    work_release_at=f"{release_year}-01-01T00:00:00Z",
+                    known_at=f"{known_year}-01-01T00:00:00Z",
                 )
             )
         features = self.store.candidate_features_as_of(
