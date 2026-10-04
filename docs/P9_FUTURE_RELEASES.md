@@ -14,7 +14,8 @@ Registry хранит:
 - историю production status;
 - режиссёров, сценаристов и cast;
 - source material, franchise/shared universe, studio/production company/label;
-- provenance каждого факта.
+- provenance каждого факта;
+- историю fingerprinted collector batches.
 
 ## Temporal contract
 
@@ -80,7 +81,46 @@ python scripts/future_prediction_payload.py project-123 \
 
 Команда завершится с кодом `0`, если payload готов к `/predict`, и `2`, если остались blockers.
 
+## Collector import contract
+
+Внешний collector не пишет таблицы registry напрямую. Он формирует batch contract версии `1`:
+
+```json
+{
+  "version": 1,
+  "batch_id": "official-feed-2026-10-04",
+  "provider": "official-feed",
+  "retrieved_at": "2026-10-04T08:00:00Z",
+  "cursor": "optional-provider-cursor",
+  "source_fingerprint_sha256": "...",
+  "bundle": {
+    "sources": [],
+    "projects": [],
+    "people": [],
+    "entities": [],
+    "aliases": [],
+    "release_windows": [],
+    "statuses": [],
+    "project_people": [],
+    "project_entities": []
+  }
+}
+```
+
+`FutureReleaseBatchImporter` проверяет структуру, timestamp источников и fingerprint, после чего импортирует весь bundle одной DuckDB-транзакцией. Если любая ссылка/сущность некорректна, импорт откатывается полностью.
+
+Один `provider + source_fingerprint_sha256` импортируется идемпотентно. Нельзя использовать тот же source fingerprint для другого bundle, а существующий `batch_id` нельзя переопределить другим содержимым.
+
+```bash
+python scripts/future_release_import.py import collector-batch.json
+python scripts/future_release_import.py history --provider official-feed
+```
+
+Таким образом конкретные Wikidata/официальные/ручные collectors можно менять независимо от registry, сохраняя один воспроизводимый входной контракт.
+
 ## CLI registry
+
+Для ручной разработки остаётся низкоуровневый CLI:
 
 ```bash
 python scripts/future_releases.py import-bundle future.json
@@ -89,9 +129,7 @@ python scripts/future_releases.py catalog --cutoff 2026-10-01T00:00:00Z --from-a
 python scripts/future_releases.py resolve-title "Название фильма" --cutoff 2026-10-01T00:00:00Z
 ```
 
-Bundle может содержать массивы:
-
-`sources`, `projects`, `people`, `entities`, `aliases`, `release_windows`, `statuses`, `project_people`, `project_entities`.
+Production collectors должны использовать fingerprinted batch importer, а не ручной `import-bundle`.
 
 ## Граница ответственности
 
@@ -101,7 +139,8 @@ Bundle может содержать массивы:
 2. записать provider/url/retrieved_at;
 3. сохранить `known_at` и confidence;
 4. нормализовать IDs;
-5. импортировать bundle в P9 registry.
+5. вычислить source fingerprint;
+6. передать atomic batch в P9 importer.
 
 Prediction/catalog используют только локальные БД. `network_required_for_inference=false` / `network_required=false` являются частью snapshot/catalog/payload contract.
 
@@ -109,6 +148,5 @@ Prediction/catalog используют только локальные БД. `n
 
 Следующие P9 инкременты:
 
-- source adapters/collectors с rate limiting и cache-only output;
-- cross-registry materialization для дополнительных pre-release facts без дублирования источника истины;
+- конкретные source adapters/collectors с rate limiting и cache-only output;
 - публичный каталог на jsint-site.
