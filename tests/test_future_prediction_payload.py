@@ -171,8 +171,13 @@ class FuturePredictionPayloadTests(unittest.TestCase):
         finally:
             store.close()
 
-    def test_builds_existing_predict_contract_entirely_from_local_stores(self):
-        result = self.builder.build("film-a", "2026-02-01T00:00:00Z")
+    def test_builds_predict_contract_from_dated_context_and_override(self):
+        result = self.builder.build(
+            "film-a",
+            "2026-02-01T00:00:00Z",
+            genres_override=["Drama", "Sci-Fi"],
+        )
+        self.assertEqual(result["version"], 2)
         self.assertTrue(result["prediction_ready"])
         self.assertEqual(result["blockers"], [])
         request = result["request"]
@@ -183,21 +188,87 @@ class FuturePredictionPayloadTests(unittest.TestCase):
         self.assertEqual(request["writer"], "Writer A")
         self.assertEqual(request["actors"], ["Actor A", "Actor B"])
         self.assertEqual(request["year"], 2027)
-        # Source Context planned runtime имеет приоритет над текущим IMDb runtime.
         self.assertEqual(request["runtime"], 125)
         self.assertEqual(request["genres"], ["Drama", "Sci-Fi"])
         self.assertEqual(request["source"]["title"], "Book A")
         self.assertEqual(request["source"]["type"], "novel")
         self.assertEqual(request["source"]["series_size"], 3)
         self.assertEqual(result["input_sources"]["runtime"], "source_context")
-        self.assertEqual(result["input_sources"]["genres"], "imdb_local")
+        self.assertEqual(result["input_sources"]["genres"], "override")
+        self.assertFalse(result["input_sources"]["current_imdb_snapshot_allowed"])
+        self.assertFalse(result["input_sources"]["imdb_local_available"])
         self.assertTrue(result["source_context"]["available"])
         self.assertTrue(result["production_context"]["available"])
         self.assertEqual(
             result["production_context"]["features"]["production_franchise_known"],
             1.0,
         )
+        self.assertTrue(result["temporal_contract"]["historical_backtest_safe"])
         self.assertFalse(result["network_required"])
+
+    def test_current_imdb_snapshot_is_disabled_by_default(self):
+        result = self.builder.build("film-a", "2026-02-01T00:00:00Z")
+        self.assertFalse(result["prediction_ready"])
+        self.assertIn("genres_missing", result["blockers"])
+        self.assertNotIn("runtime_missing", result["blockers"])
+        self.assertIsNone(result["request"])
+        self.assertEqual(result["input_sources"]["runtime"], "source_context")
+        self.assertIsNone(result["input_sources"]["genres"])
+        self.assertFalse(result["input_sources"]["current_imdb_snapshot_allowed"])
+        self.assertEqual(
+            result["imdb_current_snapshot"]["disabled_reason"],
+            "undated_current_snapshot_requires_explicit_opt_in",
+        )
+        self.assertTrue(result["temporal_contract"]["historical_backtest_safe"])
+        self.assertFalse(result["temporal_contract"]["current_imdb_snapshot_used"])
+
+    def test_current_imdb_snapshot_opt_in_is_explicitly_not_backtest_safe(self):
+        result = self.builder.build(
+            "film-a",
+            "2026-02-01T00:00:00Z",
+            allow_current_imdb_snapshot=True,
+        )
+        self.assertTrue(result["prediction_ready"])
+        self.assertEqual(result["request"]["runtime"], 125)
+        self.assertEqual(result["request"]["genres"], ["Drama", "Sci-Fi"])
+        self.assertEqual(result["input_sources"]["runtime"], "source_context")
+        self.assertEqual(
+            result["input_sources"]["genres"],
+            "imdb_current_snapshot",
+        )
+        self.assertTrue(result["input_sources"]["imdb_local_available"])
+        self.assertIn(
+            "current_imdb_snapshot_not_point_in_time",
+            result["warnings"],
+        )
+        self.assertTrue(result["temporal_contract"]["current_imdb_snapshot_used"])
+        self.assertFalse(result["temporal_contract"]["historical_backtest_safe"])
+
+    def test_current_imdb_snapshot_can_supply_runtime_only_with_opt_in(self):
+        # До 20 января planned runtime Source Context ещё не был известен.
+        safe = self.builder.build(
+            "film-a",
+            "2026-01-18T00:00:00Z",
+            genres_override=["Drama"],
+        )
+        self.assertFalse(safe["prediction_ready"])
+        self.assertIn("runtime_missing", safe["blockers"])
+
+        interactive = self.builder.build(
+            "film-a",
+            "2026-01-18T00:00:00Z",
+            allow_current_imdb_snapshot=True,
+        )
+        self.assertTrue(interactive["prediction_ready"])
+        self.assertEqual(interactive["request"]["runtime"], 119)
+        self.assertEqual(interactive["request"]["genres"], ["Drama", "Sci-Fi"])
+        self.assertEqual(
+            interactive["input_sources"]["runtime"],
+            "imdb_current_snapshot",
+        )
+        self.assertFalse(
+            interactive["temporal_contract"]["historical_backtest_safe"]
+        )
 
     def test_explicit_runtime_and_genres_override_local_context(self):
         result = self.builder.build(
@@ -213,6 +284,7 @@ class FuturePredictionPayloadTests(unittest.TestCase):
         self.assertEqual(result["request"]["synopsis"], "Короткий синопсис.")
         self.assertEqual(result["input_sources"]["runtime"], "override")
         self.assertEqual(result["input_sources"]["genres"], "override")
+        self.assertTrue(result["temporal_contract"]["historical_backtest_safe"])
 
     def test_release_conflict_blocks_prediction_instead_of_choosing_source(self):
         with FutureReleaseStore(self.future_db) as store:
