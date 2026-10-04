@@ -141,6 +141,8 @@ Discovery collector `WikidataFutureReleaseCollector` отвечает тольк
 
 Оба прохода выполняют сеть только во время обновления cache. Inference читает исключительно локальные DuckDB.
 
+Для отладки collectors можно запускать отдельно:
+
 ```bash
 python scripts/wikidata_future_releases.py \
   --from-at 2026-10-04T00:00:00Z \
@@ -154,6 +156,30 @@ python scripts/wikidata_future_enrichment.py \
 ```
 
 Подробности enrichment-контракта: `docs/P9_WIKIDATA_ENRICHMENT.md`.
+
+## Единый refresh
+
+Для эксплуатации основным путём является `FutureReleaseRefreshPipeline`:
+
+```text
+discovery -> atomic import -> enrichment chunks -> atomic imports -> report
+```
+
+Он обогащает только проекты текущего discovery batch, дробит enrichment максимум по 200 QID и сохраняет частичный результат, если поздний сетевой этап завершился ошибкой. Уже успешно импортированный discovery при этом не откатывается.
+
+```bash
+python scripts/future_release_refresh.py \
+  --db future_releases.duckdb \
+  --from-at 2026-10-04T00:00:00Z \
+  --to-at 2029-01-01T00:00:00Z \
+  --discovery-limit 1000 \
+  --enrichment-chunk-size 100 \
+  --output /var/log/vanga/p9-refresh.json
+```
+
+Код `0` означает полностью успешный refresh. Код `2` означает частичный/неуспешный проход; JSON-report всё равно содержит `failed_stage` и уже завершённые imports.
+
+Подробности: `docs/P9_REFRESH_PIPELINE.md`.
 
 ## CLI registry
 
