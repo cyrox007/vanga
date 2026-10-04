@@ -59,12 +59,18 @@ def _freshness_report(target: Path) -> dict:
     return build_freshness_report(target, data_dir=data_dir)
 
 
+def _freshness_manifest_path() -> Path:
+    override = str(os.getenv("VANGA_FRESHNESS_MANIFEST_PATH") or "").strip()
+    if override:
+        return Path(override)
+    return Path(config.ABSPATH) / "data" / "imdb" / "freshness-manifest.json"
+
+
 def _write_freshness_manifest(target: Path) -> dict:
-    data_dir = Path(config.ABSPATH) / "data" / "imdb"
     report = _freshness_report(target)
     manifest = write_freshness_manifest(
         report,
-        data_dir / "freshness-manifest.json",
+        _freshness_manifest_path(),
     )
     if report.get("ready_for_full_training"):
         logger.info(
@@ -96,6 +102,18 @@ def _database_is_older_than_downloaded_datasets(target: Path) -> bool:
 
 def _capture_rating_history(target: Path, freshness_report: dict) -> None:
     """Best-effort P7 capture: ошибка истории не ломает публикацию свежей IMDb БД."""
+    if str(os.getenv("VANGA_SKIP_RATING_HISTORY") or "").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        logger.info(
+            "IMDb Rating History: snapshot пропущен для staging runtime "
+            "(VANGA_SKIP_RATING_HISTORY=1)"
+        )
+        return
+
     try:
         with RatingHistoryStore() as history:
             result = history.capture_daily(
