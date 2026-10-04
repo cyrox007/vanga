@@ -1,0 +1,235 @@
+{
+  "profiles": [
+    {
+      "expert_id": "red-cynic",
+      "display_name": "Красный Циник / Red Cynic",
+      "focus": [
+        "adaptation",
+        "causality",
+        "motivation",
+        "worldbuilding",
+        "character",
+        "continuity"
+      ],
+      "note": "Пилотный независимый профиль. Используется для изучения переносимых методов анализа, а не для имитации вкуса автора."
+    },
+    {
+      "expert_id": "badcomedian",
+      "display_name": "BadComedian / Евгений Баженов",
+      "focus": [
+        "script_logic",
+        "motivation",
+        "setup_payoff",
+        "continuity",
+        "production_context"
+      ],
+      "note": "Пилотный независимый профиль. Используется для изучения доказательной структуры и переносимых принципов, а не для предсказания реакции автора."
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "pilot-red-avatar-way-of-water",
+      "film_title": "Аватар: Путь воды",
+      "film_year": 2022,
+      "split": "train",
+      "note": "Split зафиксирован до структурированной разметки."
+    },
+    {
+      "case_id": "pilot-red-prey",
+      "film_title": "Добыча",
+      "film_year": 2022,
+      "split": "train",
+      "note": "Split зафиксирован до структурированной разметки."
+    },
+    {
+      "case_id": "pilot-red-rebel-moon-1",
+      "film_title": "Мятежная Луна, часть 1: Дитя огня",
+      "film_year": 2023,
+      "split": "train",
+      "note": "Split зафиксирован до структурированной разметки."
+    },
+    {
+      "case_id": "pilot-red-predator-badlands",
+      "film_title": "Хищник: Дикие земли",
+      "film_year": 2025,
+      "split": "development",
+      "note": "Split зафиксирован до структурированной разметки."
+    },
+    {
+      "case_id": "pilot-red-color-out-of-space",
+      "film_title": "Цвет из иных миров",
+      "film_year": 2019,
+      "split": "blind",
+      "note": "Закрытый gold должен появиться только после независимого Analyzer run."
+    },
+    {
+      "case_id": "pilot-red-rebel-moon-2",
+      "film_title": "Мятежная Луна, часть 2: Дарующая шрамы",
+      "film_year": 2024,
+      "split": "external_transfer",
+      "note": "Gold этого эксперта используется только post-hoc для held-out-expert transfer."
+    },
+    {
+      "case_id": "pilot-bad-viking",
+      "film_title": "Викинг",
+      "film_year": 2016,
+      "split": "train",
+      "note": "Split зафиксирован до структурированной разметки."
+    },
+    {
+      "case_id": "pilot-bad-t34",
+      "film_title": "Т-34",
+      "film_year": 2018,
+      "split": "train",
+      "note": "Split зафиксирован до структурированной разметки."
+    },
+    {
+      "case_id": "pilot-bad-terminator-genisys",
+      "film_title": "Терминатор: Генезис",
+      "film_year": 2015,
+      "split": "development",
+      "note": "Split зафиксирован до структурированной разметки."
+    },
+    {
+      "case_id": "pilot-bad-burnt-by-sun-2-pred",
+      "film_title": "Утомлённые солнцем 2: Предстояние",
+      "film_year": 2010,
+      "split": "blind",
+      "note": "Закрытый gold должен появиться только после независимого Analyzer run."
+    },
+    {
+      "case_id": "pilot-bad-burnt-by-sun-2-citadel",
+      "film_title": "Утомлённые солнцем 2: Цитадель",
+      "film_year": 2011,
+      "split": "external_transfer",
+      "note": "Gold этого эксперта используется только post-hoc для held-out-expert transfer."
+    }
+  ],
+  "materials": [
+    {
+      "material_id": "red-avatar-way-of-water-2023",
+      "expert_id": "red-cynic",
+      "title": "«Аватар: Путь воды». Обзор «Красного Циника»",
+      "source_url": "https://boosty.to/redcynic/posts/56387f20-06d9-40f5-970c-b6efada01502",
+      "media_type": "video",
+      "published_at": "2023-07-06T16:20:00+03:00",
+      "retrieved_at": "2026-10-04T00:00:00Z",
+      "note": "Metadata-only pilot source; полный текст/транскрипт не хранится."
+    },
+    {
+      "material_id": "red-prey-2022",
+      "expert_id": "red-cynic",
+      "title": "«Добыча». Обзор «Красного Циника»",
+      "source_url": "https://boosty.to/redcynic/posts/1cc0b787-b464-46e8-9404-4013ab690287",
+      "media_type": "video",
+      "published_at": "2022-10-02T23:01:00+03:00",
+      "retrieved_at": "2026-10-04T00:00:00Z",
+      "note": "Metadata-only pilot source; полный текст/транскрипт не хранится."
+    },
+    {
+      "material_id": "red-rebel-moon-1-2024",
+      "expert_id": "red-cynic",
+      "title": "«Мятежная Луна, часть 1: Дитя огня». Обзор «Красного Циника»",
+      "source_url": "https://boosty.to/redcynic/posts/d6a74e13-70ce-491f-9f87-14b8b6c6f281",
+      "media_type": "video",
+      "published_at": "2024-04-07T17:01:00+03:00",
+      "retrieved_at": "2026-10-04T00:00:00Z",
+      "note": "Metadata-only pilot source; полный текст/транскрипт не хранится."
+    },
+    {
+      "material_id": "red-predator-badlands-2026",
+      "expert_id": "red-cynic",
+      "title": "«Хищник: Дикие земли». Обзор «Красного Циника» с цензурой",
+      "source_url": "https://boosty.to/redcynic/posts/eb878e40-b8ba-4d97-b906-15a112a22bd8/media/242c5567-be51-4fb9-b0f9-b0024e66a1f0",
+      "media_type": "video",
+      "published_at": "2026-03-24T16:24:00+03:00",
+      "retrieved_at": "2026-10-04T00:00:00Z",
+      "note": "Metadata-only pilot source; полный текст/транскрипт не хранится."
+    },
+    {
+      "material_id": "red-color-out-of-space-2021",
+      "expert_id": "red-cynic",
+      "title": "«Цвет из иных миров». Обзор «Красного Циника»",
+      "source_url": "https://boosty.to/redcynic/posts/9027c5ff-2bb0-4ef8-84f5-f03410f9ea91",
+      "media_type": "video",
+      "published_at": "2021-07-31T19:44:00+03:00",
+      "retrieved_at": "2026-10-04T00:00:00Z",
+      "note": "Metadata-only pilot source; blind gold не размечать в открытом development процессе."
+    },
+    {
+      "material_id": "red-rebel-moon-2-2025",
+      "expert_id": "red-cynic",
+      "title": "«Мятежная Луна, часть 2: Дарующая шрамы». Обзор «Красного Циника»",
+      "source_url": "https://boosty.to/redcynic/posts/da7bbbe8-c4d0-4c1e-9d18-b7098813c70c/media/4438ded6-b215-448f-ac7b-21a8137d0927",
+      "media_type": "video",
+      "published_at": "2025-08-24T17:30:00+03:00",
+      "retrieved_at": "2026-10-04T00:00:00Z",
+      "note": "Metadata-only held-out-expert transfer source."
+    },
+    {
+      "material_id": "bad-viking-2017",
+      "expert_id": "badcomedian",
+      "title": "[BadComedian] - ВИКИНГ (Самый дорогой фильм в истории России)",
+      "source_url": "https://www.youtube.com/watch?v=2_bWhf5SdtI",
+      "media_type": "video",
+      "published_at": "2017-05-06T00:00:00Z",
+      "retrieved_at": "2026-10-04T00:00:00Z",
+      "note": "Источник с верифицированного канала BadComedian; полный транскрипт не хранится."
+    },
+    {
+      "material_id": "bad-t34-2019",
+      "expert_id": "badcomedian",
+      "title": "[BadComedian] - T-34 (Attraction of Nazis)",
+      "source_url": "https://www.youtube.com/watch?v=BKQlqjBDF8Q",
+      "media_type": "video",
+      "published_at": "2019-05-09T00:00:00Z",
+      "retrieved_at": "2026-10-04T00:00:00Z",
+      "note": "Источник с верифицированного канала BadComedian; полный транскрипт не хранится."
+    },
+    {
+      "material_id": "bad-terminator-genisys-2015",
+      "expert_id": "badcomedian",
+      "title": "[BadComedian] - ТЕРМИНАТОР 5 Генезис (РЕЖ. версия)",
+      "source_url": "https://www.youtube.com/watch?v=ODGaPZvG4jw",
+      "media_type": "video",
+      "published_at": "2015-12-01T00:00:00Z",
+      "retrieved_at": "2026-10-04T00:00:00Z",
+      "note": "Источник с верифицированного канала BadComedian; полный транскрипт не хранится."
+    },
+    {
+      "material_id": "bad-burnt-by-sun-2-pred-2012",
+      "expert_id": "badcomedian",
+      "title": "[BadComedian] - Утомлённые Солнцем 2: Предстояние (ЧАСТЬ 2)",
+      "source_url": "https://www.youtube.com/watch?v=wIERwRosxkY",
+      "media_type": "video",
+      "published_at": "2012-05-10T00:00:00Z",
+      "retrieved_at": "2026-10-04T00:00:00Z",
+      "note": "Источник с верифицированного канала BadComedian; blind gold не размечать в открытом development процессе."
+    },
+    {
+      "material_id": "bad-burnt-by-sun-2-citadel-2013",
+      "expert_id": "badcomedian",
+      "title": "[BadComedian] - Утомлённые Солнцем 2: ЦИТАДЕЛЬ (ЧАСТЬ 2)",
+      "source_url": "https://www.youtube.com/watch?v=qjWuXY-qbZg",
+      "media_type": "video",
+      "published_at": "2013-05-10T00:00:00Z",
+      "retrieved_at": "2026-10-04T00:00:00Z",
+      "note": "Источник с верифицированного канала BadComedian; metadata-only held-out-expert transfer source."
+    }
+  ],
+  "case_materials": [
+    {"link_id": "link-red-avatar", "case_id": "pilot-red-avatar-way-of-water", "material_id": "red-avatar-way-of-water-2023"},
+    {"link_id": "link-red-prey", "case_id": "pilot-red-prey", "material_id": "red-prey-2022"},
+    {"link_id": "link-red-rebel1", "case_id": "pilot-red-rebel-moon-1", "material_id": "red-rebel-moon-1-2024"},
+    {"link_id": "link-red-predator", "case_id": "pilot-red-predator-badlands", "material_id": "red-predator-badlands-2026"},
+    {"link_id": "link-red-color", "case_id": "pilot-red-color-out-of-space", "material_id": "red-color-out-of-space-2021"},
+    {"link_id": "link-red-rebel2", "case_id": "pilot-red-rebel-moon-2", "material_id": "red-rebel-moon-2-2025"},
+    {"link_id": "link-bad-viking", "case_id": "pilot-bad-viking", "material_id": "bad-viking-2017"},
+    {"link_id": "link-bad-t34", "case_id": "pilot-bad-t34", "material_id": "bad-t34-2019"},
+    {"link_id": "link-bad-terminator", "case_id": "pilot-bad-terminator-genisys", "material_id": "bad-terminator-genisys-2015"},
+    {"link_id": "link-bad-pred", "case_id": "pilot-bad-burnt-by-sun-2-pred", "material_id": "bad-burnt-by-sun-2-pred-2012"},
+    {"link_id": "link-bad-citadel", "case_id": "pilot-bad-burnt-by-sun-2-citadel", "material_id": "bad-burnt-by-sun-2-citadel-2013"}
+  ],
+  "claims": [],
+  "evidence": []
+}
