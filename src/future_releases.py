@@ -119,6 +119,10 @@ class FutureReleaseStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = duckdb.connect(str(self.path))
         self.conn.execute("SET threads = 1")
+        # TIMESTAMPTZ DuckDB отображает в timezone текущего соединения. Без
+        # явного UTC один и тот же момент сериализовался как +00:00 или +03:00
+        # в зависимости от окружения и менял API/fingerprint.
+        self.conn.execute("SET TimeZone = 'UTC'")
         self._ensure_schema()
 
     def close(self) -> None:
@@ -287,15 +291,29 @@ class FutureReleaseStore:
         retrieved_at = _dt(
             payload.get("retrieved_at") or _now(), field_name="retrieved_at"
         )
-        self.conn.execute(
+
+        existing = self.conn.execute(
             """
-            INSERT INTO future_release_sources VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(source_id) DO UPDATE SET
-                provider=excluded.provider,
-                url=excluded.url,
-                usage_basis=excluded.usage_basis,
-                retrieved_at=excluded.retrieved_at
+            SELECT provider, url, usage_basis, retrieved_at
+            FROM future_release_sources WHERE source_id = ?
             """,
+            [source_id],
+        ).fetchone()
+        if existing is not None:
+            existing_retrieved = existing[3].astimezone(timezone.utc)
+            if (
+                str(existing[0]) != provider
+                or (str(existing[1]) if existing[1] is not None else None) != url
+                or str(existing[2]) != usage_basis
+                or existing_retrieved != retrieved_at
+            ):
+                raise FutureReleaseError(
+                    f"source_id={source_id} уже существует с другим immutable snapshot"
+                )
+            return source_id
+
+        self.conn.execute(
+            "INSERT INTO future_release_sources VALUES (?, ?, ?, ?, ?)",
             [source_id, provider, url, usage_basis, retrieved_at],
         )
         return source_id
@@ -354,6 +372,34 @@ class FutureReleaseStore:
             limit=180,
             required=True,
         )
+        known_at = _dt(payload.get("known_at"), field_name="known_at")
+        confidence = _confidence(payload.get("confidence", 1.0))
+        existing = self.conn.execute(
+            """
+            SELECT project_id, normalized_alias, known_at, source_id, confidence
+            FROM future_release_aliases WHERE alias_id = ?
+            """,
+            [alias_id],
+        ).fetchone()
+        if existing is not None:
+            if str(existing[0]) != project_id or str(existing[1]) != normalized:
+                raise FutureReleaseError(
+                    f"alias_id={alias_id} уже принадлежит другому logical alias"
+                )
+            # Stable logical alias сохраняет первое известное наблюдение. Если
+            # более раннее evidence импортируется задним числом, двигаем first-known
+            # назад; более поздний повтор не переписывает provenance прошлого.
+            if known_at < existing[2].astimezone(timezone.utc):
+                self.conn.execute(
+                    """
+                    UPDATE future_release_aliases
+                    SET alias = ?, known_at = ?, source_id = ?, confidence = ?
+                    WHERE alias_id = ?
+                    """,
+                    [alias, known_at, source_id, confidence, alias_id],
+                )
+            return alias_id
+
         self.conn.execute(
             """
             INSERT INTO future_release_aliases VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -363,9 +409,9 @@ class FutureReleaseStore:
                 project_id,
                 alias,
                 normalized,
-                _dt(payload.get("known_at"), field_name="known_at"),
+                known_at,
                 source_id,
-                _confidence(payload.get("confidence", 1.0)),
+                confidence,
             ],
         )
         return alias_id
@@ -783,7 +829,7 @@ class FutureReleaseStore:
                 "entity_id": str(row[0]),
                 "kind": str(row[1]),
                 "canonical_name": str(row[2]),
-                "external_id": str(row[3]) if row[3] else None,
+                "external_id": str(row[3]) if row[3] is not None else None,
                 "relation_type": str(row[4]),
                 "first_known_at": row[5].isoformat(),
                 "max_confidence": float(row[6]),
