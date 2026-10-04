@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from src.future_releases import FutureReleaseError, FutureReleaseStore
+from src.future_temporal_facts import FutureTemporalFactStore
 
 
 IMPORT_CONTRACT_VERSION = 1
@@ -20,6 +21,7 @@ BUNDLE_ARRAYS = (
     "statuses",
     "project_people",
     "project_entities",
+    "temporal_facts",
 )
 
 
@@ -80,6 +82,10 @@ class FutureReleaseBatchImporter:
     Collector может быть любым, но registry принимает только воспроизводимый batch
     с provider/retrieved_at/source fingerprint. Повтор того же source snapshot
     идемпотентен, а частично импортированный bundle невозможен.
+
+    ``temporal_facts`` импортируются через тот же DuckDB connection и ту же
+    транзакцию, поэтому проект, source provenance и датированные runtime/genres/
+    synopsis либо сохраняются вместе, либо целиком откатываются.
     """
 
     def __init__(self, store: FutureReleaseStore | str | Path) -> None:
@@ -90,9 +96,11 @@ class FutureReleaseBatchImporter:
             self.store = FutureReleaseStore(store)
             self._owns_store = True
         self.conn = self.store.conn
+        self.temporal_facts = FutureTemporalFactStore(self.store)
         self._ensure_schema()
 
     def close(self) -> None:
+        self.temporal_facts.close()
         if self._owns_store:
             self.store.close()
 
@@ -270,6 +278,8 @@ class FutureReleaseBatchImporter:
                 self.store.link_person(item)
             for item in bundle["project_entities"]:
                 self.store.link_entity(item)
+            for item in bundle["temporal_facts"]:
+                self.temporal_facts.add_fact(item)
 
             self.conn.execute(
                 """
