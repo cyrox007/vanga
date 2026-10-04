@@ -26,11 +26,14 @@ Blind validation, consensus и agreement/transfer реализованы отд�
 
 - 2 независимых expert profile;
 - материалы минимум для двух экспертов;
-- 5 train cases;
-- 2 blind cases;
-- 2 external-transfer cases;
+- размеченные claims минимум от двух экспертов;
+- 5 **размеченных** train cases;
+- 2 **размеченных** blind cases;
+- 2 **размеченных** external-transfer cases;
 - 10 структурированных claims;
 - supporting evidence для каждого claim.
+
+Пустой case без claim не считается готовой единицей корпуса и не помогает пройти split gate.
 
 Отсутствие contradicting evidence пока является предупреждением, а не автоматическим blocker, но указывает на риск confirmation bias.
 
