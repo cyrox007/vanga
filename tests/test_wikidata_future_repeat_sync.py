@@ -82,8 +82,16 @@ class WikidataFutureRepeatSyncTests(unittest.TestCase):
                 self.assertFalse(first_import["idempotent"])
                 self.assertFalse(second_import["idempotent"])
 
-                early = importer.store.snapshot_as_of("wikidata:Q100", first_at)
-                late = importer.store.snapshot_as_of("wikidata:Q100", second_at)
+                early = importer.store.snapshot_as_of(
+                    "wikidata:Q100",
+                    first_at,
+                    territory="unspecified",
+                )
+                late = importer.store.snapshot_as_of(
+                    "wikidata:Q100",
+                    second_at,
+                    territory="unspecified",
+                )
                 self.assertEqual(len(early["release_candidates"]), 1)
                 self.assertEqual(len(late["release_candidates"]), 1)
                 self.assertEqual(
@@ -94,7 +102,10 @@ class WikidataFutureRepeatSyncTests(unittest.TestCase):
                     item["source_id"]
                     for item in late["release_candidates"][0]["evidence"]
                 }
-                self.assertEqual(late_sources, {first_source["source_id"], second_source["source_id"]})
+                self.assertEqual(
+                    late_sources,
+                    {first_source["source_id"], second_source["source_id"]},
+                )
 
                 source_rows = importer.store.conn.execute(
                     "SELECT source_id, retrieved_at FROM future_release_sources ORDER BY retrieved_at"
