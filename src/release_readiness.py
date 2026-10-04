@@ -27,11 +27,10 @@ class ReadinessCheck:
 
 
 class ReleaseReadiness:
-    """Проверяет локальный runtime и, опционально, живой HTTP API Vanga.
+    """Проверяет runtime без загрузки второй CatBoost-модели.
 
-    Проверка специально не загружает CatBoost-модель и не обращается к внешним
-    источникам данных. Live-проверки обращаются только к указанному локальному
-    Vanga API.
+    Offline-проход не использует сеть. Live-проход обращается только к явно
+    указанному локальному Vanga API и не запускает collectors.
     """
 
     def __init__(
@@ -49,30 +48,20 @@ class ReleaseReadiness:
 
     @staticmethod
     def _check(name: str, status: str, message: str, **details: Any) -> ReadinessCheck:
-        return ReadinessCheck(
-            name=name,
-            status=status,
-            message=message,
-            details=details or None,
-        )
+        return ReadinessCheck(name, status, message, details or None)
 
     @staticmethod
-    def _table_names(conn: duckdb.DuckDBPyConnection) -> set[str]:
-        rows = conn.execute("SHOW TABLES").fetchall()
-        return {str(row[0]) for row in rows}
+    def _tables(conn: duckdb.DuckDBPyConnection) -> set[str]:
+        return {str(row[0]) for row in conn.execute("SHOW TABLES").fetchall()}
 
     def check_python(self) -> ReadinessCheck:
         version = platform.python_version()
-        major, minor = platform.python_version_tuple()[:2]
-        supported = (int(major), int(minor)) >= (3, 10)
+        major, minor = (int(part) for part in platform.python_version_tuple()[:2])
+        ok = (major, minor) >= (3, 10)
         return self._check(
             "python",
-            "pass" if supported else "fail",
-            (
-                f"Python {version} поддерживается"
-                if supported
-                else f"Python {version} слишком старый; требуется Python 3.10+"
-            ),
+            "pass" if ok else "fail",
+            f"Python {version} {'поддерживается' if ok else 'слишком старый; требуется 3.10+'}",
             version=version,
         )
 
@@ -84,12 +73,12 @@ class ReleaseReadiness:
             "src/future_regional_release.py",
             "deploy/update-vanga.sh",
         )
-        missing = [name for name in required if not (self.root / name).is_file()]
+        missing = [item for item in required if not (self.root / item).is_file()]
         if missing:
             return self._check(
                 "required_files",
                 "fail",
-                "Не хватает обязательных файлов runtime",
+                "Не хватает обязательных runtime-файлов",
                 missing=missing,
             )
         return self._check(
@@ -102,56 +91,42 @@ class ReleaseReadiness:
     def check_imdb_db(self) -> ReadinessCheck:
         path = self.imdb_db_path
         if not path.is_file():
-            return self._check(
-                "imdb_db",
-                "fail",
-                f"IMDb DuckDB не найден: {path}",
-                path=str(path),
-            )
+            return self._check("imdb_db", "fail", f"IMDb DuckDB не найден: {path}")
         try:
             conn = duckdb.connect(str(path), read_only=True)
             try:
-                tables = self._table_names(conn)
-                required_any = {"titles", "title_basics"}
-                has_titles = bool(tables & required_any)
-                has_crew = "title_crew" in tables or "title_writers" in tables
-                if not has_titles:
-                    return self._check(
-                        "imdb_db",
-                        "fail",
-                        "IMDb DuckDB открывается, но таблица фильмов не найдена",
-                        path=str(path),
-                        tables=sorted(tables),
-                    )
-                status = "pass" if has_crew else "warn"
-                message = (
-                    "IMDb DuckDB готов, crew/writer слой найден"
-                    if has_crew
-                    else "IMDb DuckDB готов, но crew/writer слой не подтверждён"
-                )
-                return self._check(
-                    "imdb_db",
-                    status,
-                    message,
-                    path=str(path),
-                    size_bytes=path.stat().st_size,
-                    crew_or_writer_table=has_crew,
-                )
+                tables = self._tables(conn)
             finally:
                 conn.close()
         except Exception as exc:
+            return self._check("imdb_db", "fail", f"IMDb DuckDB не открывается: {exc}")
+
+        if "title_basics" not in tables:
             return self._check(
                 "imdb_db",
                 "fail",
-                f"IMDb DuckDB не открывается: {exc}",
-                path=str(path),
+                "IMDb DuckDB не содержит title_basics",
+                tables=sorted(tables),
             )
+        has_crew = "title_crew" in tables and "title_writers" in tables
+        return self._check(
+            "imdb_db",
+            "pass" if has_crew else "warn",
+            (
+                "IMDb DuckDB готов, title_crew/title_writers найдены"
+                if has_crew
+                else "IMDb DuckDB открыт, но title_crew/title_writers ещё не подтверждены"
+            ),
+            path=str(path),
+            size_bytes=path.stat().st_size,
+            crew_writer_ready=has_crew,
+        )
 
     def check_active_model(self) -> ReadinessCheck:
         model_root = self.root / "models"
         pointer = model_root / "current.json"
-        model_path: Path | None = None
         generation = "legacy"
+        model_path: Path | None = None
 
         if pointer.is_file():
             try:
@@ -165,7 +140,6 @@ class ReleaseReadiness:
                     "active_model",
                     "fail",
                     f"Некорректный models/current.json: {exc}",
-                    path=str(pointer),
                 )
         else:
             legacy = model_root / "model.cbm"
@@ -187,9 +161,7 @@ class ReleaseReadiness:
                 "fail",
                 "У активной модели отсутствует metadata.pkl",
                 generation=generation,
-                model_path=str(model_path),
             )
-
         try:
             with metadata_path.open("rb") as handle:
                 metadata = pickle.load(handle)
@@ -197,27 +169,27 @@ class ReleaseReadiness:
             return self._check(
                 "active_model",
                 "fail",
-                f"metadata.pkl активной модели не читается: {exc}",
+                f"metadata.pkl не читается: {exc}",
                 generation=generation,
             )
 
         metadata = metadata if isinstance(metadata, dict) else {}
         gate = metadata.get("quality_gate")
-        gate_passed = None
-        if isinstance(gate, dict):
-            gate_passed = gate.get("passed")
-        status = "fail" if gate_passed is False else "pass"
-        message = (
-            "Активная модель найдена, quality gate не блокирует публикацию"
-            if status == "pass"
-            else "Активная модель помечена как не прошедшая quality gate"
-        )
+        gate_passed = gate.get("passed") if isinstance(gate, dict) else None
+        if gate_passed is False:
+            return self._check(
+                "active_model",
+                "fail",
+                "Активная generation помечена как не прошедшая quality gate",
+                generation=generation,
+                schema_version=metadata.get("schema_version"),
+                test_mae=metadata.get("test_mae"),
+            )
         return self._check(
             "active_model",
-            status,
-            message,
+            "pass",
+            "Активная модель и metadata найдены; quality gate не блокирует runtime",
             generation=generation,
-            model_path=str(model_path),
             schema_version=metadata.get("schema_version"),
             test_mae=metadata.get("test_mae"),
             quality_gate_passed=gate_passed,
@@ -226,70 +198,58 @@ class ReleaseReadiness:
     def check_p9_registry(self) -> ReadinessCheck:
         path = self.future_db_path
         if not path.is_file():
-            status = "fail" if self.strict_p9 else "warn"
             return self._check(
                 "p9_registry",
-                status,
+                "fail" if self.strict_p9 else "warn",
                 f"P9 registry ещё не создан: {path}",
-                path=str(path),
             )
         try:
             conn = duckdb.connect(str(path), read_only=True)
             try:
-                tables = self._table_names(conn)
-                projects_table = "future_release_projects"
-                if projects_table not in tables:
+                tables = self._tables(conn)
+                if "future_release_projects" not in tables:
                     return self._check(
                         "p9_registry",
                         "fail",
-                        "P9 DuckDB открывается, но registry schema отсутствует",
+                        "P9 DuckDB открыт, но registry schema отсутствует",
                         tables=sorted(tables),
                     )
-
-                counts: dict[str, int] = {}
-                for key, table in (
-                    ("projects", "future_release_projects"),
-                    ("sources", "future_release_sources"),
-                    ("release_windows", "future_release_windows"),
-                    ("temporal_facts", "future_temporal_facts"),
-                    ("territory_mappings", "future_territory_mappings"),
-                ):
-                    if table in tables:
-                        counts[key] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-                    else:
-                        counts[key] = 0
-
-                project_count = counts["projects"]
-                status = "pass" if project_count > 0 else ("fail" if self.strict_p9 else "warn")
-                message = (
-                    f"P9 registry готов: проектов {project_count}"
-                    if project_count > 0
-                    else "P9 registry инициализирован, но каталог пока пуст"
-                )
-                return self._check(
-                    "p9_registry",
-                    status,
-                    message,
-                    path=str(path),
-                    **counts,
-                )
+                table_map = {
+                    "projects": "future_release_projects",
+                    "sources": "future_release_sources",
+                    "release_windows": "future_release_windows",
+                    "temporal_facts": "future_release_temporal_facts",
+                    "territory_mappings": "future_release_territory_mappings",
+                }
+                counts = {
+                    key: (
+                        int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                        if table in tables
+                        else 0
+                    )
+                    for key, table in table_map.items()
+                }
             finally:
                 conn.close()
         except Exception as exc:
-            return self._check(
-                "p9_registry",
-                "fail",
-                f"P9 registry не открывается: {exc}",
-                path=str(path),
-            )
+            return self._check("p9_registry", "fail", f"P9 registry не открывается: {exc}")
+
+        projects = counts["projects"]
+        status = "pass" if projects else ("fail" if self.strict_p9 else "warn")
+        return self._check(
+            "p9_registry",
+            status,
+            f"P9 registry готов: проектов {projects}" if projects else "P9 registry инициализирован, но каталог пуст",
+            path=str(path),
+            **counts,
+        )
 
     @staticmethod
     def _http_json(url: str, *, timeout: float = 4.0) -> tuple[int, Any]:
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                body = json.loads(response.read().decode("utf-8"))
-                return int(response.status), body
+                return int(response.status), json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             try:
                 body = json.loads(exc.read().decode("utf-8"))
@@ -304,21 +264,21 @@ class ReleaseReadiness:
         markets: Iterable[str],
     ) -> list[ReadinessCheck]:
         base = api_base_url.rstrip("/")
-        checks: list[ReadinessCheck] = []
+        result: list[ReadinessCheck] = []
         for path, name in (("/health", "api_health"), ("/model-info", "api_model_info")):
             try:
-                status_code, payload = self._http_json(base + path)
-                ok = status_code == 200 and isinstance(payload, dict) and bool(payload.get("ok"))
-                checks.append(
+                status, body = self._http_json(base + path)
+                ok = status == 200 and isinstance(body, dict) and bool(body.get("ok"))
+                result.append(
                     self._check(
                         name,
                         "pass" if ok else "fail",
                         f"{path}: {'OK' if ok else 'не готов'}",
-                        http_status=status_code,
+                        http_status=status,
                     )
                 )
             except Exception as exc:
-                checks.append(self._check(name, "fail", f"{path} недоступен: {exc}"))
+                result.append(self._check(name, "fail", f"{path} недоступен: {exc}"))
 
         now = datetime.now(timezone.utc).isoformat()
         for raw_market in markets:
@@ -335,33 +295,27 @@ class ReleaseReadiness:
             )
             name = f"future_catalog_{market.lower()}"
             try:
-                status_code, payload = self._http_json(f"{base}/future/catalog?{query}")
-                ok = status_code == 200 and isinstance(payload, dict) and bool(payload.get("ok"))
-                items = payload.get("items") if isinstance(payload, dict) else None
+                status, body = self._http_json(f"{base}/future/catalog?{query}")
+                ok = status == 200 and isinstance(body, dict) and bool(body.get("ok"))
+                items = body.get("items") if isinstance(body, dict) else None
                 count = len(items) if isinstance(items, list) else 0
                 if not ok:
-                    checks.append(
-                        self._check(
-                            name,
-                            "fail",
-                            f"Future catalog {market} не готов",
-                            http_status=status_code,
-                        )
+                    result.append(
+                        self._check(name, "fail", f"Future catalog {market} не готов", http_status=status)
                     )
                 else:
-                    status = "pass" if count > 0 else ("fail" if self.strict_p9 else "warn")
-                    checks.append(
+                    result.append(
                         self._check(
                             name,
-                            status,
+                            "pass" if count else ("fail" if self.strict_p9 else "warn"),
                             f"Future catalog {market}: {count} проектов",
-                            http_status=status_code,
+                            http_status=status,
                             items=count,
                         )
                     )
             except Exception as exc:
-                checks.append(self._check(name, "fail", f"Future catalog {market} недоступен: {exc}"))
-        return checks
+                result.append(self._check(name, "fail", f"Future catalog {market} недоступен: {exc}"))
+        return result
 
     def run(
         self,
@@ -379,17 +333,16 @@ class ReleaseReadiness:
         ]
         if live_api:
             checks.extend(self.check_live_api(api_base_url=api_base_url, markets=markets))
-
-        blockers = [item for item in checks if item.status == "fail"]
+        failures = [item for item in checks if item.status == "fail"]
         warnings = [item for item in checks if item.status == "warn"]
         return {
             "version": 1,
-            "ready": not blockers,
+            "ready": not failures,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "checks": [asdict(item) for item in checks],
             "summary": {
                 "pass": sum(item.status == "pass" for item in checks),
                 "warn": len(warnings),
-                "fail": len(blockers),
+                "fail": len(failures),
             },
         }
