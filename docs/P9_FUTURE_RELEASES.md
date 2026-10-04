@@ -118,6 +118,43 @@ python scripts/future_release_import.py history --provider official-feed
 
 Таким образом конкретные Wikidata/официальные/ручные collectors можно менять независимо от registry, сохраняя один воспроизводимый входной контракт.
 
+## Wikidata discovery и enrichment
+
+Wikidata разбит на два независимых прохода.
+
+Discovery collector `WikidataFutureReleaseCollector` отвечает только за:
+
+- project identity;
+- canonical title / Wikidata QID / IMDb ID, если доступен;
+- title alias;
+- release statements с реальной time precision;
+- raw cache и fingerprinted atomic batch.
+
+Второй pass `WikidataFutureEnricher` работает только по уже найденным project QID и добавляет:
+
+- director (`P57`);
+- writer (`P58`);
+- cast (`P161`) с ordinal, если он указан;
+- source work (`P144`);
+- franchise/series (`P179`);
+- production company (`P272`).
+
+Оба прохода выполняют сеть только во время обновления cache. Inference читает исключительно локальные DuckDB.
+
+```bash
+python scripts/wikidata_future_releases.py \
+  --from-at 2026-10-04T00:00:00Z \
+  --to-at 2029-01-01T00:00:00Z \
+  --import-db future_releases.duckdb
+
+python scripts/wikidata_future_enrichment.py \
+  --registry-db future_releases.duckdb \
+  --limit 100 \
+  --import
+```
+
+Подробности enrichment-контракта: `docs/P9_WIKIDATA_ENRICHMENT.md`.
+
 ## CLI registry
 
 Для ручной разработки остаётся низкоуровневый CLI:
@@ -148,5 +185,6 @@ Prediction/catalog используют только локальные БД. `n
 
 Следующие P9 инкременты:
 
-- конкретные source adapters/collectors с rate limiting и cache-only output;
+- отдельные adapters для runtime/genres/synopsis/status там, где есть воспроизводимый pre-release источник;
+- дополнительные источники release date для cross-source conflict/confirmation;
 - публичный каталог на jsint-site.
