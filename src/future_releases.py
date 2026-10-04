@@ -445,7 +445,7 @@ class FutureReleaseStore:
         )
         self.conn.execute(
             """
-            INSERT INTO future_release_statuses VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO future_release_statuses VALUES (?, ?, ?, ?, ?, ?)
             """,
             [
                 observation_id,
