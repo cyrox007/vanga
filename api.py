@@ -8,8 +8,10 @@ from typing import Any, Iterator
 from flask import Flask, jsonify, request
 
 from src.creative_kinovanga import KinoVanga
-from src.pre_release_analysis import build_pre_release_profile
+from src.prediction_context import build_prediction_people_context
+from src.pre_release_profile import build_resolved_pre_release_profile
 from src.runtime_descriptor import resolve_model_runtime_descriptor
+from src.runtime_identity import build_runtime_identity
 
 
 logger = logging.getLogger(__name__)
@@ -187,6 +189,7 @@ def health():
             reload_error = _last_reload_error
             model_name = str(engine.model_path.name)
             database_name = str(engine.db_path.name)
+            runtime = build_runtime_identity(engine, generation)
         return jsonify(
             {
                 "ok": True,
@@ -195,6 +198,7 @@ def health():
                 "generation": generation,
                 "reload_error": reload_error,
                 "database": database_name,
+                "runtime": runtime,
             }
         )
     except Exception as exc:
@@ -217,6 +221,7 @@ def model_info():
     try:
         with _engine_session() as (engine, generation):
             metadata = engine.metadata if isinstance(engine.metadata, dict) else {}
+            runtime = build_runtime_identity(engine, generation)
             response = {
                 "ok": True,
                 "generation": generation,
@@ -229,6 +234,13 @@ def model_info():
                 ),
                 "quality_gate": metadata.get("quality_gate"),
                 "model_size_bytes": metadata.get("model_size_bytes"),
+                "training_mode": metadata.get("training_mode"),
+                "published_model_fit": metadata.get("published_model_fit"),
+                "published_metrics_source": metadata.get("published_metrics_source"),
+                "refit_rows": metadata.get("refit_rows"),
+                "refit_year_from": metadata.get("refit_year_from"),
+                "refit_year_to": metadata.get("refit_year_to"),
+                "runtime": runtime,
                 "reload_error": _last_reload_error,
             }
         return jsonify(response)
@@ -340,28 +352,30 @@ def predict():
                 actors=actors,
                 explain=True,
             )
-            profile = build_pre_release_profile(
+            input_resolution = result.get("input_resolution") or {}
+            people_context = build_prediction_people_context(
+                engine,
+                year=year,
+                requested_directors=directors,
+                requested_writer=writer or None,
+                requested_actors=actors,
+                input_resolution=input_resolution,
+            )
+            profile = build_resolved_pre_release_profile(
                 conn=engine.conn,
                 year=year,
                 runtime=runtime,
-                director=director,
-                writer=writer or None,
-                actors=actors,
+                requested_directors=directors,
+                requested_writer=writer or None,
+                requested_actors=actors,
+                model_people_context=people_context,
                 synopsis=synopsis or None,
                 rating=float(result["rating"]),
                 uncertainty=result.get("uncertainty"),
                 contributions=result.get("contributions") or {},
             )
             profile["source"] = clean_source
-            profile["director_team"] = {
-                "requested": directors,
-                "count": len(directors),
-            }
-            profile["cast"] = {
-                "requested": actors,
-                "count": len(actors),
-                "legacy_personal_slots": min(3, len(actors)),
-            }
+            runtime_identity = build_runtime_identity(engine, generation)
     except Exception:
         logger.exception("Ошибка предсказания Vanga")
         return _json_error("Модель временно не смогла выполнить предсказание", 503)
@@ -380,6 +394,7 @@ def predict():
                 or None
             ),
             "generation": generation,
+            "runtime": runtime_identity,
             "rating": result["rating"],
             "base": result.get("base"),
             "uncertainty": result.get("uncertainty"),
@@ -387,6 +402,7 @@ def predict():
             "explanation": result["explanation"],
             "contributions": result["contributions"],
             "input_resolution": result.get("input_resolution", {}),
+            "resolved_people": people_context,
             "pre_release_profile": profile,
         }
     )
