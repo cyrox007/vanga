@@ -21,7 +21,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--since-year", type=int)
     parser.add_argument("--until-year", type=int)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--batch-size", type=int, default=5000, help="Размер пакета чтения IMDb, по умолчанию 5000")
     args = parser.parse_args(argv)
+
+    print("Actor Persona: начинаю материализацию IMDb credits...", flush=True)
+    if args.imdb_db:
+        print(f"IMDb DB: {args.imdb_db}", flush=True)
+    if args.limit is not None:
+        print(f"Лимит строк: {args.limit}", flush=True)
+
+    def report_progress(stats: dict[str, int]) -> None:
+        print(
+            "Actor Persona: "
+            f"прочитано={stats['rows_read']}, "
+            f"создано_ролей={stats['appearances_created']}, "
+            f"уже_были={stats['skipped_existing']}, "
+            f"без_персонажа={stats['skipped_without_character']}",
+            flush=True,
+        )
+
     try:
         with ActorPersonaStore(args.db) as store:
             result = materialize_imdb_actor_roles(
@@ -30,11 +48,17 @@ def main(argv: list[str] | None = None) -> int:
                 since_year=args.since_year,
                 until_year=args.until_year,
                 limit=args.limit,
+                batch_size=args.batch_size,
+                progress_callback=report_progress,
             )
+            print("Actor Persona: материализация завершена.", flush=True)
             print(json.dumps({"ok": True, "materialized": result, "stats": store.stats()}, ensure_ascii=False, indent=2))
         return 0
+    except KeyboardInterrupt:
+        print("Actor Persona: остановлено пользователем; уже записанные данные сохранены и будут пропущены при повторном запуске.", file=sys.stderr, flush=True)
+        return 130
     except ActorPersonaImdbError as exc:
-        print(f"Ошибка materializer Actor Persona: {exc}", file=sys.stderr)
+        print(f"Ошибка materializer Actor Persona: {exc}", file=sys.stderr, flush=True)
         return 2
 
 
