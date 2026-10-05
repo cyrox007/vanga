@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import duckdb
 
@@ -13,6 +13,9 @@ from src.actor_persona import ActorPersonaStore
 
 class ActorPersonaImdbError(ValueError):
     pass
+
+
+ProgressCallback = Callable[[dict[str, int]], None]
 
 
 def _characters(value: Any) -> list[str]:
@@ -41,6 +44,8 @@ def materialize_imdb_actor_roles(
     until_year: int | None = None,
     limit: int | None = None,
     source_id: str = "imdb-principals-baseline",
+    batch_size: int = 5_000,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, int]:
     """Импортирует выпущенные actor/actress credits из локальной IMDb БД.
 
@@ -48,7 +53,14 @@ def materialize_imdb_actor_roles(
     дате скачивания IMDb. Это консервативно: историческая persona не получает
     сведения о роли раньше выхода фильма. Meta-role и archetype здесь не
     угадываются и остаются для подтверждённых аннотаций.
+
+    Выборка читается из DuckDB пакетами, чтобы полный импорт не загружал все
+    credits в RAM одновременно. ``progress_callback`` вызывается после каждого
+    прочитанного пакета и получает текущие накопленные счётчики.
     """
+    if batch_size <= 0:
+        raise ActorPersonaImdbError("batch_size должен быть больше нуля")
+
     db_path = Path(imdb_db_path or config.IMDB_DB_PATH)
     if not db_path.is_file():
         raise ActorPersonaImdbError(f"IMDb DuckDB не найден: {db_path}")
@@ -84,56 +96,76 @@ def materialize_imdb_actor_roles(
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
-        rows = conn.execute(sql, params).fetchall()
+
+        cursor = conn.execute(sql, params)
+        rows_read = 0
         appearances = 0
         characters_created = 0
         skipped_existing = 0
         skipped_without_character = 0
-        for work_id, actor_id, raw_characters, year, raw_genres in rows:
-            names = _characters(raw_characters)
-            if not names:
-                skipped_without_character += 1
-                continue
-            genres = [] if raw_genres in (None, "", "\\N") else [x.strip() for x in str(raw_genres).split(",") if x.strip()]
-            release_at = f"{int(year):04d}-01-01T00:00:00Z"
-            for index, name in enumerate(names):
-                character_id = f"imdb-character:{work_id}:{actor_id}:{index}"
-                appearance_id = f"imdb-role:{work_id}:{actor_id}:{index}"
-                existing = target.conn.execute(
-                    "SELECT 1 FROM actor_persona_role_appearances WHERE appearance_id=?",
-                    [appearance_id],
-                ).fetchone()
-                if existing:
-                    skipped_existing += 1
+
+        while True:
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                break
+            for work_id, actor_id, raw_characters, year, raw_genres in rows:
+                rows_read += 1
+                names = _characters(raw_characters)
+                if not names:
+                    skipped_without_character += 1
                     continue
-                target.upsert_character(
+                genres = [] if raw_genres in (None, "", "\\N") else [x.strip() for x in str(raw_genres).split(",") if x.strip()]
+                release_at = f"{int(year):04d}-01-01T00:00:00Z"
+                for index, name in enumerate(names):
+                    character_id = f"imdb-character:{work_id}:{actor_id}:{index}"
+                    appearance_id = f"imdb-role:{work_id}:{actor_id}:{index}"
+                    existing = target.conn.execute(
+                        "SELECT 1 FROM actor_persona_role_appearances WHERE appearance_id=?",
+                        [appearance_id],
+                    ).fetchone()
+                    if existing:
+                        skipped_existing += 1
+                        continue
+                    target.upsert_character(
+                        {
+                            "character_id": character_id,
+                            "canonical_name": name,
+                            "external_ids": {"imdb_work": str(work_id), "imdb_actor": str(actor_id)},
+                        }
+                    )
+                    characters_created += 1
+                    target.add_role_appearance(
+                        {
+                            "appearance_id": appearance_id,
+                            "actor_id": str(actor_id),
+                            "work_id": str(work_id),
+                            "character_id": character_id,
+                            "character_name": name,
+                            "work_release_at": release_at,
+                            "known_at": release_at,
+                            "role_function": "unknown",
+                            "meta_role_type": "ordinary",
+                            "genres": genres,
+                            "archetypes": [],
+                            "source_id": source_id,
+                            "confidence": 0.9,
+                        }
+                    )
+                    appearances += 1
+
+            if progress_callback is not None:
+                progress_callback(
                     {
-                        "character_id": character_id,
-                        "canonical_name": name,
-                        "external_ids": {"imdb_work": str(work_id), "imdb_actor": str(actor_id)},
+                        "rows_read": rows_read,
+                        "characters_created": characters_created,
+                        "appearances_created": appearances,
+                        "skipped_existing": skipped_existing,
+                        "skipped_without_character": skipped_without_character,
                     }
                 )
-                characters_created += 1
-                target.add_role_appearance(
-                    {
-                        "appearance_id": appearance_id,
-                        "actor_id": str(actor_id),
-                        "work_id": str(work_id),
-                        "character_id": character_id,
-                        "character_name": name,
-                        "work_release_at": release_at,
-                        "known_at": release_at,
-                        "role_function": "unknown",
-                        "meta_role_type": "ordinary",
-                        "genres": genres,
-                        "archetypes": [],
-                        "source_id": source_id,
-                        "confidence": 0.9,
-                    }
-                )
-                appearances += 1
+
         return {
-            "rows_read": len(rows),
+            "rows_read": rows_read,
             "characters_created": characters_created,
             "appearances_created": appearances,
             "skipped_existing": skipped_existing,
