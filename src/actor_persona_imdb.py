@@ -8,7 +8,7 @@ from typing import Any, Callable
 import duckdb
 
 from settings import config
-from src.actor_persona import ActorPersonaStore
+from src.actor_persona import ActorPersonaStore, ActorPersonaValidationError
 
 
 class ActorPersonaImdbError(ValueError):
@@ -57,6 +57,9 @@ def materialize_imdb_actor_roles(
     Выборка читается из DuckDB пакетами, чтобы полный импорт не загружал все
     credits в RAM одновременно. ``progress_callback`` вызывается после каждого
     прочитанного пакета и получает текущие накопленные счётчики.
+
+    Невалидная отдельная character-запись из IMDb не должна ронять весь импорт:
+    она пропускается и учитывается в ``skipped_invalid_character``.
     """
     if batch_size <= 0:
         raise ActorPersonaImdbError("batch_size должен быть больше нуля")
@@ -103,6 +106,7 @@ def materialize_imdb_actor_roles(
         characters_created = 0
         skipped_existing = 0
         skipped_without_character = 0
+        skipped_invalid_character = 0
 
         while True:
             rows = cursor.fetchmany(batch_size)
@@ -126,31 +130,35 @@ def materialize_imdb_actor_roles(
                     if existing:
                         skipped_existing += 1
                         continue
-                    target.upsert_character(
-                        {
-                            "character_id": character_id,
-                            "canonical_name": name,
-                            "external_ids": {"imdb_work": str(work_id), "imdb_actor": str(actor_id)},
-                        }
-                    )
+                    try:
+                        target.upsert_character(
+                            {
+                                "character_id": character_id,
+                                "canonical_name": name,
+                                "external_ids": {"imdb_work": str(work_id), "imdb_actor": str(actor_id)},
+                            }
+                        )
+                        target.add_role_appearance(
+                            {
+                                "appearance_id": appearance_id,
+                                "actor_id": str(actor_id),
+                                "work_id": str(work_id),
+                                "character_id": character_id,
+                                "character_name": name,
+                                "work_release_at": release_at,
+                                "known_at": release_at,
+                                "role_function": "unknown",
+                                "meta_role_type": "ordinary",
+                                "genres": genres,
+                                "archetypes": [],
+                                "source_id": source_id,
+                                "confidence": 0.9,
+                            }
+                        )
+                    except ActorPersonaValidationError:
+                        skipped_invalid_character += 1
+                        continue
                     characters_created += 1
-                    target.add_role_appearance(
-                        {
-                            "appearance_id": appearance_id,
-                            "actor_id": str(actor_id),
-                            "work_id": str(work_id),
-                            "character_id": character_id,
-                            "character_name": name,
-                            "work_release_at": release_at,
-                            "known_at": release_at,
-                            "role_function": "unknown",
-                            "meta_role_type": "ordinary",
-                            "genres": genres,
-                            "archetypes": [],
-                            "source_id": source_id,
-                            "confidence": 0.9,
-                        }
-                    )
                     appearances += 1
 
             if progress_callback is not None:
@@ -161,6 +169,7 @@ def materialize_imdb_actor_roles(
                         "appearances_created": appearances,
                         "skipped_existing": skipped_existing,
                         "skipped_without_character": skipped_without_character,
+                        "skipped_invalid_character": skipped_invalid_character,
                     }
                 )
 
@@ -170,6 +179,7 @@ def materialize_imdb_actor_roles(
             "appearances_created": appearances,
             "skipped_existing": skipped_existing,
             "skipped_without_character": skipped_without_character,
+            "skipped_invalid_character": skipped_invalid_character,
         }
     finally:
         conn.close()

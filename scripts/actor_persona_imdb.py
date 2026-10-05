@@ -36,7 +36,8 @@ def main(argv: list[str] | None = None) -> int:
             f"прочитано={stats['rows_read']}, "
             f"создано_ролей={stats['appearances_created']}, "
             f"уже_были={stats['skipped_existing']}, "
-            f"без_персонажа={stats['skipped_without_character']}",
+            f"без_персонажа={stats['skipped_without_character']}, "
+            f"невалидных_персонажей={stats.get('skipped_invalid_character', 0)}",
             flush=True,
         )
 

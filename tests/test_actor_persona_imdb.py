@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,6 +50,25 @@ class ActorPersonaImdbTests(unittest.TestCase):
         self.assertEqual(result["rows_read"], 2)
         self.assertEqual([item["rows_read"] for item in progress], [1, 2])
         self.assertEqual(progress[-1]["appearances_created"], 2)
+        self.assertEqual(progress[-1]["skipped_invalid_character"], 0)
+
+    def test_materializer_skips_invalid_long_character_and_continues(self) -> None:
+        long_name = "X" * 301
+        conn = duckdb.connect(str(self.imdb))
+        conn.execute("INSERT INTO title_basics VALUES ('tt3', 2021, 'Drama'), ('tt4', 2022, 'Drama')")
+        conn.execute(
+            "INSERT INTO title_principals VALUES ('tt3','nm2','actor',?), ('tt4','nm2','actor','[\"Valid Role\"]')",
+            [json.dumps([long_name])],
+        )
+        conn.close()
+
+        result = materialize_imdb_actor_roles(self.store, imdb_db_path=self.imdb, batch_size=1)
+
+        self.assertEqual(result["rows_read"], 4)
+        self.assertEqual(result["appearances_created"], 3)
+        self.assertEqual(result["skipped_invalid_character"], 1)
+        snapshot = self.store.persona_snapshot_as_of("nm2", "2023-01-01T00:00:00Z")
+        self.assertEqual(snapshot["works_count"], 1)
 
     def test_materializer_rejects_invalid_batch_size(self) -> None:
         with self.assertRaisesRegex(ValueError, "batch_size"):
