@@ -38,6 +38,26 @@ class ActorPersonaImdbTests(unittest.TestCase):
         self.assertIn("action", snapshot["genres"])
         self.assertNotIn("comedy", snapshot["genres"])
 
+    def test_materializer_reports_progress_per_batch(self) -> None:
+        progress: list[dict[str, int]] = []
+        result = materialize_imdb_actor_roles(
+            self.store,
+            imdb_db_path=self.imdb,
+            batch_size=1,
+            progress_callback=lambda stats: progress.append(dict(stats)),
+        )
+        self.assertEqual(result["rows_read"], 2)
+        self.assertEqual([item["rows_read"] for item in progress], [1, 2])
+        self.assertEqual(progress[-1]["appearances_created"], 2)
+
+    def test_materializer_rejects_invalid_batch_size(self) -> None:
+        with self.assertRaisesRegex(ValueError, "batch_size"):
+            materialize_imdb_actor_roles(
+                self.store,
+                imdb_db_path=self.imdb,
+                batch_size=0,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
