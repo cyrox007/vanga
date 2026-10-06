@@ -82,6 +82,7 @@ class ExpertCorpusAnnotateCliTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["material_id"], "material-1")
         self.assertEqual(payload["claims"][0]["case_id"], "case-train-1")
         self.assertEqual(payload["claims"][0]["material_id"], "material-1")
+        self.assertEqual(payload["claims"][0]["change_type"], "rewritten")
         self.assertEqual(payload["evidence"][0]["claim_id"], payload["claims"][0]["claim_id"])
 
     def test_validate_does_not_write_to_database(self) -> None:
@@ -92,7 +93,7 @@ class ExpertCorpusAnnotateCliTests(unittest.TestCase):
                     "case_id": "case-train-1",
                     "material_id": "material-1",
                     "dimension": "motivation",
-                    "change_type": "rewrite",
+                    "change_type": "rewritten",
                     "timecode_or_section": "01:23",
                     "claim_summary": "Мотивационный переход не подготовлен",
                     "observation": "Перед решением отсутствует новое причинное событие",
@@ -131,6 +132,17 @@ class ExpertCorpusAnnotateCliTests(unittest.TestCase):
             self.assertEqual(evidence, 0)
         finally:
             store.close()
+
+    def test_validate_rejects_unfilled_template(self) -> None:
+        template_result = self.run_cli("template", "case-train-1")
+        self.assertEqual(template_result.returncode, 0, template_result.stderr)
+        bundle_path = Path(self.tmp.name) / "template.json"
+        bundle_path.write_text(template_result.stdout, encoding="utf-8")
+
+        result = self.run_cli("validate", str(bundle_path))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("не заполнено", result.stderr)
+        self.assertIn("ЗАПОЛНИТЬ:", result.stderr)
 
     def test_validate_rejects_metadata_mutation(self) -> None:
         bundle_path = Path(self.tmp.name) / "bad.json"
