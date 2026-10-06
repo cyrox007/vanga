@@ -45,45 +45,18 @@ def _case_material(store: ExpertCorpusStore, case_id: str) -> dict:
         )
     row = rows[0]
     return {
-        "case_id": row[0],
-        "film_title": row[1],
-        "film_year": row[2],
-        "split": row[3],
-        "material_id": row[4],
-        "expert_id": row[5],
-        "material_title": row[6],
-        "source_url": row[7],
+        "case_id": row[0], "film_title": row[1], "film_year": row[2], "split": row[3],
+        "material_id": row[4], "expert_id": row[5], "material_title": row[6], "source_url": row[7],
     }
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Автоматический сбор источника и черновая pre-annotation Expert Corpus"
-    )
+    parser = argparse.ArgumentParser(description="Автоматический сбор источника и черновая pre-annotation Expert Corpus")
     parser.add_argument("case_id", help="case_id из scripts/expert_corpus_annotate.py list")
-    parser.add_argument(
-        "--db",
-        type=Path,
-        default=None,
-        help="путь к expert_corpus.duckdb (по умолчанию settings.py)",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=None,
-        help="куда сохранить JSON draft; по умолчанию data/expert/annotations/<case_id>.auto.json",
-    )
-    parser.add_argument(
-        "--max-candidates",
-        type=int,
-        default=20,
-        help="максимум кандидатов claims (по умолчанию 20)",
-    )
-    parser.add_argument(
-        "--allow-sealed",
-        action="store_true",
-        help="явно разрешить blind/external_transfer; по умолчанию запрещено во избежание leakage",
-    )
+    parser.add_argument("--db", type=Path, default=None, help="путь к expert_corpus.duckdb (по умолчанию settings.py)")
+    parser.add_argument("--output", type=Path, default=None, help="куда сохранить JSON draft; по умолчанию data/expert/annotations/<case_id>.auto.json")
+    parser.add_argument("--max-candidates", type=int, default=20, help="максимум кандидатов claims (по умолчанию 20)")
+    parser.add_argument("--allow-sealed", action="store_true", help="явно разрешить blind/external_transfer; по умолчанию запрещено во избежание leakage")
     return parser
 
 
@@ -102,53 +75,26 @@ def main(argv: list[str] | None = None) -> int:
                 "Используйте --allow-sealed только после фиксации prediction artifact."
             )
 
-        print(
-            f"Expert Corpus: собираю источник для {meta['case_id']} — {meta['film_title']} "
-            f"({meta['material_title']})",
-            flush=True,
-        )
+        print(f"Expert Corpus: собираю источник для {meta['case_id']} — {meta['film_title']} ({meta['material_title']})", flush=True)
         provider, segments = collect_source_segments(meta["source_url"])
-        print(
-            f"Expert Corpus: источник получен; provider={provider}, сегментов={len(segments)}",
-            flush=True,
-        )
+        print(f"Expert Corpus: источник получен; provider={provider}, сегментов={len(segments)}", flush=True)
         draft = build_annotation_draft(
-            case_id=meta["case_id"],
-            material_id=meta["material_id"],
-            source_url=meta["source_url"],
-            segments=segments,
-            max_candidates=args.max_candidates,
+            case_id=meta["case_id"], material_id=meta["material_id"], source_url=meta["source_url"],
+            segments=segments, max_candidates=args.max_candidates,
         )
-        draft["meta"].update(
-            {
-                "film_title": meta["film_title"],
-                "film_year": meta["film_year"],
-                "split": meta["split"],
-                "expert_id": meta["expert_id"],
-                "material_title": meta["material_title"],
-                "provider": provider,
-            }
-        )
+        draft["meta"].update({
+            "film_title": meta["film_title"], "film_year": meta["film_year"], "split": meta["split"],
+            "expert_id": meta["expert_id"], "material_title": meta["material_title"], "provider": provider,
+        })
 
         output = args.output or ROOT / "data" / "expert" / "annotations" / f"{args.case_id}.auto.json"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(draft, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "case_id": args.case_id,
-                    "provider": provider,
-                    "segments": len(segments),
-                    "candidates": len(draft["claims"]),
-                    "output": str(output),
-                    "requires_human_review": True,
-                    "next": f"Проверьте поля «ПРОВЕРИТЬ:» и затем выполните validate {output}",
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        print(json.dumps({
+            "ok": True, "case_id": args.case_id, "provider": provider, "segments": len(segments),
+            "candidates": len(draft["claims"]), "output": str(output), "requires_human_review": True,
+            "next": f"Проверьте все поля «ЗАПОЛНИТЬ:», удалите ложные кандидаты и затем выполните validate {output}",
+        }, ensure_ascii=False, indent=2))
         return 0
     except (ExpertCorpusValidationError, ExpertIngestError, OSError, ValueError) as exc:
         print(f"Ошибка Expert Corpus autodraft: {exc}", file=sys.stderr)
