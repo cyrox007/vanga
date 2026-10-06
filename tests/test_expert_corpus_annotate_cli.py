@@ -66,27 +66,8 @@ class ExpertCorpusAnnotateCliTests(unittest.TestCase):
             check=False,
         )
 
-    def test_list_filters_train_cases(self) -> None:
-        result = self.run_cli("list", "--split", "train")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        payload = json.loads(result.stdout)
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["count"], 1)
-        self.assertEqual(payload["cases"][0]["case_id"], "case-train-1")
-        self.assertEqual(payload["cases"][0]["claims"], 0)
-
-    def test_template_uses_real_case_and_material_ids(self) -> None:
-        result = self.run_cli("template", "case-train-1")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        payload = json.loads(result.stdout)
-        self.assertEqual(payload["meta"]["material_id"], "material-1")
-        self.assertEqual(payload["claims"][0]["case_id"], "case-train-1")
-        self.assertEqual(payload["claims"][0]["material_id"], "material-1")
-        self.assertEqual(payload["claims"][0]["change_type"], "rewritten")
-        self.assertEqual(payload["evidence"][0]["claim_id"], payload["claims"][0]["claim_id"])
-
-    def test_validate_does_not_write_to_database(self) -> None:
-        bundle = {
+    def valid_bundle(self) -> dict:
+        return {
             "claims": [
                 {
                     "claim_id": "case-train-1-claim-001",
@@ -115,14 +96,70 @@ class ExpertCorpusAnnotateCliTests(unittest.TestCase):
                 }
             ],
         }
-        bundle_path = Path(self.tmp.name) / "annotation.json"
-        bundle_path.write_text(json.dumps(bundle, ensure_ascii=False), encoding="utf-8")
 
+    def write_bundle(self, payload: dict, name: str = "annotation.json") -> Path:
+        path = Path(self.tmp.name) / name
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_list_filters_train_cases(self) -> None:
+        result = self.run_cli("list", "--split", "train")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["cases"][0]["case_id"], "case-train-1")
+        self.assertEqual(payload["cases"][0]["claims"], 0)
+
+    def test_template_uses_real_case_and_material_ids(self) -> None:
+        result = self.run_cli("template", "case-train-1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["meta"]["material_id"], "material-1")
+        self.assertEqual(payload["claims"][0]["case_id"], "case-train-1")
+        self.assertEqual(payload["claims"][0]["material_id"], "material-1")
+        self.assertEqual(payload["claims"][0]["change_type"], "rewritten")
+        self.assertEqual(payload["evidence"][0]["claim_id"], payload["claims"][0]["claim_id"])
+
+    def test_validate_does_not_write_to_database(self) -> None:
+        bundle_path = self.write_bundle(self.valid_bundle())
         result = self.run_cli("validate", str(bundle_path))
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["validated"], {"claims": 1, "evidence": 1})
+
+        store = ExpertCorpusStore(self.db_path)
+        try:
+            claims = store.conn.execute("SELECT COUNT(*) FROM expert_claims").fetchone()[0]
+            evidence = store.conn.execute("SELECT COUNT(*) FROM expert_evidence").fetchone()[0]
+            self.assertEqual(claims, 0)
+            self.assertEqual(evidence, 0)
+        finally:
+            store.close()
+
+    def test_apply_persists_claim_and_evidence_atomically(self) -> None:
+        bundle_path = self.write_bundle(self.valid_bundle())
+        result = self.run_cli("apply", str(bundle_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["applied"], {"claims": 1, "evidence": 1})
+
+        store = ExpertCorpusStore(self.db_path)
+        try:
+            claims = store.conn.execute("SELECT COUNT(*) FROM expert_claims").fetchone()[0]
+            evidence = store.conn.execute("SELECT COUNT(*) FROM expert_evidence").fetchone()[0]
+            self.assertEqual(claims, 1)
+            self.assertEqual(evidence, 1)
+        finally:
+            store.close()
+
+    def test_apply_rolls_back_claim_when_evidence_is_invalid(self) -> None:
+        bundle = self.valid_bundle()
+        bundle["evidence"][0]["polarity"] = "неизвестно"
+        bundle_path = self.write_bundle(bundle, "invalid-evidence.json")
+        result = self.run_cli("apply", str(bundle_path))
+        self.assertEqual(result.returncode, 2)
 
         store = ExpertCorpusStore(self.db_path)
         try:
@@ -145,10 +182,9 @@ class ExpertCorpusAnnotateCliTests(unittest.TestCase):
         self.assertIn("ЗАПОЛНИТЬ:", result.stderr)
 
     def test_validate_rejects_metadata_mutation(self) -> None:
-        bundle_path = Path(self.tmp.name) / "bad.json"
-        bundle_path.write_text(
-            json.dumps({"cases": [], "claims": [], "evidence": []}),
-            encoding="utf-8",
+        bundle_path = self.write_bundle(
+            {"cases": [], "claims": [], "evidence": []},
+            "bad.json",
         )
         result = self.run_cli("validate", str(bundle_path))
         self.assertEqual(result.returncode, 2)
