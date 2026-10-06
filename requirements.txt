@@ -13,3 +13,6 @@ gunicorn>=23,<24
 # Wikimedia enrichment
 requests>=2.32,<3
 beautifulsoup4>=4.13,<5
+
+# Expert Corpus: получение публичных субтитров YouTube
+yt-dlp>=2025.1
