@@ -52,6 +52,27 @@ Split фиксирован заранее:
 
 ## Разметка train/development
 
+Для выбора следующего материала используется отдельный helper CLI:
+
+```bash
+.venv/bin/python scripts/expert_corpus_annotate.py list --split train
+.venv/bin/python scripts/expert_corpus_annotate.py template <case_id> --output annotation.json
+```
+
+После заполнения шаблона сначала выполняется безопасная проверка. `validate` открывает транзакцию, проверяет claims/evidence текущими валидаторами Expert Corpus и откатывает транзакцию, поэтому база не изменяется:
+
+```bash
+.venv/bin/python scripts/expert_corpus_annotate.py validate annotation.json
+```
+
+Только после успешной проверки разметка импортируется штатным CLI:
+
+```bash
+.venv/bin/python scripts/expert_corpus.py import annotation.json
+```
+
+Annotation bundle не должен содержать `profiles`, `cases`, `materials` или `case_materials`: metadata pilot зафиксированы заранее и не меняются во время разметки.
+
 Для каждого открытого case:
 
 1. изучается оригинальный материал по сохранённому URL;
