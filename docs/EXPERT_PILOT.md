@@ -65,13 +65,15 @@ Split фиксирован заранее:
 .venv/bin/python scripts/expert_corpus_annotate.py validate annotation.json
 ```
 
-Только после успешной проверки разметка импортируется штатным CLI:
+После успешной проверки разметка применяется тем же helper CLI:
 
 ```bash
-.venv/bin/python scripts/expert_corpus.py import annotation.json
+.venv/bin/python scripts/expert_corpus_annotate.py apply annotation.json
 ```
 
-Annotation bundle не должен содержать `profiles`, `cases`, `materials` или `case_materials`: metadata pilot зафиксированы заранее и не меняются во время разметки.
+`apply` записывает claims и evidence в одной транзакции. Если любая строка невалидна, вся операция откатывается и частичная разметка в базе не остаётся. Повторное применение того же bundle безопасно благодаря upsert-семантике идентификаторов.
+
+Annotation bundle не должен содержать `profiles`, `cases`, `materials` или `case_materials`: metadata pilot зафиксированы заранее и не меняются во время разметки. Незаменённые поля `ЗАПОЛНИТЬ:` блокируются как при `validate`, так и при `apply`.
 
 Для каждого открытого case:
 

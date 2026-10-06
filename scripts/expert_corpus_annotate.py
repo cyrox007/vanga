@@ -59,6 +59,27 @@ def _reject_unfilled_placeholders(payload: dict[str, Any]) -> None:
                     )
 
 
+def _prepare_annotation(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    forbidden = {"profiles", "cases", "materials", "case_materials"}.intersection(payload)
+    if forbidden:
+        raise ExpertCorpusValidationError(
+            "Annotation bundle не должен менять metadata pilot: " + ", ".join(sorted(forbidden))
+        )
+    _reject_unfilled_placeholders(payload)
+    return payload.get("claims", []), payload.get("evidence", [])
+
+
+def _write_annotation(
+    store: ExpertCorpusStore,
+    claims: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+) -> None:
+    for row in claims:
+        store.upsert_claim(row)
+    for row in evidence:
+        store.upsert_evidence(row)
+
+
 def _list_cases(store: ExpertCorpusStore, split: str | None) -> list[dict[str, Any]]:
     params: list[Any] = []
     where = ""
@@ -185,22 +206,24 @@ def _template(store: ExpertCorpusStore, case_id: str) -> dict[str, Any]:
 
 
 def _validate(store: ExpertCorpusStore, payload: dict[str, Any]) -> dict[str, int]:
-    claims = payload.get("claims", [])
-    evidence = payload.get("evidence", [])
-    forbidden = {"profiles", "cases", "materials", "case_materials"}.intersection(payload)
-    if forbidden:
-        raise ExpertCorpusValidationError(
-            "Annotation bundle не должен менять metadata pilot: " + ", ".join(sorted(forbidden))
-        )
-    _reject_unfilled_placeholders(payload)
+    claims, evidence = _prepare_annotation(payload)
     store.conn.execute("BEGIN TRANSACTION")
     try:
-        for row in claims:
-            store.upsert_claim(row)
-        for row in evidence:
-            store.upsert_evidence(row)
+        _write_annotation(store, claims, evidence)
     finally:
         store.conn.execute("ROLLBACK")
+    return {"claims": len(claims), "evidence": len(evidence)}
+
+
+def _apply(store: ExpertCorpusStore, payload: dict[str, Any]) -> dict[str, int]:
+    claims, evidence = _prepare_annotation(payload)
+    store.conn.execute("BEGIN TRANSACTION")
+    try:
+        _write_annotation(store, claims, evidence)
+        store.conn.execute("COMMIT")
+    except Exception:
+        store.conn.execute("ROLLBACK")
+        raise
     return {"claims": len(claims), "evidence": len(evidence)}
 
 
@@ -225,6 +248,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_parser = sub.add_parser("validate", help="проверить annotation bundle без записи в БД")
     validate_parser.add_argument("bundle", type=Path)
+
+    apply_parser = sub.add_parser("apply", help="атомарно применить проверенную разметку к Expert Corpus")
+    apply_parser.add_argument("bundle", type=Path)
     return parser
 
 
@@ -251,6 +277,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "validate":
             result = _validate(store, _load_bundle(args.bundle))
             _dump({"ok": True, "validated": result, "message": "Разметка валидна; БД не изменена"})
+            return 0
+        if args.command == "apply":
+            result = _apply(store, _load_bundle(args.bundle))
+            _dump({"ok": True, "applied": result, "message": "Разметка применена к Expert Corpus атомарно"})
             return 0
         raise ExpertCorpusValidationError("Неизвестная команда annotation CLI")
     except (ExpertCorpusValidationError, OSError, json.JSONDecodeError) as exc:
