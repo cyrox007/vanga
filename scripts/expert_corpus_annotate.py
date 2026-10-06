@@ -18,6 +18,19 @@ from src.expert_corpus import (
 )
 
 
+_PLACEHOLDER_PREFIX = "ЗАПОЛНИТЬ:"
+_REQUIRED_ANNOTATION_FIELDS = {
+    "claims": (
+        "timecode_or_section",
+        "claim_summary",
+        "observation",
+        "structural_consequence",
+        "expert_interpretation",
+    ),
+    "evidence": ("description", "locator"),
+}
+
+
 def _dump(payload: Any) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
@@ -33,6 +46,17 @@ def _load_bundle(path: Path) -> dict[str, Any]:
         if any(not isinstance(row, dict) for row in rows):
             raise ExpertCorpusValidationError(f"Каждый элемент {key} должен быть JSON-объектом")
     return payload
+
+
+def _reject_unfilled_placeholders(payload: dict[str, Any]) -> None:
+    for entity, fields in _REQUIRED_ANNOTATION_FIELDS.items():
+        for index, row in enumerate(payload.get(entity, []), start=1):
+            for field in fields:
+                value = str(row.get(field) or "").strip()
+                if value.startswith(_PLACEHOLDER_PREFIX):
+                    raise ExpertCorpusValidationError(
+                        f"{entity}[{index}].{field} не заполнено: замените шаблон «{_PLACEHOLDER_PREFIX}» реальной разметкой"
+                    )
 
 
 def _list_cases(store: ExpertCorpusStore, split: str | None) -> list[dict[str, Any]]:
@@ -135,7 +159,7 @@ def _template(store: ExpertCorpusStore, case_id: str) -> dict[str, Any]:
                 "case_id": row[0],
                 "material_id": row[4],
                 "dimension": "motivation",
-                "change_type": "rewrite",
+                "change_type": "rewritten",
                 "timecode_or_section": "ЗАПОЛНИТЬ: таймкод или раздел",
                 "claim_summary": "ЗАПОЛНИТЬ: краткий формализованный тезис эксперта",
                 "observation": "ЗАПОЛНИТЬ: наблюдаемый факт без оценки",
@@ -168,6 +192,7 @@ def _validate(store: ExpertCorpusStore, payload: dict[str, Any]) -> dict[str, in
         raise ExpertCorpusValidationError(
             "Annotation bundle не должен менять metadata pilot: " + ", ".join(sorted(forbidden))
         )
+    _reject_unfilled_placeholders(payload)
     store.conn.execute("BEGIN TRANSACTION")
     try:
         for row in claims:
